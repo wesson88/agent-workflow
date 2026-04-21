@@ -1,0 +1,43 @@
+# ── 敏感配置（绝不提交）─────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# ── Node / 前端 ────────────────────────────────────────────
+node_modules/
+meeting-chat/frontend/dist/
+meeting-chat/frontend/.vite/
+
+# ── 运行时日志 ────────────────────────────────────────────
+logs/
+
+# ── Claude 工作流运行时产物（仅排除运行时，保留框架本体）──
+.claude/audit.jsonl
+.claude/status.json
+.claude/instructions/
+.claude/skills/**/__pycache__/
+.claude/__pycache__/
+.claude/docs/system_design.md
+.claude/docs/api_spec.md
+
+# ── 编辑器 ─────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── 系统文件 ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
