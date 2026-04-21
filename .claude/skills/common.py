@@ -47,6 +47,9 @@ def get_docs_dir() -> Path:
 def get_requirements_dir() -> Path:
     return get_claude_root() / "requirements"
 
+def get_inputs_dir() -> Path:
+    return get_claude_root() / "inputs"
+
 def get_src_dir() -> Path:
     return get_project_root() / "src"
 

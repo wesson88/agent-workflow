@@ -31,6 +31,12 @@ logs/
 .claude/__pycache__/
 .claude/docs/system_design.md
 .claude/docs/api_spec.md
+.claude/requirements/PRD.md
+
+# ── 私密脑暴素材（不公开，模板和 README 保留）──
+.claude/inputs/*.md
+!.claude/inputs/*.example.md
+!.claude/inputs/README.md
 
 # ── 编辑器 ─────────────────────────────────────────────────
 .vscode/settings.json

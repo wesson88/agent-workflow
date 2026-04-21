@@ -46,10 +46,17 @@ workflow/                          ← 项目根目录（PROJECT_ROOT）
     │   ├── system_design.md       ← 运行时生成（chief_architect 输出）
     │   └── api_spec.md            ← 运行时生成（dev_backend 输出）
     │
+    ├── inputs/                    ← 脑暴素材目录（product_manager 的输入源）
+    │   ├── README.md                      ← 使用说明 + 命名约定
+    │   ├── business_brief.example.md      ← 业务简报模板
+    │   ├── business_brief.md              ← （用户可选）核心简报
+    │   ├── brainstorm-*.md                ← （用户可选）brainstorming 产出 / 其他模型脑暴
+    │   ├── meeting-*.md                   ← （用户可选）会议纪要 / 用户访谈
+    │   ├── research-*.md                  ← （用户可选）用户/市场调研
+    │   └── competitor-*.md                ← （用户可选）竞品分析
+    │
     ├── requirements/
-    │   ├── business_brief.example.md  ← 业务简报模板（复制为 business_brief.md 后填写）
-    │   ├── business_brief.md          ← 用户输入（可选，product_manager 优先读取）
-    │   └── PRD.md                     ← 运行时生成（product_manager 输出）
+    │   └── PRD.md                 ← 运行时生成（product_manager 输出，含『参考资料』章节相对链接回 ../inputs/）
     │
     └── instructions/              ← 技能间任务传递（运行时生成）
         ├── to_lead.md             ← chief_architect → technical_lead
@@ -70,11 +77,11 @@ workflow/                          ← 项目根目录（PROJECT_ROOT）
 ## 技能调用链
 
 ```
-[输入] requirements/business_brief.md（可选）+ TASK 环境变量
+[输入] inputs/*.md（business_brief / brainstorm-* / meeting-* / research-* / ...）+ TASK
           ↓
   product_manager/main.py
-  ├─ 读取：business_brief.md, tech_stack.md, status.json
-  └─ 输出：requirements/PRD.md
+  ├─ 读取：inputs/ 下全部 .md（综合多份素材）, tech_stack.md, status.json
+  └─ 输出：requirements/PRD.md（末尾的『参考资料』章节用相对链接指回 ../inputs/）
           ↓
   chief_architect/main.py
   ├─ 读取：PRD.md, tech_stack.md, arch_decomposition_rules.md, status.json
@@ -111,9 +118,16 @@ export ANTHROPIC_API_KEY="your-api-key"
 ```bash
 cd workflow
 
-# 首次使用：把业务简报模板复制一份并填写
-cp .claude/requirements/business_brief.example.md .claude/requirements/business_brief.md
-# 编辑 business_brief.md，写清楚产品定位、目标用户、核心能力
+# 首次使用：把脑暴素材放到 inputs/ 目录
+# 方式 A：复制业务简报模板，填写核心需求
+cp .claude/inputs/business_brief.example.md .claude/inputs/business_brief.md
+
+# 方式 B：把 superpowers brainstorming skill 的产出直接保存到 inputs/
+#   → .claude/inputs/brainstorm-mvp-scope.md
+
+# 方式 C：多份文件综合（简报 + 会议纪要 + 竞品调研...）
+#   → .claude/inputs/meeting-2026-04-20.md
+#   → .claude/inputs/competitor-trello.md
 
 # 方式一：运行完整链路（推荐）
 TASK="任务管理系统 MVP" python .claude/script/optimize_all.py
