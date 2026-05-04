@@ -28,6 +28,7 @@ from .state import (
     get_role_status, set_role_status, role_is_blocked,
     summarize_all_roles,
 )
+from . import runtime_state
 from .git_sync import (
     ensure_on_agent_branch, commit_and_push,
     open_or_update_pr, sync_after_run,
@@ -48,9 +49,9 @@ __all__ = [
     "update_frontmatter", "list_notes",
     # role_loader
     "Role", "load_role", "list_roles", "RoleNotFound",
-    # state
+    # state + runtime_state
     "get_role_status", "set_role_status", "role_is_blocked",
-    "summarize_all_roles",
+    "summarize_all_roles", "runtime_state",
     # git_sync
     "ensure_on_agent_branch", "commit_and_push",
     "open_or_update_pr", "sync_after_run",

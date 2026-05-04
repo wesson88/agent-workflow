@@ -14,6 +14,7 @@ obsidian_io.py — vault 文件读写工具（filesystem-only）。
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import time
@@ -23,6 +24,26 @@ from tempfile import NamedTemporaryFile
 from typing import Iterable
 
 from .config import VAULT_ROOT
+
+
+# ── ruamel.yaml round-trip 实例（用于 update_frontmatter，保留格式）──
+# split_frontmatter 仍用 PyYAML 做轻量解析；只有写入时才需要 round-trip。
+def _rt_yaml():
+    """懒加载 ruamel.yaml RoundTripLoader/Dumper 实例。
+
+    indent 配置匹配 vault 现有 frontmatter 风格：
+      skills:
+        - 系统设计    <- sequence 子项缩进 2，dash 前再缩进 2
+        - 模块划分
+    即 sequence=4, offset=2。
+    """
+    from ruamel.yaml import YAML
+    y = YAML(typ="rt")
+    y.preserve_quotes = True
+    y.indent(mapping=2, sequence=4, offset=2)
+    y.width = 4096          # 防止长行被自动折行
+    y.allow_unicode = True
+    return y
 
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
@@ -144,30 +165,51 @@ def split_frontmatter(content: str) -> tuple[dict, str]:
     return fm, body
 
 
+# 匹配开头 frontmatter 块；闭合 --- 后只吃**一个** \n（避免吞掉 body 起始的空行）
+_FRONTMATTER_BLOCK_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n", re.DOTALL)
+
+
 def update_frontmatter(
     rel_path: str | Path,
     updates: dict | None = None,
     *,
     delete_keys: Iterable[str] = (),
 ) -> Path:
-    """局部更新某笔记的 frontmatter。
+    """局部更新某笔记的 frontmatter，保留原始格式与注释。
 
-    - updates 中的键覆盖原值；新键追加
+    使用 ruamel.yaml 的 round-trip 模式：
+    - flow style（如 `aliases: [a, b]`）保持 flow
+    - block style（如多行 `- xxx`）保持 block
+    - 注释、空行、缩进保留
+    - 单字段更新只产生最小 diff
+
+    - updates 中的键覆盖原值；新键追加在末尾
     - delete_keys 中的键从 frontmatter 移除
     - body 完全保留（包括 DYNAMIC_START/END 等控制标记）
-    - YAML 输出用 default_flow_style=False、allow_unicode=True，列表逐行展开
     """
     content = read_note(rel_path)
-    fm, body = split_frontmatter(content)
+    m = _FRONTMATTER_BLOCK_RE.match(content)
+    if not m:
+        raise ValueError(f"{rel_path} 没有 frontmatter（缺少首尾 ---）")
+    fm_text = m.group(1)
+    body = content[m.end():]
+
+    yaml_rt = _rt_yaml()
+    data = yaml_rt.load(fm_text)
+    if data is None:
+        # 空 frontmatter，构造一个新映射
+        from ruamel.yaml.comments import CommentedMap
+        data = CommentedMap()
+
     if updates:
-        fm.update(updates)
+        for k, v in updates.items():
+            data[k] = v
     for k in delete_keys:
-        fm.pop(k, None)
-    new_fm_text = yaml.safe_dump(
-        fm,
-        allow_unicode=True,
-        default_flow_style=False,
-        sort_keys=False,
-    ).rstrip("\n")
+        if k in data:
+            del data[k]
+
+    buf = io.StringIO()
+    yaml_rt.dump(data, buf)
+    new_fm_text = buf.getvalue().rstrip("\n")
     new_content = f"---\n{new_fm_text}\n---\n{body}"
     return write_note(rel_path, new_content)

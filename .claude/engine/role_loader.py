@@ -24,6 +24,12 @@ class RoleNotFound(KeyError):
 
 @dataclass(frozen=True)
 class Role:
+    """角色"定义"，纯静态。
+
+    运行时状态（status / last_run / consecutive_failures / error_count
+    / last_output_path）拆到 `00-系统/.runtime-state/<role>.json`，
+    通过 engine.state 模块读写。Role 对象不再持有这些字段。
+    """
     # 标识
     name: str                          # frontmatter.role，中文角色名
     aliases: tuple[str, ...]           # frontmatter.aliases
@@ -46,12 +52,6 @@ class Role:
     # 输入输出（含 {project} 占位符的 vault 路径模板）
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
-
-    # 状态字段（运行时变化，加载时是当前快照）
-    status: str
-    last_run: str | None
-    consecutive_failures: int
-    error_count: int
 
     # 笔记正文（含 DYNAMIC 区域，未做替换）
     body: str
@@ -98,10 +98,6 @@ def _build_role(note_path: Path) -> Role:
         monitors=_seq(fm.get("monitors")),
         inputs=_seq(fm.get("inputs")),
         outputs=_seq(fm.get("outputs")),
-        status=str(fm.get("status", "idle")),
-        last_run=fm.get("last_run") if fm.get("last_run") is not None else None,
-        consecutive_failures=int(fm.get("consecutive_failures", 0)),
-        error_count=int(fm.get("error_count", 0)),
         body=body,
         frontmatter=fm,
     )

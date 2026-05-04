@@ -26,7 +26,7 @@ from engine import (
     VAULT_ROOT, PROJECT_NAME,
     role_genes_dir, rules_dir, project_dir,
     list_roles, load_role, RoleNotFound,
-    summarize_all_roles,
+    get_role_status, summarize_all_roles,
     read_note, write_note, append_to_note, update_frontmatter,
     list_notes,
 )
@@ -51,12 +51,19 @@ def main() -> int:
     assert (rules_dir() / "技术栈.md").exists(), "技术栈.md 缺失"
     assert (rules_dir() / "架构分解规则.md").exists(), "架构分解规则.md 缺失"
 
-    title("[2] role_loader：加载所有角色")
+    title("[2] role_loader：加载所有角色（Role 仅含静态定义）")
     roles = list_roles()
     assert len(roles) == 5, f"期望 5 个角色，实际 {len(roles)}"
     print(f"加载到 {len(roles)} 个角色：")
     for r in roles:
-        print(f"  - [{r.status:<11}] {r.name} (max_tokens={r.max_tokens})  ← {','.join(r.upstream) or 'null'} → {','.join(r.downstream) or '[]'}")
+        st = get_role_status(r.name)
+        print(
+            f"  - [{st['status']:<11}] {r.name} "
+            f"(model={r.model}, max_tokens={r.max_tokens})  "
+            f"← {','.join(r.upstream) or 'null'} → {','.join(r.downstream) or '[]'}"
+        )
+        # 确保 Role 不再含运行时字段
+        assert not hasattr(r, "status"), f"{r.name}: Role 不应有 status 属性"
         # 确保正文里 DYNAMIC 标记保留
         assert "<!-- DYNAMIC_START -->" in r.body, f"{r.name} 缺少 DYNAMIC_START"
         assert "<!-- DYNAMIC_END -->" in r.body, f"{r.name} 缺少 DYNAMIC_END"
@@ -71,8 +78,8 @@ def main() -> int:
 
     by_arch = load_role("chief_architect")
     assert by_arch.name == "架构师"
-    assert by_arch.status == "monitoring"
-    print(f"chief_architect → {by_arch.name}（status={by_arch.status}）")
+    arch_status = get_role_status("架构师")["status"]
+    print(f"chief_architect → {by_arch.name}（runtime status={arch_status}）")
 
     title("[4] role_loader：未知名查找应抛 RoleNotFound")
     try:

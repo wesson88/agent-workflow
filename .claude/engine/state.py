@@ -1,11 +1,17 @@
 """
-state.py — 角色状态聚合，替代旧的 status.json。
+state.py — 角色状态聚合，状态机语义层
 
-每个角色的状态字段（status / last_run / consecutive_failures / error_count）
-都直接存在角色笔记的 frontmatter 中。本模块提供统一读写接口，并在写入后
-失效 role_loader 的缓存以保证下次 load_role 拿到最新值。
+Phase 2b 起，运行时字段（status / last_run / consecutive_failures / error_count
+/ last_output_path）实际存储在 `00-系统/.runtime-state/<role>.json`，
+由 runtime_state.py 持久化；本文件提供状态机语义包装。
 
-状态机（沿用旧版语义）：
+外部 API（兼容 Phase 2b 调用方）：
+- get_role_status(role_name_or_alias) -> dict
+- set_role_status(role_name_or_alias, **fields)
+- role_is_blocked(role_name_or_alias) -> bool
+- summarize_all_roles() -> list[dict]
+
+状态机：
     idle ──> busy ──> success ──> idle
                  └─> failed ──> busy   （重试）
                             └─> idle   （人工/复盘 agent 重置）
@@ -16,11 +22,9 @@ state.py — 角色状态聚合，替代旧的 status.json。
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
-from . import role_loader
-from .obsidian_io import update_frontmatter
+from . import role_loader, runtime_state
 
 
 ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
@@ -33,39 +37,36 @@ ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
 # ── 读 ───────────────────────────────────────────────────
 def get_role_status(name_or_alias: str) -> dict[str, Any]:
-    """返回 {status, last_run, consecutive_failures, error_count}。"""
+    """返回 {status, last_run, consecutive_failures, error_count, last_output_path}。
+
+    把 alias 解析为 frontmatter 的 role 字段值（中文名），
+    再从 runtime_state 文件读取。
+    """
     role = role_loader.load_role(name_or_alias)
-    return {
-        "status": role.status,
-        "last_run": role.last_run,
-        "consecutive_failures": role.consecutive_failures,
-        "error_count": role.error_count,
-    }
+    return runtime_state.load(role.name)
 
 
 def role_is_blocked(name_or_alias: str) -> bool:
-    return get_role_status(name_or_alias)["status"] == "blocked"
+    return get_role_status(name_or_alias).get("status") == "blocked"
 
 
 def summarize_all_roles() -> list[dict[str, Any]]:
-    """汇总所有角色的状态快照，方便日志/CLI 输出。"""
-    return [
-        {
+    """汇总所有角色的状态快照（定义来自角色笔记，运行时来自 runtime_state）。"""
+    out: list[dict[str, Any]] = []
+    for r in role_loader.list_roles():
+        st = runtime_state.load(r.name)
+        out.append({
             "role": r.name,
-            "status": r.status,
-            "last_run": r.last_run,
-            "consecutive_failures": r.consecutive_failures,
-            "error_count": r.error_count,
+            "model": r.model,
+            "status": st.get("status"),
+            "last_run": st.get("last_run"),
+            "consecutive_failures": st.get("consecutive_failures"),
+            "error_count": st.get("error_count"),
             "downstream": list(r.downstream),
-        }
-        for r in role_loader.list_roles()
-    ]
+        })
+    return out
 
 
 # ── 写 ───────────────────────────────────────────────────
@@ -82,39 +83,38 @@ def set_role_status(
 ) -> None:
     """统一的状态写入入口。
 
-    - status：目标状态。若 enforce_transition 为 True，从当前状态转换必须合法
+    - status：目标状态。enforce_transition=True 时校验状态机合法性
     - increment_error / increment_consecutive_failures：原子地 +1
-    - reset_counters：把 consecutive_failures 和 error_count 都清零
-      （用于 success → idle）
-    - last_output_path：可选，用于 dev_backend / dev_frontend 写代码后回填
-    - extra：兜底字典，额外要写入 frontmatter 的字段（如 last_patch_timestamp）
+    - reset_counters：consecutive_failures 与 error_count 都清零
+    - last_output_path：dev_backend / dev_frontend 写代码后的产出根路径
+    - extra：兜底字典，额外要写入运行时状态的字段
     """
     role = role_loader.load_role(name_or_alias)
-    updates: dict[str, Any] = {}
+    current = runtime_state.load(role.name)
+    patch: dict[str, Any] = {}
 
     if status is not None:
         if enforce_transition:
-            allowed = ALLOWED_TRANSITIONS.get(role.status, ())
-            if status not in allowed and status != role.status:
+            allowed = ALLOWED_TRANSITIONS.get(current.get("status", "idle"), ())
+            if status not in allowed and status != current.get("status"):
                 raise ValueError(
-                    f"非法状态转换：{role.name} {role.status} → {status}"
+                    f"非法状态转换：{role.name} {current.get('status')} → {status}"
                     f"（合法：{allowed}）"
                 )
-        updates["status"] = status
+        patch["status"] = status
 
     if reset_counters:
-        updates["consecutive_failures"] = 0
-        updates["error_count"] = 0
+        patch["consecutive_failures"] = 0
+        patch["error_count"] = 0
     if increment_consecutive_failures:
-        updates["consecutive_failures"] = role.consecutive_failures + 1
+        patch["consecutive_failures"] = current.get("consecutive_failures", 0) + 1
     if increment_error:
-        updates["error_count"] = role.error_count + 1
+        patch["error_count"] = current.get("error_count", 0) + 1
     if last_output_path is not None:
-        updates["last_output_path"] = last_output_path
+        patch["last_output_path"] = last_output_path
 
-    updates["last_run"] = _utc_now()
+    patch["last_run"] = runtime_state.utc_now()
     if extra:
-        updates.update(extra)
+        patch.update(extra)
 
-    update_frontmatter(role.note_path, updates)
-    role_loader.invalidate_cache()
+    runtime_state.update(role.name, **patch)
