@@ -1,0 +1,121 @@
+# engine/llm_providers.yaml
+#
+# 各 LLM provider 的 API + CLI 双轨配置，由 engine/llm.py 加载。
+# Key（如 `claude-sonnet-4-6`）= 角色 frontmatter 中的 `model:` 字段值。
+#
+# Schema：
+#   mode:    dual_track / api_only / cli_only
+#   prefer:  auto / api / cli  （仅 dual_track 有效；auto = api 优先，回退 cli）
+#   api:
+#     kind:     anthropic / openai_compat
+#     key_env:  存放 API key 的环境变量名
+#     model:    传给 API 的实际 model id
+#     base_url: 可选；OpenAI 兼容 SDK 用此重定向到 DeepSeek/Ollama 等
+#   cli:
+#     path:                          CLI 可执行文件名（PATH 中查找）
+#     model:                         传给 CLI 的 --model 参数值
+#     output_format:                 stream-json / plain
+#     extra_args:                    其他必传 flag
+#     use_system_prompt_flag:        true → 用 --system-prompt 替换默认；
+#                                    false → 把 system prompt inline 进 user input
+#                                    （inline 易被识别为 prompt injection，避免）
+
+# ── Claude（默认）─────────────────────────────────────────
+claude-sonnet-4-6:
+  mode: dual_track
+  prefer: auto
+  api:
+    kind: anthropic
+    key_env: ANTHROPIC_API_KEY
+    model: claude-sonnet-4-6
+  cli:
+    path: claude
+    model: claude-sonnet-4-6
+    output_format: stream-json
+    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--tools", ""]
+    use_system_prompt_flag: true
+
+claude-opus-4-7:
+  mode: dual_track
+  prefer: auto
+  api:
+    kind: anthropic
+    key_env: ANTHROPIC_API_KEY
+    model: claude-opus-4-7
+  cli:
+    path: claude
+    model: claude-opus-4-7
+    output_format: stream-json
+    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--tools", ""]
+    use_system_prompt_flag: true
+
+claude-haiku-4-5:
+  mode: dual_track
+  prefer: auto
+  api:
+    kind: anthropic
+    key_env: ANTHROPIC_API_KEY
+    model: claude-haiku-4-5
+  cli:
+    path: claude
+    model: claude-haiku-4-5
+    output_format: stream-json
+    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--tools", ""]
+    use_system_prompt_flag: true
+
+# ── DeepSeek（OpenAI 兼容）────────────────────────────────
+# 启用前需在 .env 中设置 DEEPSEEK_API_KEY=sk-...
+deepseek-v3:
+  mode: api_only
+  api:
+    kind: openai_compat
+    key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+
+deepseek-reasoner:
+  mode: api_only
+  api:
+    kind: openai_compat
+    key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    model: deepseek-reasoner
+
+# ── OpenAI ────────────────────────────────────────────────
+# 启用前需在 .env 中设置 OPENAI_API_KEY=sk-...
+gpt-4o:
+  mode: api_only
+  api:
+    kind: openai_compat
+    key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    model: gpt-4o
+
+gpt-4o-mini:
+  mode: api_only
+  api:
+    kind: openai_compat
+    key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+
+# ── Gemini CLI（仅 CLI，无官方 OpenAI 兼容端点）───────────
+# 启用前需安装 gemini CLI 工具
+gemini-pro:
+  mode: cli_only
+  cli:
+    path: gemini
+    model: gemini-2.0-pro
+    output_format: plain
+    extra_args: []
+    use_system_prompt_flag: false   # gemini cli 没有 --system-prompt，inline
+
+# ── Ollama（本地）─────────────────────────────────────────
+# 默认监听 http://localhost:11434/v1，OpenAI 兼容
+ollama-llama3:
+  mode: api_only
+  api:
+    kind: openai_compat
+    key_env: OLLAMA_API_KEY      # ollama 无需 key，但 SDK 要求传一个非空字符串
+    base_url: http://localhost:11434/v1
+    model: llama3

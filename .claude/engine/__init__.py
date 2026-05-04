@@ -33,8 +33,9 @@ from .git_sync import (
     open_or_update_pr, sync_after_run,
 )
 from .llm import (
-    call_claude as llm_call_claude,
-    is_api_available, is_cli_available,
+    call_llm, call_claude as llm_call_claude,
+    get_provider, list_providers, is_provider_available,
+    reload_providers, is_api_available, is_cli_available,
 )
 
 __all__ = [
@@ -54,5 +55,7 @@ __all__ = [
     "ensure_on_agent_branch", "commit_and_push",
     "open_or_update_pr", "sync_after_run",
     # llm
-    "llm_call_claude", "is_api_available", "is_cli_available",
+    "call_llm", "llm_call_claude",
+    "get_provider", "list_providers", "is_provider_available",
+    "reload_providers", "is_api_available", "is_cli_available",
 ]
