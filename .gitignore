@@ -29,9 +29,15 @@ logs/
 .claude/instructions/
 .claude/skills/**/__pycache__/
 .claude/__pycache__/
+.claude/engine/__pycache__/
 .claude/docs/system_design.md
 .claude/docs/api_spec.md
 .claude/requirements/PRD.md
+
+# Phase 2b 起：dev_backend / dev_frontend 写代码到仓根 src/ tests/，
+# 这些是工作流的产出（每个项目一份），不应入引擎仓
+/src/
+/tests/
 
 # ── 私密脑暴素材（不公开，模板和 README 保留）──
 .claude/inputs/*.md

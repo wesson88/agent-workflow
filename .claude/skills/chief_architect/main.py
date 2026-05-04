@@ -1,8 +1,22 @@
 """
-chief_architect/main.py
-首席架构师执行层：读取 PRD，生成系统设计文档和技术主管任务指派
+chief_architect/main.py — 首席架构师执行入口（Phase 2b vault-based）
+
+输入（vault）：
+  - 10-项目/{project}/PRD.md          产品需求文档
+  - 00-系统/规则/技术栈.md             技术栈约束
+  - 00-系统/规则/架构分解规则.md       分解方法论
+
+输出（vault）：
+  - 10-项目/{project}/系统设计.md
+  - 10-项目/{project}/指令/给技术主管.md
+
+CLI：
+  python .claude/skills/chief_architect/main.py --task "..." --project myproj
 """
 
+from __future__ import annotations
+
+import os
 import sys
 from pathlib import Path
 
@@ -11,80 +25,118 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import (
     parse_args, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
-    update_skill_status, append_audit, utc_now,
-    get_claude_root, get_project_root, call_claude,
-    get_docs_dir, get_requirements_dir, get_instructions_dir,
+    call_claude, append_audit, utc_now, render_required_outputs,
+)
+from engine import (
+    set_role_status, role_is_blocked,
+    project_dir, rules_dir, resolve_path,
 )
 
-SKILL_NAME = "chief_architect"
+ROLE = "架构师"
 
 
-def main():
+def _resolve_project(args) -> str:
+    return (
+        args.project
+        or os.environ.get("PROJECT")
+        or os.environ.get("PROJECT_NAME")
+        or "default"
+    ).strip() or "default"
+
+
+def main() -> int:
     args = parse_args()
-    task = args.task
+    task = (args.task or "").strip()
+    project = _resolve_project(args)
 
-    update_skill_status(SKILL_NAME, {"status": "busy"})
+    if role_is_blocked(ROLE):
+        print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
+        return 1
 
-    claude_root = get_claude_root()
-    project_root = get_project_root()
+    set_role_status(ROLE, status="busy", enforce_transition=False)
 
-    # system prompt：本技能 skill.md（已含自身 DYNAMIC 区域）+ 输出格式规范
-    system_prompt = build_system_prompt(SKILL_NAME)
+    proj_dir = project_dir(project)
+    prd = proj_dir / "PRD.md"
+    tech_stack = rules_dir() / "技术栈.md"
+    decomp_rules = rules_dir() / "架构分解规则.md"
 
-    # user prompt：合并输入文件
-    input_files = [
-        get_requirements_dir() / "PRD.md",
-        get_docs_dir() / "tech_stack.md",
-        get_docs_dir() / "rules" / "arch_decomposition_rules.md",
-        claude_root / "status.json",
-    ]
-    context = read_input_files(input_files)
-    user_prompt = f"{context}\n\n---\n任务指令：{task}\n\n请严格按照你的角色职责和输出格式规范，生成系统设计文档和技术主管任务指派。"
+    if not prd.exists():
+        print(
+            f"[{ROLE}] PRD 缺失：{prd}。请先跑产品经理生成 PRD。",
+            file=sys.stderr,
+        )
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
+        append_audit({
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed", "error": "missing_prd",
+        })
+        return 2
+
+    system_prompt = build_system_prompt(ROLE, project=project)
+    context = read_input_files([prd, tech_stack, decomp_rules])
+
+    user_prompt = (
+        f"项目名：`{project}`\n\n"
+        f"{context}\n\n---\n"
+        f"本轮任务：{task or '按 PRD 完成架构分解'}\n\n"
+        "请严格遵循『架构分解规则.md』中的 8 步流程，产出两份文件：\n"
+        "  1. **系统设计**：含架构图、模块划分、数据流、API 契约；模块按业务域划分；技术选型严格对照技术栈\n"
+        "  2. **给技术主管的任务清单**：每项标注归属角色（后端/前端）、输入输出、验收标准、工作量（不超过 4 小时）\n\n"
+        "技术栈约束严格按 `00-系统/规则/技术栈.md`，禁止引入未授权的库。"
+        + render_required_outputs([
+            f"10-项目/{project}/系统设计.md",
+            f"10-项目/{project}/指令/给技术主管.md",
+        ])
+    )
 
     try:
-        raw_output = call_claude(system_prompt, user_prompt, SKILL_NAME)
+        raw_output = call_claude(system_prompt, user_prompt, ROLE)
     except Exception as e:
-        print(f"[{SKILL_NAME}] Claude API 调用失败: {e}", file=sys.stderr)
-        update_skill_status(SKILL_NAME, {"status": "failed"})
+        print(f"[{ROLE}] Claude API 调用失败：{e}", file=sys.stderr)
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
         append_audit({
-            "timestamp": utc_now(),
-            "skill": SKILL_NAME,
-            "task": task,
-            "action": "skill_run",
-            "result": "failed",
-            "error": str(e),
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed", "error": str(e),
         })
-        sys.exit(1)
+        return 1
 
-    # 解析输出中的 FILE 块
     output_files = parse_claude_output_to_files(raw_output)
-
     if not output_files:
-        # 降级：将全部输出写入 system_design.md
-        print(f"[{SKILL_NAME}] 未检测到 FILE 标签，降级写入 docs/system_design.md")
-        dest = get_docs_dir() / "system_design.md"
+        # 降级：整体写入系统设计.md
+        dest = proj_dir / "系统设计.md"
         write_output_atomic(dest, raw_output)
-        written = ["docs/system_design.md"]
+        written = [f"10-项目/{project}/系统设计.md"]
+        print(f"[{ROLE}] 未检测到 FILE 标签，降级写入 {dest}")
     else:
         written = []
         for rel_path, content in output_files.items():
-            dest = project_root / rel_path
+            rel_resolved = rel_path.replace("{project}", project)
+            dest = resolve_path(rel_resolved, project)
             write_output_atomic(dest, content)
-            print(f"[{SKILL_NAME}] 写入: {dest}")
-            written.append(rel_path)
+            print(f"[{ROLE}] 写入: {dest}")
+            written.append(rel_resolved)
 
-    update_skill_status(SKILL_NAME, {"status": "success", "consecutive_failures": 0})
+    # 架构师 status 保持 monitoring（角色基因里的初始值），
+    # 仅刷新 last_run + 重置失败计数；不强行转 idle，否则破坏 monitoring 语义
+    set_role_status(
+        ROLE, status="monitoring",
+        reset_counters=True, enforce_transition=False,
+    )
     append_audit({
-        "timestamp": utc_now(),
-        "skill": SKILL_NAME,
-        "task": task,
-        "action": "skill_run",
-        "result": "success",
-        "outputs": written,
+        "timestamp": utc_now(), "role": ROLE, "project": project,
+        "task": task, "result": "success", "outputs": written,
     })
-    print(f"[{SKILL_NAME}] 完成，输出文件: {written}")
-    sys.exit(0)
+    print(f"[{ROLE}] 完成，输出：{written}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

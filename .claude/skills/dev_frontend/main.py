@@ -1,8 +1,24 @@
 """
-dev_frontend/main.py
-前端开发工程师执行层：读取前端任务指派，生成 UI 组件、状态管理和测试
+dev_frontend/main.py — 前端工程师执行入口（Phase 2b vault-based）
+
+输入（vault）：
+  - 10-项目/{project}/指令/给前端.md   技术主管下发的任务
+  - 10-项目/{project}/PRD.md            产品需求
+  - 10-项目/{project}/系统设计.md       系统设计
+  - 10-项目/{project}/API契约.md        后端 API（若已有）
+  - 00-系统/规则/技术栈.md               技术栈
+
+输出：
+  - src/frontend/                 ← 项目仓内（不进 vault）
+  - tests/frontend/               ← 项目仓内（不进 vault）
+
+CLI：
+  python .claude/skills/dev_frontend/main.py --task "..." --project myproj
 """
 
+from __future__ import annotations
+
+import os
 import sys
 from pathlib import Path
 
@@ -11,85 +27,127 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import (
     parse_args, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
-    update_skill_status, append_audit, utc_now,
-    get_claude_root, get_project_root, call_claude,
-    get_docs_dir, get_instructions_dir, get_requirements_dir,
+    call_claude, append_audit, utc_now, render_required_outputs,
+)
+from engine import (
+    set_role_status, role_is_blocked,
+    project_dir, rules_dir, resolve_path, PROJECT_ROOT,
 )
 
-SKILL_NAME = "dev_frontend"
+ROLE = "前端工程师"
 
 
-def main():
+def _resolve_project(args) -> str:
+    return (
+        args.project
+        or os.environ.get("PROJECT")
+        or os.environ.get("PROJECT_NAME")
+        or "default"
+    ).strip() or "default"
+
+
+def main() -> int:
     args = parse_args()
-    task = args.task
+    task = (args.task or "").strip()
+    project = _resolve_project(args)
 
-    update_skill_status(SKILL_NAME, {"status": "busy"})
+    if role_is_blocked(ROLE):
+        print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
+        return 1
 
-    project_root = get_project_root()
+    set_role_status(ROLE, status="busy", enforce_transition=False)
 
-    # system prompt：本技能 skill.md + 上游 technical_lead 的动态补丁 + 输出格式规范
-    system_prompt = build_system_prompt(SKILL_NAME, upstream_skill="technical_lead")
+    proj_dir = project_dir(project)
+    to_frontend = proj_dir / "指令" / "给前端.md"
+    prd = proj_dir / "PRD.md"
+    sys_design = proj_dir / "系统设计.md"
+    api_spec = proj_dir / "API契约.md"     # 可选（后端先跑则有）
+    tech_stack = rules_dir() / "技术栈.md"
 
-    input_files = [
-        get_requirements_dir() / "PRD.md",
-        get_instructions_dir() / "to_frontend.md",
-        get_docs_dir() / "system_design.md",
-        get_docs_dir() / "tech_stack.md",
-    ]
-    context = read_input_files(input_files)
+    if not to_frontend.exists() or not sys_design.exists():
+        print(
+            f"[{ROLE}] 必需输入缺失：{to_frontend} 或 {sys_design}。请先跑技术主管。",
+            file=sys.stderr,
+        )
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
+        append_audit({
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed", "error": "missing_inputs",
+        })
+        return 2
+
+    system_prompt = build_system_prompt(ROLE, project=project)
+    context = read_input_files([prd, to_frontend, sys_design, api_spec, tech_stack])
+
     user_prompt = (
-        f"{context}\n\n---\n任务指令：{task}\n\n"
-        "请根据前端任务指派和系统设计，生成完整的前端代码文件（src/frontend/ 目录下），"
-        "包括 HTML 页面、CSS 样式、JavaScript 逻辑，以及必要的组件文件。"
-        "如有必要，同时生成 tests/frontend/ 下的测试文件。"
+        f"项目名：`{project}`\n\n"
+        f"{context}\n\n---\n"
+        f"本轮任务：{task or '按指令实现前端代码'}\n\n"
+        "请按指令清单完整实现前端：\n"
+        "  - 入口 HTML + 主 JS：`src/frontend/index.html`、`src/frontend/app.js`\n"
+        "  - 公共组件：`src/frontend/components/...`\n"
+        "  - 页面：`src/frontend/pages/...`\n"
+        "  - 状态管理：`src/frontend/store/...`\n"
+        "  - 样式：`src/frontend/styles/...`\n"
+        "  - 测试：`tests/frontend/...`\n\n"
+        "技术栈严格按 `00-系统/规则/技术栈.md`；需含全局 Error Boundary、"
+        "loading/error 状态、响应式适配。\n"
+        + render_required_outputs([
+            "src/frontend/index.html",
+            "src/frontend/app.js",
+            "src/frontend/styles/main.css",
+            "tests/frontend/test_<x>.js",
+        ])
+        + "\n上面是路径**示例**；请根据指令清单中的实际功能划分产出对应文件，每个文件用一个 FILE 块。"
     )
 
     try:
-        raw_output = call_claude(system_prompt, user_prompt, SKILL_NAME)
+        raw_output = call_claude(system_prompt, user_prompt, ROLE)
     except Exception as e:
-        print(f"[{SKILL_NAME}] Claude API 调用失败: {e}", file=sys.stderr)
-        update_skill_status(SKILL_NAME, {"status": "failed"})
+        print(f"[{ROLE}] Claude API 调用失败：{e}", file=sys.stderr)
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
         append_audit({
-            "timestamp": utc_now(),
-            "skill": SKILL_NAME,
-            "task": task,
-            "action": "skill_run",
-            "result": "failed",
-            "error": str(e),
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed", "error": str(e),
         })
-        sys.exit(1)
+        return 1
 
     output_files = parse_claude_output_to_files(raw_output)
-
     if not output_files:
-        print(f"[{SKILL_NAME}] 未检测到 FILE 标签，降级写入 src/frontend/index.html")
-        dest = project_root / "src" / "frontend" / "index.html"
+        # 降级：整体写入 src/frontend/index.html
+        dest = PROJECT_ROOT / "src" / "frontend" / "index.html"
         write_output_atomic(dest, raw_output)
         written = ["src/frontend/index.html"]
+        print(f"[{ROLE}] 未检测到 FILE 标签，降级写入 {dest}")
     else:
         written = []
         for rel_path, content in output_files.items():
-            dest = project_root / rel_path
+            rel_resolved = rel_path.replace("{project}", project)
+            dest = resolve_path(rel_resolved, project)
             write_output_atomic(dest, content)
-            print(f"[{SKILL_NAME}] 写入: {dest}")
-            written.append(rel_path)
+            print(f"[{ROLE}] 写入: {dest}")
+            written.append(rel_resolved)
 
-    update_skill_status(SKILL_NAME, {
-        "status": "success",
-        "consecutive_failures": 0,
-        "last_output_path": "src/frontend/",
-    })
+    set_role_status(
+        ROLE, status="success",
+        reset_counters=True, last_output_path="src/frontend/",
+    )
+    set_role_status(ROLE, status="idle")
     append_audit({
-        "timestamp": utc_now(),
-        "skill": SKILL_NAME,
-        "task": task,
-        "action": "skill_run",
-        "result": "success",
-        "outputs": written,
+        "timestamp": utc_now(), "role": ROLE, "project": project,
+        "task": task, "result": "success", "outputs": written,
     })
-    print(f"[{SKILL_NAME}] 完成，输出文件: {written}")
-    sys.exit(0)
+    print(f"[{ROLE}] 完成，输出：{written}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
