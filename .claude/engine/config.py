@@ -107,21 +107,25 @@ def workflow_template_dir() -> Path:
 
 
 # ── 路径模板解析 ─────────────────────────────────────────
-# 角色笔记的 inputs/outputs 字段使用以下三种路径形式之一：
-#   1. "10-项目/{project}/PRD.md"   → vault 内（最常见）
+# 角色笔记 / Claude 输出的路径形式：
+#   1. "10-项目/{project}/PRD.md"   → vault 内（项目产出）
 #   2. "00-系统/规则/技术栈.md"      → vault 内（全局规则）
-#   3. "src/backend/" / "tests/"   → 项目仓内（代码产出，不进 vault）
-# resolve_path 自动识别归属并返回绝对路径。
+#   3. "src/backend/main.py"       → 项目仓内（代码）
+#   4. "pytest.ini" / "package.json" → 项目仓内（仓根配置文件，无目录前缀）
+#
+# 判定规则（从严判定 vault 归属，避免裸文件名被误投放到 vault）：
+# - 路径以已知 vault 前缀开头 → vault
+# - 其余 → 项目仓
 
-_REPO_RELATIVE_PREFIXES = ("src/", "tests/", "dist/", "src\\", "tests\\", "dist\\")
+_VAULT_PREFIXES = ("00-系统", "10-项目", "20-知识", "99-临时")
 
 
 def resolve_path(path_template: str, project: str | None = None) -> Path:
-    """把角色 frontmatter 里的路径模板解析为绝对路径。
+    """把角色 frontmatter / Claude 输出的路径模板解析为绝对路径。
 
     - {project} 占位符替换为传入的 project（缺省用 PROJECT_NAME）
-    - 以 src/ tests/ dist/ 开头 → 项目仓相对路径（PROJECT_ROOT / ...）
-    - 其余 → vault 相对路径（VAULT_ROOT / ...）
+    - vault 路径必须以 `00-系统` / `10-项目` / `20-知识` / `99-临时` 开头
+    - 其他一律视为项目仓路径（`src/...`、`tests/...`、`pytest.ini`、`package.json` 等）
     - 末尾的 '/' 会被剥离，便于 Path 正常拼接
     """
     name = (project or PROJECT_NAME).strip() or "default"
@@ -129,6 +133,7 @@ def resolve_path(path_template: str, project: str | None = None) -> Path:
     if not expanded:
         raise ValueError(f"路径模板为空：{path_template!r}")
     norm = expanded.replace("\\", "/")
-    if any(norm.startswith(p.rstrip("/")) for p in _REPO_RELATIVE_PREFIXES):
-        return (PROJECT_ROOT / expanded).resolve()
-    return (VAULT_ROOT / expanded).resolve()
+    head = norm.split("/", 1)[0]
+    if head in _VAULT_PREFIXES:
+        return (VAULT_ROOT / expanded).resolve()
+    return (PROJECT_ROOT / expanded).resolve()
