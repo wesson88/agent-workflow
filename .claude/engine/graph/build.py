@@ -2,7 +2,8 @@
 graph/build.py — 从 vault workflow template 构建 LangGraph
 
 Phase 4a：仅支持 type=linear 步骤，构建线性 chain。
-Phase 4b：扩展支持 discussion-loop / parallel 节点类型。
+Phase 4b：支持 type=discussion，把多角色讨论 subgraph 作为父图的一个 node。
+未来：parallel / 自定义条件路由由各 step 类型对应的 make_*_node 决定。
 """
 
 from __future__ import annotations
@@ -10,8 +11,8 @@ from __future__ import annotations
 from langgraph.graph import StateGraph, START, END
 
 from ..role_loader import load_role
-from ..workflow import WorkflowTemplate, role_to_skill_dir
-from .nodes import make_role_node
+from ..workflow import WorkflowTemplate, WorkflowStep, role_to_skill_dir
+from .nodes import make_role_node, make_discussion_node
 from .state import ProjectState
 
 
@@ -19,22 +20,64 @@ def _normalize(name_or_alias: str) -> str:
     return load_role(name_or_alias).name
 
 
-def _slice_chain(chain: list[str], start_from: str | None, end_at: str | None) -> list[str]:
+def _step_node_key(step: WorkflowStep, idx: int) -> str:
+    """生成 LangGraph 内部唯一节点名。type=linear 用 skill_dir，type=discussion 用名字。"""
+    if step.type == "linear":
+        return f"step_{idx:02d}_{role_to_skill_dir(_normalize(step.role))}"
+    if step.type == "discussion":
+        # 中文名转 ASCII 替代字符以避免 graph key 问题
+        safe = (step.name or "discussion").replace(" ", "_").replace("/", "_")
+        return f"step_{idx:02d}_disc_{safe}"
+    raise NotImplementedError(
+        f"工作流步骤 type='{step.type}' 暂不支持。Phase 4b 支持 linear / discussion。"
+    )
+
+
+def _step_match_role(step: WorkflowStep, target_role: str) -> bool:
+    """步骤是否匹配某个角色名（用于 --start-from / --end-at）。"""
+    if step.type == "linear":
+        return _normalize(step.role) == target_role
+    if step.type == "discussion":
+        # 讨论步骤：参与者中含目标角色就算匹配
+        return any(_normalize(r) == target_role for r in step.roles)
+    return False
+
+
+def _slice_steps(
+    steps: tuple[WorkflowStep, ...],
+    start_from: str | None,
+    end_at: str | None,
+) -> list[WorkflowStep]:
+    out = list(steps)
     if start_from:
         target = _normalize(start_from)
-        try:
-            idx = chain.index(target)
-        except ValueError:
-            raise ValueError(f"--start-from='{start_from}' 不在工作流链路中：{chain}")
-        chain = chain[idx:]
+        for i, s in enumerate(out):
+            if _step_match_role(s, target):
+                out = out[i:]
+                break
+        else:
+            raise ValueError(
+                f"--start-from='{start_from}' 不在工作流任何步骤的参与者中"
+            )
     if end_at:
         target = _normalize(end_at)
-        try:
-            idx = chain.index(target)
-        except ValueError:
-            raise ValueError(f"--end-at='{end_at}' 不在工作流链路中：{chain}")
-        chain = chain[: idx + 1]
-    return chain
+        for i in range(len(out) - 1, -1, -1):
+            if _step_match_role(out[i], target):
+                out = out[: i + 1]
+                break
+        else:
+            raise ValueError(
+                f"--end-at='{end_at}' 不在工作流任何步骤的参与者中"
+            )
+    return out
+
+
+def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool):
+    if step.type == "linear":
+        return make_role_node(_normalize(step.role), halt_on_failure)
+    if step.type == "discussion":
+        return make_discussion_node(step, halt_on_failure)
+    raise NotImplementedError(f"未知步骤类型：{step.type}")
 
 
 def build_graph(
@@ -46,28 +89,23 @@ def build_graph(
     """从工作流模板构建可 invoke 的 StateGraph。
 
     返回 compile 后的 graph，调用 `.invoke(initial_state)` 执行。
-    Phase 4a 仅支持线性；模板包含 parallel / discussion-loop 时由 linear_role_names 抛错。
+    Phase 4b 支持 type=linear 与 type=discussion 混合的步骤序列。
     """
-    chain = [_normalize(r) for r in template.linear_role_names()]
-    chain = _slice_chain(chain, start_from, end_at)
-
-    if not chain:
+    sliced = _slice_steps(template.steps, start_from, end_at)
+    if not sliced:
         raise ValueError("链路裁剪后为空")
 
     g = StateGraph(ProjectState)
 
-    # 加 node：用 skill_dir 做唯一名（角色名可能含中文不利于 graph 内部 key）
     node_keys: list[str] = []
-    for role in chain:
-        skill_dir = role_to_skill_dir(role)
-        node_key = f"step_{skill_dir}"
-        # 防止重复（同一角色被裁剪两次出现的极端情况）
-        if node_key in node_keys:
+    for idx, step in enumerate(sliced):
+        key = _step_node_key(step, idx)
+        # 防止重复（极少见，但保护一下）
+        if key in node_keys:
             continue
-        g.add_node(node_key, make_role_node(role, template.halt_on_failure))
-        node_keys.append(node_key)
+        g.add_node(key, _make_node_for_step(step, template.halt_on_failure))
+        node_keys.append(key)
 
-    # 线性边：START → 第1 → 第2 → ... → END
     g.add_edge(START, node_keys[0])
     for i in range(len(node_keys) - 1):
         g.add_edge(node_keys[i], node_keys[i + 1])

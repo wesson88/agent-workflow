@@ -35,14 +35,25 @@ _WORKFLOW_PREFIX = "工作流-"
 class WorkflowStep:
     """工作流的一个步骤。
 
-    type=linear: 单角色顺序执行（Phase 3a 唯一支持）
-    type=parallel: 多角色并发（Phase 4+）
-    type=discussion-loop: 多角色循环对话（Phase 4+）
+    type=linear: 单角色顺序执行（Phase 3a 起支持）
+    type=discussion: 多角色辩论（Phase 4b 起支持）
+    type=parallel: 多角色并发（未实现）
+    type=discussion-loop: 多角色循环对话（已被 type=discussion 取代）
     """
     type: str = "linear"
-    role: str | None = None              # linear 用
-    roles: tuple[str, ...] = ()          # parallel / loop 用
-    extras: dict = field(default_factory=dict, repr=False)  # 兜底（如 max_iterations）
+
+    # type=linear 字段
+    role: str | None = None
+
+    # type=discussion / parallel 字段
+    roles: tuple[str, ...] = ()                # 参与者列表（中文角色名）
+    name: str | None = None                    # 议题名（脑暴笔记文件名 + display）
+    moderator: str | None = None               # 主持人（None = 第一个参与者主持）
+    max_rounds: int = 5                        # 讨论最大轮数（每轮 = 一个角色发言）
+    topic_template: str | None = None          # 议题模板（可引用 {project} 等占位符）
+
+    # 兜底未识别字段
+    extras: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_yaml(cls, data: Any) -> "WorkflowStep":
@@ -57,7 +68,19 @@ class WorkflowStep:
                 if not role:
                     raise ValueError(f"linear step 缺少 role 字段: {data}")
                 return cls(type="linear", role=str(role))
-            # 已知但未实现的类型 —— 保留数据，等 Phase 4 解释
+            if t == "discussion":
+                roles = tuple(str(r) for r in (data.get("roles") or data.get("participants") or ()))
+                if not roles:
+                    raise ValueError(f"discussion step 缺少 roles/participants: {data}")
+                return cls(
+                    type="discussion",
+                    roles=roles,
+                    name=str(data.get("name") or "未命名讨论"),
+                    moderator=(str(data["moderator"]) if data.get("moderator") else None),
+                    max_rounds=int(data.get("max_rounds", 5)),
+                    topic_template=(str(data["topic_template"]) if data.get("topic_template") else None),
+                )
+            # 已知但未实现的类型 —— 保留数据，运行时由 build_graph 抛 NotImplementedError
             roles = tuple(str(r) for r in (data.get("roles") or ()))
             extras = {k: v for k, v in data.items() if k not in ("type", "role", "roles")}
             return cls(type=t, roles=roles, extras=extras)
