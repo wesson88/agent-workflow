@@ -1,9 +1,8 @@
 """
-engine/run_chain.py — 工作流模板驱动的链路执行器（Phase 3a）
+engine/run_chain.py — 工作流模板驱动的链路执行器（Phase 4a：LangGraph）
 
-链路从 vault `00-系统/工作流模板/工作流-*.md` 读取，不再硬编码。
-角色名（中文）通过 `engine.workflow.role_to_skill_dir` 自动映射到
-`.claude/skills/<英文目录>/main.py`。
+链路从 vault `00-系统/工作流模板/工作流-*.md` 读取，由 LangGraph StateGraph
+执行（替代 Phase 3a 的子进程串行循环）。
 
 CLI：
     python .claude/engine/run_chain.py --task "..." --project myproj
@@ -13,15 +12,14 @@ CLI：
     python .claude/engine/run_chain.py --task "..." --skip-git
     python .claude/engine/run_chain.py --list-workflows
 
-Phase 4：LangGraph 引擎接管 parallel / discussion-loop 等步骤类型；
-本文件继续负责 type=linear 的简单链路。
+Phase 4a：每个角色一个 LangGraph node，subprocess 包装现有 main.py（行为等价）。
+Phase 4b：加讨论循环节点（架构师 ↔ 技术主管），需 in-process 重构 main.py 核心逻辑。
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -35,10 +33,10 @@ except (AttributeError, ValueError):
 # 让脚本能独立运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine.config import PROJECT_ROOT, PROJECT_NAME
+from engine.config import PROJECT_NAME
 from engine.git_sync import sync_after_run
-from engine.workflow import load_workflow, list_workflows, role_to_skill_dir
-from engine.role_loader import load_role, RoleNotFound
+from engine.workflow import load_workflow, list_workflows
+from engine.graph import build_graph
 
 DEFAULT_WORKFLOW = "技术开发"
 
@@ -68,64 +66,13 @@ def parse_chain_args() -> argparse.Namespace:
         help="跑完后不调 git_sync.sync_after_run（本地试跑用）",
     )
     parser.add_argument(
-        "--halt-on-failure", action=argparse.BooleanOptionalAction, default=None,
-        help="单个角色失败时是否中断后续（默认沿用模板的 halt_on_failure）",
-    )
-    parser.add_argument(
         "--list-workflows", action="store_true",
         help="列出 vault 中所有可用的工作流模板后退出",
     )
     return parser.parse_args()
 
 
-# ── 链路构造 ────────────────────────────────────────────
-def _normalize(name_or_alias: str) -> str:
-    """把任意 alias 解析为角色 frontmatter 的 role 字段（中文名）。"""
-    return load_role(name_or_alias).name
-
-
-def _slice_chain(chain: list[str], start_from: str | None, end_at: str | None) -> list[str]:
-    """按 start-from / end-at 截取链路；接受中文或英文别名输入。"""
-    if start_from:
-        target = _normalize(start_from)
-        try:
-            idx = chain.index(target)
-        except ValueError:
-            raise SystemExit(
-                f"❌ --start-from='{start_from}' 不在工作流链路中。"
-                f"链路：{chain}"
-            )
-        chain = chain[idx:]
-    if end_at:
-        target = _normalize(end_at)
-        try:
-            idx = chain.index(target)
-        except ValueError:
-            raise SystemExit(
-                f"❌ --end-at='{end_at}' 不在工作流链路中。链路：{chain}"
-            )
-        chain = chain[: idx + 1]
-    return chain
-
-
-# ── 执行单步 ────────────────────────────────────────────
-def run_step(role_name: str, task: str, project: str) -> int:
-    """执行一个角色：把 vault 中文角色名映射到 skill 目录，subprocess 调 main.py。"""
-    skill_dir = role_to_skill_dir(role_name)
-    cmd = [
-        sys.executable,
-        str(PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"),
-        "--task", task,
-        "--project", project,
-    ]
-    print(f"\n{'=' * 60}\n▶ 运行 {role_name} ({skill_dir})  项目={project}\n{'=' * 60}")
-    env = os.environ.copy()
-    env["PROJECT"] = project
-    env["TASK"] = task
-    return subprocess.run(cmd, env=env).returncode
-
-
-# ── 主流程 ──────────────────────────────────────────────
+# ── 列出模板 ────────────────────────────────────────────
 def _print_workflows() -> int:
     workflows = list_workflows()
     if not workflows:
@@ -141,6 +88,7 @@ def _print_workflows() -> int:
     return 0
 
 
+# ── 主流程 ──────────────────────────────────────────────
 def main() -> int:
     args = parse_chain_args()
 
@@ -163,51 +111,43 @@ def main() -> int:
     except KeyError as e:
         raise SystemExit(f"❌ {e}")
 
+    # 构建 LangGraph
     try:
-        chain = template.linear_role_names()
-    except NotImplementedError as e:
+        graph = build_graph(template, start_from=args.start_from, end_at=args.end_at)
+    except (NotImplementedError, ValueError) as e:
         raise SystemExit(f"❌ {e}")
 
-    # 规范化为中文角色名（兼容用户写英文别名的模板）
-    chain = [_normalize(r) for r in chain]
-    chain = _slice_chain(chain, args.start_from, args.end_at)
-
-    halt_on_failure = (
-        args.halt_on_failure
-        if args.halt_on_failure is not None
-        else template.halt_on_failure
-    )
-
     print(f"工作流：{template.name}（{template.description}）")
-    print(f"链路：{' → '.join(chain)}")
     print(f"项目：{project}")
     print(f"任务：{args.task}")
-    print(f"halt_on_failure：{halt_on_failure}")
+    print(f"halt_on_failure：{template.halt_on_failure}")
+    print(f"引擎：LangGraph StateGraph")
 
-    failed: list[str] = []
-    succeeded: list[str] = []
-    skipped: list[str] = []
-    for i, role_name in enumerate(chain):
-        rc = run_step(role_name, args.task, project)
-        if rc != 0:
-            print(f"\n❌ {role_name} 失败（exit={rc}）")
-            failed.append(role_name)
-            if halt_on_failure:
-                skipped = chain[i + 1:]
-                print(f"中断后续（--no-halt-on-failure 可关闭）；跳过：{skipped}")
-                break
-        else:
-            print(f"\n✅ {role_name} 完成")
-            succeeded.append(role_name)
+    initial_state = {
+        "project": project,
+        "task": args.task,
+        "workflow_name": template.name,
+        "succeeded": [],
+        "failed": [],
+        "skipped": [],
+        "halted": False,
+    }
+
+    final_state = graph.invoke(initial_state)
+
+    succeeded = final_state.get("succeeded", [])
+    failed = final_state.get("failed", [])
+    skipped = final_state.get("skipped", [])
+    total = len(succeeded) + len(failed) + len(skipped)
 
     print(f"\n{'=' * 60}")
     print("汇总")
-    print(f"  尝试：{len(succeeded) + len(failed)} / {len(chain)}")
+    print(f"  总步数：{total}")
     print(f"  成功：{succeeded}")
     if failed:
         print(f"  失败：{failed}")
     if skipped:
-        print(f"  未跑：{skipped}")
+        print(f"  跳过：{skipped}")
 
     if args.skip_git:
         print("（--skip-git 已设置，不推送）")
@@ -217,8 +157,9 @@ def main() -> int:
         summary = (
             f"工作流：{template.name}\n"
             f"任务：{args.task}\n"
-            f"链路：{' → '.join(chain)}\n"
-            f"失败：{failed or '无'}"
+            f"成功：{succeeded}\n"
+            f"失败：{failed or '无'}\n"
+            f"跳过：{skipped or '无'}"
         )
         url = sync_after_run(project=project, summary=summary)
         if url:

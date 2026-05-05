@@ -37,6 +37,7 @@ from .workflow import (
     WorkflowTemplate, WorkflowStep,
     load_workflow, list_workflows, role_to_skill_dir,
 )
+from .graph import ProjectState, build_graph
 from .llm import (
     call_llm, call_claude as llm_call_claude,
     get_provider, list_providers, is_provider_available,
@@ -62,6 +63,8 @@ __all__ = [
     # workflow
     "WorkflowTemplate", "WorkflowStep",
     "load_workflow", "list_workflows", "role_to_skill_dir",
+    # graph (Phase 4 LangGraph)
+    "ProjectState", "build_graph",
     # llm
     "call_llm", "llm_call_claude",
     "get_provider", "list_providers", "is_provider_available",

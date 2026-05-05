@@ -219,6 +219,14 @@ _TRAILING_FENCE_RE = re.compile(
     r"\n```\s*\Z",          # 结尾：换行 + ```
 )
 
+# 匹配纯 HTML/markdown 注释占位（如 __init__.py 被写成 `<!-- empty -->`）：
+# Claude 偶尔在"应该空文件"的 FILE 块里塞一行注释当占位，但 .py 解释器
+# 会把它当语法错误。检测全文都是 <!-- ... --> 注释时，写空文件。
+_PURE_COMMENT_RE = re.compile(
+    r"\A\s*(?:<!--.*?-->\s*)+\Z",
+    re.DOTALL,
+)
+
 
 def _strip_outer_code_fence(content: str) -> str:
     """若 content 整体被一对 markdown 代码围栏包裹，剥离外层。
@@ -235,6 +243,20 @@ def _strip_outer_code_fence(content: str) -> str:
     return inner if inner.endswith("\n") else inner + "\n"
 
 
+def _normalize_empty_file_placeholder(content: str) -> str:
+    """若 content 仅包含 HTML/markdown 注释（无实际代码），写空文件。
+
+    场景：Claude 在 `__init__.py` 等本应空的 FILE 块里写
+        <!-- empty -->
+    或
+        <!-- empty – marks src/backend as a Python package -->
+    这些进 .py 文件会触发 SyntaxError。
+    """
+    if _PURE_COMMENT_RE.match(content):
+        return ""
+    return content
+
+
 def parse_claude_output_to_files(raw_output: str) -> dict:
     """解析 Claude 输出中的 <!-- FILE: path --> ... <!-- /FILE --> 块。
 
@@ -246,6 +268,7 @@ def parse_claude_output_to_files(raw_output: str) -> dict:
     for m in _FILE_BLOCK_RE.finditer(raw_output):
         rel = m.group(1).strip()
         content = _strip_outer_code_fence(m.group(2))
+        content = _normalize_empty_file_placeholder(content)
         results[rel] = content
     return results
 
