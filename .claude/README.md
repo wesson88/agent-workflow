@@ -1,237 +1,93 @@
-# AI 工作流系统文档
+# agent-workflow 引擎仓
 
-## 项目概述
+Obsidian-backed multi-agent 工作流编排引擎。本仓只放**代码**，所有"知识"（角色定义、工作流模板、规则、项目产出）在另一个 Obsidian vault 仓里。
 
-本系统是一个**多智能体自治工作流框架**，由 Claude 驱动。通过角色分工、状态机调度和自我修复机制，将产品需求（PRD）自动转化为完整的代码实现。
-
----
+> **用户视角**（如何启动新项目、怎么跑工作流、怎么换模型）请看 vault 内的 [`00-系统/启动新项目指南.md`](../../../MarkDown/memory/adam/00-系统/启动新项目指南.md)（具体路径取决于你的 `VAULT_ROOT` 配置）。
+>
+> 本 README 是**开发者视角**：引擎模块如何组织、扩展工作流要改哪里、调试入口在哪。
 
 ## 目录结构
 
 ```
-workflow/                          ← 项目根目录（PROJECT_ROOT）
-└── .claude/
-    ├── README.md                  ← 本文件
-    ├── status.json                ← 系统状态（运行时更新）
-    ├── audit.jsonl                ← 审计日志（追加写入）
-    ├── 状态说明.md                ← status.json 字段说明
-    │
-    ├── skills/                    ← 技能定义与执行层
-    │   ├── common.py              ← 共享工具库（所有 main.py 依赖）
-    │   ├── product_manager/
-    │   │   ├── skill.md           ← 角色定义（system prompt 来源）
-    │   │   └── main.py            ← 执行入口
-    │   ├── chief_architect/
-    │   │   ├── skill.md
-    │   │   └── main.py
-    │   ├── technical_lead/
-    │   │   ├── skill.md
-    │   │   └── main.py
-    │   ├── dev_backend/
-    │   │   ├── skill.md
-    │   │   └── main.py
-    │   └── dev_frontend/
-    │       ├── skill.md
-    │       └── main.py
-    │
-    ├── script/
-    │   ├── workflow.py            ← 单技能调度器（状态机 + 自愈补丁）
-    │   ├── optimize_all.py        ← 全链路批量执行
-    │   └── optimize_all_workflow说明.md
-    │
-    ├── docs/
-    │   ├── tech_stack.md          ← 技术栈规范（禁止擅自变更）
-    │   ├── rules/
-    │   │   └── arch_decomposition_rules.md  ← 架构分解方法论
-    │   ├── system_design.md       ← 运行时生成（chief_architect 输出）
-    │   └── api_spec.md            ← 运行时生成（dev_backend 输出）
-    │
-    ├── inputs/                    ← 脑暴素材目录（product_manager 的输入源）
-    │   ├── README.md                      ← 使用说明 + 命名约定
-    │   ├── business_brief.example.md      ← 业务简报模板
-    │   ├── business_brief.md              ← （用户可选）核心简报
-    │   ├── brainstorm-*.md                ← （用户可选）brainstorming 产出 / 其他模型脑暴
-    │   ├── meeting-*.md                   ← （用户可选）会议纪要 / 用户访谈
-    │   ├── research-*.md                  ← （用户可选）用户/市场调研
-    │   └── competitor-*.md                ← （用户可选）竞品分析
-    │
-    ├── requirements/
-    │   └── PRD.md                 ← 运行时生成（product_manager 输出，含『参考资料』章节相对链接回 ../inputs/）
-    │
-    └── instructions/              ← 技能间任务传递（运行时生成）
-        ├── to_lead.md             ← chief_architect → technical_lead
-        ├── to_backend.md          ← technical_lead → dev_backend
-        └── to_frontend.md         ← technical_lead → dev_frontend
-
-（运行后在 workflow/ 下生成）
-├── src/
-│   ├── backend/                   ← dev_backend 生成的代码
-│   └── frontend/                  ← dev_frontend 生成的代码
-└── tests/
-    ├── backend/
-    └── frontend/
+.claude/
+├── engine/              ← 引擎核心（无业务，全是基础设施）
+│   ├── config.py        ← 加载 .env / VAULT_ROOT / PROJECT_ROOT / 路径解析
+│   ├── obsidian_io.py   ← vault 文件读写（filesystem-only）+ Windows 文件锁重试
+│   ├── role_loader.py   ← 解析 vault 角色笔记 → Role dataclass
+│   ├── runtime_state.py ← 角色运行时状态 per-role JSON（gitignored 在 vault）
+│   ├── state.py         ← 状态机语义层（idle/busy/success/failed/blocked/monitoring）
+│   ├── llm.py           ← provider-agnostic LLM 调用（Anthropic SDK / OpenAI 兼容 / CLI）
+│   ├── llm_providers.yaml ← LLM 配置：model 名 → API/CLI 双轨设置
+│   ├── git_sync.py      ← agent 分支约定 + commit/push/PR
+│   ├── workflow.py      ← 工作流模板加载 + 角色名 → skill 目录映射
+│   ├── run_chain.py     ← CLI 入口：按模板顺序跑链路
+│   └── _smoke_test.py   ← 集成自检
+└── skills/              ← 角色执行器（run_chain.py 的子进程目标）
+    ├── common.py        ← 共享工具：build_system_prompt / call_claude / FILE 块解析
+    ├── product_manager/main.py
+    ├── chief_architect/main.py
+    ├── technical_lead/main.py
+    ├── dev_backend/main.py
+    └── dev_frontend/main.py
 ```
 
----
-
-## 技能调用链
+## 数据流
 
 ```
-[输入] inputs/*.md（business_brief / brainstorm-* / meeting-* / research-* / ...）+ TASK
-          ↓
-  product_manager/main.py
-  ├─ 读取：inputs/ 下全部 .md（综合多份素材）, tech_stack.md, status.json
-  └─ 输出：requirements/PRD.md（末尾的『参考资料』章节用相对链接指回 ../inputs/）
-          ↓
-  chief_architect/main.py
-  ├─ 读取：PRD.md, tech_stack.md, arch_decomposition_rules.md, status.json
-  └─ 输出：docs/system_design.md, instructions/to_lead.md
-          ↓
-  technical_lead/main.py
-  ├─ 读取：to_lead.md, system_design.md, tech_stack.md
-  │  + 注入：chief_architect/skill.md 的动态补丁
-  └─ 输出：instructions/to_backend.md, instructions/to_frontend.md
-          ↓                    ↓
-  dev_backend/main.py    dev_frontend/main.py
-  ├─ 读取：to_backend.md  ├─ 读取：to_frontend.md
-  │  system_design.md    │  PRD.md, system_design.md
-  │  + technical_lead 补丁  + technical_lead 补丁
-  └─ 输出：src/backend/   └─ 输出：src/frontend/
-           docs/api_spec.md
+   vault                                       project repo (本仓)
+   ─────                                       ──────────────────
+   00-系统/角色基因/      ── load_role ──>     engine/role_loader.py
+   00-系统/规则/          ── read_note ──>     skills/main.py
+   00-系统/工作流模板/    ── load_workflow ──> engine/workflow.py
+                                                    │
+   10-项目/{p}/inputs/   ── 读 ──>  ┌──────────────▼──────────────┐
+                                    │  skills/<role>/main.py       │
+   00-系统/.runtime-state/<role>.json   │  (subprocess from run_chain)│
+                          ↑↓ 读写       │                              │
+                                    │  engine.llm.call_llm()       │
+                                    └──────────────┬──────────────┘
+                                                    │
+   10-项目/{p}/PRD.md  <── write_note ──┐         │
+   10-项目/{p}/系统设计.md             │         │
+   10-项目/{p}/指令/给*.md             ◄─────────┘
+   10-项目/{p}/API契约.md              │
+                                        │
+   src/backend/, src/frontend/, tests/  ◄── 项目仓内（gitignored）
 ```
 
-**下游监控传递**：`product_manager` 监控 `chief_architect`，`chief_architect` 监控 `technical_lead`，`technical_lead` 监控 `dev_backend/dev_frontend`。连续失败时上游可向下游 `skill.md` 的 DYNAMIC 区域注入补丁。
-
----
-
-## 快速开始
-
-### 前置条件
+## 入口
 
 ```bash
-pip install anthropic
-export ANTHROPIC_API_KEY="your-api-key"
+# 跑一条完整链路（默认 "技术开发" 工作流）
+python .claude/engine/run_chain.py --task "..." --project myproj
+
+# 列出所有可用工作流
+python .claude/engine/run_chain.py --list-workflows
+
+# 自检（不调 Claude）
+python .claude/engine/_smoke_test.py
 ```
 
-### 运行方式
+## 扩展指引
 
-```bash
-cd workflow
+### 新增 LLM provider
+改 [engine/llm_providers.yaml](engine/llm_providers.yaml) — 加一条目（mode / api / cli），代码无需改。
 
-# 首次使用：把脑暴素材放到 inputs/ 目录
-# 方式 A：复制业务简报模板，填写核心需求
-cp .claude/inputs/business_brief.example.md .claude/inputs/business_brief.md
+### 新增角色
+在 vault `00-系统/角色基因/` 新建一份 `角色-XX.md`，按现有 frontmatter schema 写。然后在 `.claude/skills/` 新建一个 `<英文名>/main.py` 作为执行器（参考已有 5 份的结构）。
 
-# 方式 B：把 superpowers brainstorming skill 的产出直接保存到 inputs/
-#   → .claude/inputs/brainstorm-mvp-scope.md
+### 新增工作流
+在 vault `00-系统/工作流模板/` 新建 `工作流-XX.md`，frontmatter 里写 `steps` 列表。引擎 `--workflow XX` 即可调用。
 
-# 方式 C：多份文件综合（简报 + 会议纪要 + 竞品调研...）
-#   → .claude/inputs/meeting-2026-04-20.md
-#   → .claude/inputs/competitor-trello.md
+## 配套约定
 
-# 方式一：运行完整链路（推荐）
-TASK="任务管理系统 MVP" python .claude/script/optimize_all.py
+- **vault git 工作流**：vault 仓的 main 分支受保护（本地 hook + agent 分支 + 手动 PR）。详见 vault 仓 `README.md`
+- **运行时状态**：不进 git；vault `.runtime-state/` 已 gitignored
+- **工程测试产物**：放 vault `99-临时/test-runs/<name>/`（已 gitignored），不污染 `10-项目/`
 
-# 方式二：单独运行某个技能（测试用）
-TARGET_SKILL=product_manager TASK="任务管理系统 MVP" \
-  python .claude/script/workflow.py
+## Phase 路线图
 
-# 方式三：直接调用某个技能的 main.py（调试用）
-python .claude/skills/product_manager/main.py --task "任务管理系统 MVP"
-python .claude/skills/chief_architect/main.py --task "按 PRD 架构分解"
-```
-
-### 环境变量
-
-| 变量名 | 必须 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `ANTHROPIC_API_KEY` | ✓ | — | Anthropic API 密钥 |
-| `TARGET_SKILL` | — | `chief_architect` | workflow.py 的目标技能 |
-| `TASK` | — | `处理数学分析` | 传给技能的任务描述 |
-| `MAX_ITER` | — | `3` | workflow.py 最大重试次数 |
-| `SKILL_TIMEOUT` | — | `300` | 子进程超时秒数 |
-| `SET_GLOBAL_BLOCK` | — | `false` | 技能 blocked 时是否阻塞系统 |
-
----
-
-## 核心机制
-
-### 1. 自愈补丁循环（workflow.py）
-
-```
-运行技能 main.py
-    ↓ 失败
-备份 skill.md → 生成补丁 → 注入 DYNAMIC 区域 → 重试
-    ↓ 连续失败 ≥ 2 次
-技能状态 → blocked（等待上级干预）
-```
-
-### 2. 动态补丁区域（skill.md）
-
-每个 `skill.md` 末尾包含动态区域，用于运行时注入优化指令：
-
-```markdown
-<!-- DYNAMIC_START -->
-# Patch [2026-03-21T10:00:00Z]:
-- 所有数据库查询必须使用参数化查询，防止 SQL 注入。
-<!-- DYNAMIC_END -->
-```
-
-- 上游技能的补丁会在下游技能的 `main.py` 中自动读取并追加到 system prompt
-- 补丁基于 SHA256 哈希去重，不会重复注入
-
-### 3. 多文件输出协议
-
-Claude 的输出必须使用以下标签格式写入文件：
-
-```
-<!-- FILE: src/backend/main.py -->
-# 代码内容
-<!-- /FILE -->
-```
-
-`common.py` 的 `parse_claude_output_to_files()` 负责解析并批量写入，若无 FILE 标签则降级写入默认文件。
-
-### 4. 状态机
-
-```
-idle → busy → success → idle      （正常流程）
-             ↘ failed → busy      （重试）
-                      ↘ blocked   （需人工介入）
-```
-
-`monitoring` 状态仅用于 `chief_architect`，始终保持不变。
-
----
-
-## 扩展技能
-
-在 `skills/` 下新增目录并创建两个文件即可：
-
-**1. `skills/新技能名/skill.md`** — 定义角色职责、输入输出、禁止事项
-
-**2. `skills/新技能名/main.py`** — 参照现有 `main.py`，修改：
-- `SKILL_NAME`
-- `input_files` 列表
-- `user_prompt` 中的任务说明
-- `output_files` 降级写入路径
-
-**3. 注册到 `status.json`** — 在 `skill_registry` 中添加条目
-
-**4. 按需加入 `optimize_all.py` 的 `skills_chain`**
-
----
-
-## 常见问题
-
-**Q: 运行后没有生成 src/ 目录下的代码？**
-检查 `instructions/to_backend.md` 和 `instructions/to_frontend.md` 是否已生成（需先运行 chief_architect 和 technical_lead）。
-
-**Q: 技能状态变成了 blocked？**
-查看 `audit.jsonl` 了解失败原因，手动将 `status.json` 中该技能的 `status` 改为 `idle`，`consecutive_failures` 改为 `0` 后重试。
-
-**Q: Claude 输出没有 FILE 标签？**
-系统会降级写入默认文件（如 `src/backend/output.py`），此时可检查降级文件内容，或调整 system prompt 中的输出格式规范后重试。
-
-**Q: API 调用超时？**
-增大 `SKILL_TIMEOUT` 环境变量（默认 300 秒）：`SKILL_TIMEOUT=600 python .claude/script/optimize_all.py`
+- **Phase 1-3a：完成** — vault + engine + 工作流模板系统
+- **Phase 3b（下一步）**：跨领域角色（自媒体/生活）+ 跨域工作流模板
+- **Phase 4**：LangGraph 编排（讨论循环、并行）+ 复盘 agent（替代旧 self-healing）
+- **Phase 5**：Obsidian Canvas 实时仪表盘 + meeting-chat 退役
