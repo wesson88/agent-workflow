@@ -33,6 +33,10 @@ from .git_sync import (
     ensure_on_agent_branch, commit_and_push,
     open_or_update_pr, sync_after_run,
 )
+from .workflow import (
+    WorkflowTemplate, WorkflowStep,
+    load_workflow, list_workflows, role_to_skill_dir,
+)
 from .llm import (
     call_llm, call_claude as llm_call_claude,
     get_provider, list_providers, is_provider_available,
@@ -55,6 +59,9 @@ __all__ = [
     # git_sync
     "ensure_on_agent_branch", "commit_and_push",
     "open_or_update_pr", "sync_after_run",
+    # workflow
+    "WorkflowTemplate", "WorkflowStep",
+    "load_workflow", "list_workflows", "role_to_skill_dir",
     # llm
     "call_llm", "llm_call_claude",
     "get_provider", "list_providers", "is_provider_available",
