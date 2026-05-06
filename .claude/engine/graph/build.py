@@ -33,13 +33,20 @@ def _step_node_key(step: WorkflowStep, idx: int) -> str:
     )
 
 
-def _step_match_role(step: WorkflowStep, target_role: str) -> bool:
-    """步骤是否匹配某个角色名（用于 --start-from / --end-at）。"""
+def _step_match_target(step: WorkflowStep, target: str) -> bool:
+    """步骤是否匹配 --start-from / --end-at 目标。
+
+    - linear：按角色名匹配（中文名或英文别名都可，统一 normalize 后比较）
+    - discussion：按讨论名（step.name）匹配
+      （不再按 participants 匹配——避免讨论参与者与后续 linear 步骤角色重名时锚点歧义）
+    """
     if step.type == "linear":
-        return _normalize(step.role) == target_role
+        try:
+            return _normalize(step.role) == _normalize(target)
+        except Exception:
+            return False
     if step.type == "discussion":
-        # 讨论步骤：参与者中含目标角色就算匹配
-        return any(_normalize(r) == target_role for r in step.roles)
+        return (step.name or "") == target
     return False
 
 
@@ -50,24 +57,24 @@ def _slice_steps(
 ) -> list[WorkflowStep]:
     out = list(steps)
     if start_from:
-        target = _normalize(start_from)
         for i, s in enumerate(out):
-            if _step_match_role(s, target):
+            if _step_match_target(s, start_from):
                 out = out[i:]
                 break
         else:
             raise ValueError(
-                f"--start-from='{start_from}' 不在工作流任何步骤的参与者中"
+                f"--start-from='{start_from}' 不匹配任何步骤"
+                f"（linear 用角色名 / discussion 用讨论名）"
             )
     if end_at:
-        target = _normalize(end_at)
         for i in range(len(out) - 1, -1, -1):
-            if _step_match_role(out[i], target):
+            if _step_match_target(out[i], end_at):
                 out = out[: i + 1]
                 break
         else:
             raise ValueError(
-                f"--end-at='{end_at}' 不在工作流任何步骤的参与者中"
+                f"--end-at='{end_at}' 不匹配任何步骤"
+                f"（linear 用角色名 / discussion 用讨论名）"
             )
     return out
 

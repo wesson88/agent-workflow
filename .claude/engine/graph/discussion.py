@@ -29,6 +29,53 @@ from ..obsidian_io import write_note
 from ..role_loader import load_role
 
 
+# 单文件最多注入字符数（防爆 prompt；超出截尾并附省略提示）
+_MAX_DOC_CHARS = 8000
+
+
+def _read_doc_capped(path) -> str | None:
+    """读取一个文档，超长则截尾。文件不存在或为空返回 None。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        return f"（读取失败：{e}）"
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > _MAX_DOC_CHARS:
+        text = text[:_MAX_DOC_CHARS] + f"\n\n…（截断：原文 {len(text)} 字符，已展示前 {_MAX_DOC_CHARS}）"
+    return text
+
+
+def _gather_project_context(project: str) -> str:
+    """读取 vault 10-项目/{project}/ 下的核心产出，组装成 markdown。
+
+    优先级文档：PRD.md / 系统设计.md / API契约.md
+    指令子目录：指令/*.md（给后端 / 给前端 / 给技术主管 等）
+    返回字符串可能为空（项目刚启动时）。
+    """
+    pdir = project_dir(project)
+    sections: list[str] = []
+
+    for fname in ("PRD.md", "系统设计.md", "API契约.md"):
+        content = _read_doc_capped(pdir / fname)
+        if content:
+            sections.append(f"### 📄 {fname}\n\n{content}")
+
+    instr_dir = pdir / "指令"
+    if instr_dir.is_dir():
+        for sub in sorted(instr_dir.glob("*.md")):
+            content = _read_doc_capped(sub)
+            if content:
+                sections.append(f"### 📄 指令/{sub.name}\n\n{content}")
+
+    if not sections:
+        return "（项目当前尚无核心产出文档；请基于议题与项目名讨论。）"
+    return "\n\n---\n\n".join(sections)
+
+
 class DiscussionState(TypedDict, total=False):
     # 入口（由父图传入）
     project: str
@@ -72,12 +119,19 @@ def _build_speaker_prompt(state: DiscussionState, speaker: str) -> tuple[str, st
         f"风格：{role.style}\n\n"
         + role.body.strip()
         + "\n\n## 讨论场约束（覆盖一切默认行为）\n"
-        "你正在参加一场多角色讨论。每次只输出**一段发言**（200-500 字），"
-        "不要使用 FILE 块、不要写文件、不要询问权限。"
-        "直接以你的角色身份说话，可以引用其他角色的具体说法。"
+        "你正在参加一场多角色讨论：\n"
+        "1. **不要调用任何工具、不要请求权限、不要写文件、不要使用 FILE 块。** "
+        "讨论场是只对话场景；所有项目文档都已在用户消息里以纯文本提供，"
+        "你需要的所有信息都在 prompt 里。\n"
+        "2. **每次只输出一段发言（200-500 字）。** 直接以你的角色身份说话。\n"
+        "3. **基于已提供的项目文档和讨论历史，给出具体、可操作的观点。** "
+        "可以引用其他角色的具体说法，可以指出文档中的具体段落。\n"
+        "4. **不要说『我需要查看 X 文件』或『请提供 Y 资料』** —— 该有的资料都已经在下面了。"
     )
 
-    # user prompt：议题 + 历史
+    # user prompt：议题 + 项目文档 + 历史
+    project_context = _gather_project_context(state["project"])
+
     history_lines = []
     for m in state.get("messages", []):
         history_lines.append(
@@ -88,6 +142,10 @@ def _build_speaker_prompt(state: DiscussionState, speaker: str) -> tuple[str, st
     user_prompt = (
         f"# 议题\n{state['topic']}\n\n"
         f"# 项目背景\n项目名：{state['project']}\n任务：{state['task']}\n\n"
+        f"# 项目文档（已有产出）\n\n"
+        f"以下是项目当前已经产出的核心文档。**这是你讨论的事实依据，"
+        f"请直接基于这些内容给出具体观点，不要询问『是否能查看』。**\n\n"
+        f"{project_context}\n\n"
         f"# 已有讨论历史\n{history_block}\n\n"
         f"---\n"
         f"现在轮到你（**{speaker}**）发言。请直接输出你的一段发言："

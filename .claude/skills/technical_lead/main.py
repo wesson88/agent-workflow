@@ -80,12 +80,27 @@ def main() -> int:
 
     # 上游补丁：架构师的 DYNAMIC 区域已在 build_system_prompt 内自动注入
     system_prompt = build_system_prompt(ROLE, project=project)
-    context = read_input_files([to_lead, sys_design, tech_stack])
+
+    # Phase 4c-3：注入项目目录下所有 脑暴-*.md 作为讨论决策来源
+    discussion_logs = sorted((proj_dir).glob("脑暴-*.md")) if proj_dir.is_dir() else []
+    inputs = [to_lead, sys_design, tech_stack, *discussion_logs]
+    context = read_input_files(inputs)
+
+    discussion_hint = ""
+    if discussion_logs:
+        names = "、".join(f"脑暴-{p.stem.removeprefix('脑暴-')}" for p in discussion_logs)
+        discussion_hint = (
+            f"\n**注意**：项目内已有讨论笔记（{names}），上面已包含。"
+            f"请把讨论中**已被确认采纳**的决策（尤其是架构师在末轮给出的"
+            f"裁决/决策清单）直接落到给后端/给前端的实施约束中——"
+            f"不要重新发起讨论里已经收敛过的争论。\n"
+        )
 
     user_prompt = (
         f"项目名：`{project}`\n\n"
         f"{context}\n\n---\n"
-        f"本轮任务：{task or '按架构设计拆分前后端开发任务'}\n\n"
+        f"本轮任务：{task or '按架构设计拆分前后端开发任务'}\n"
+        f"{discussion_hint}\n"
         "请将开发任务拆分为前端与后端两条线，每条任务必须有：\n"
         "  - 功能描述、对应模块/接口、输入输出、验收标准\n"
         "  - 单任务工作量 ≤ 4 小时，超过须再拆分\n"

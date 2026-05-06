@@ -72,9 +72,15 @@ OUTPUT_FORMAT_SPEC = """
 约束：
 - 你**不可调用任何工具**（不要使用 Read/Write/Edit/Bash/MCP 等）
 - 你**不可询问写入权限** —— 上层 main.py 会负责落盘
-- 路径规则：
-  - vault 内的笔记使用 vault 相对路径，如 `10-项目/{project}/PRD.md`
-  - 项目仓内的代码使用项目仓相对路径，如 `src/backend/main.py`
+- 路径规则（**严格遵守**）：
+  - vault 笔记：以 `10-项目/{project}/...`、`00-系统/...`、`20-知识/...`、`99-临时/...` 之一开头
+  - 代码与测试：必须以 `src/...` 或 `tests/...` 开头（**不要**裸 `main.py` 或 `app/main.py`）
+  - 项目专属的 README / requirements / 静态资源：放到 `10-项目/{project}/` 下（如
+    `10-项目/{project}/README.md`、`10-项目/{project}/requirements.txt`、
+    `10-项目/{project}/static/index.html`），**不要**用裸 `README.md` / `requirements.txt`
+    （那些路径会落到引擎仓根，覆盖引擎自身文件）
+  - 仓根配置文件（仅在确实需要 pytest/构建工具自动发现时用）：`pytest.ini`、`conftest.py`、
+    `pyproject.toml`、`package.json`。其余一切**禁止**裸文件名输出
   - 路径不得包含空格
 - 一次响应可包含多个 FILE 块；每个文件**必须**有完整的 `<!-- FILE: -->` 开始 + `<!-- /FILE -->` 结束
 - 代码文件无需额外的 Markdown 代码块包裹

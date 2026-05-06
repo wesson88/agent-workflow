@@ -119,21 +119,62 @@ def workflow_template_dir() -> Path:
 
 _VAULT_PREFIXES = ("00-系统", "10-项目", "20-知识", "99-临时")
 
+# 仓根白名单：必须放在项目仓根的配置文件（被工具自动发现的）。
+# 其余无目录前缀的文件名一律重定向到 vault 10-项目/{project}/ 下，
+# 避免 dev_backend 等角色输出 README.md/requirements.txt 时覆盖引擎仓自身文件。
+_REPO_ROOT_WHITELIST = frozenset({
+    "pytest.ini",
+    "conftest.py",
+    "pyproject.toml",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    ".gitignore",
+    ".env",
+    ".env.example",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "Makefile",
+})
+
 
 def resolve_path(path_template: str, project: str | None = None) -> Path:
     """把角色 frontmatter / Claude 输出的路径模板解析为绝对路径。
 
     - {project} 占位符替换为传入的 project（缺省用 PROJECT_NAME）
     - vault 路径必须以 `00-系统` / `10-项目` / `20-知识` / `99-临时` 开头
-    - 其他一律视为项目仓路径（`src/...`、`tests/...`、`pytest.ini`、`package.json` 等）
+    - 包含目录前缀的项目仓路径（`src/...`、`tests/...`、`static/...`）→ 项目仓
+    - 裸文件名（无目录前缀）：白名单内（pytest.ini / conftest.py / pyproject.toml /
+      package.json / .env 等）→ 仓根；其它（README.md / requirements.txt 等）
+      自动重定向到 vault `10-项目/{project}/<filename>` 并打印 warning。
     - 末尾的 '/' 会被剥离，便于 Path 正常拼接
     """
+    import sys
+
     name = (project or PROJECT_NAME).strip() or "default"
     expanded = path_template.replace("{project}", name).strip().rstrip("/").rstrip("\\")
     if not expanded:
         raise ValueError(f"路径模板为空：{path_template!r}")
     norm = expanded.replace("\\", "/")
     head = norm.split("/", 1)[0]
+
     if head in _VAULT_PREFIXES:
         return (VAULT_ROOT / expanded).resolve()
-    return (PROJECT_ROOT / expanded).resolve()
+
+    # 路径含目录前缀（src/、tests/ 等）→ 项目仓
+    if "/" in norm:
+        return (PROJECT_ROOT / expanded).resolve()
+
+    # 裸文件名：白名单 → 仓根
+    if expanded in _REPO_ROOT_WHITELIST:
+        return (PROJECT_ROOT / expanded).resolve()
+
+    # 裸文件名 + 不在白名单 → 自动重定向到 10-项目/{project}/
+    redirected = f"10-项目/{name}/{expanded}"
+    print(
+        f"⚠️  路径自动重定向：'{path_template}' → '{redirected}' "
+        f"（裸文件名不在仓根白名单，避免覆盖引擎仓文件）",
+        file=sys.stderr,
+    )
+    return (VAULT_ROOT / redirected).resolve()
