@@ -140,6 +140,20 @@ def _gather_worker_role_notes() -> list[Path]:
     return out
 
 
+def _gather_recent_reflections(limit: int = 5) -> list[Path]:
+    """读最近 N 份复盘记录（按 mtime 倒序），用于闭环验证：让复盘者看到
+    上轮的补丁动机与判定，避免只盯当前 DYNAMIC 文本反复 churn。"""
+    rd = reflection_dir()
+    if not rd.is_dir():
+        return []
+    notes = sorted(
+        (p for p in rd.glob("*.md") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return notes[:limit]
+
+
 def _today_stamp() -> str:
     """复盘记录文件名：YYYY-MM-DD-HHmm（本地时区）。"""
     return datetime.now().strftime("%Y-%m-%d-%H%M")
@@ -158,10 +172,11 @@ def main() -> int:
 
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
-    # 输入：项目产出 + 工作角色笔记
+    # 输入：项目产出 + 工作角色笔记 + 最近 N 份复盘记录（闭环验证用）
     project_docs = _gather_project_outputs(project, days)
     role_notes = _gather_worker_role_notes()
-    inputs = project_docs + role_notes
+    recent_reflections = _gather_recent_reflections(limit=5)
+    inputs = project_docs + role_notes + recent_reflections
 
     if not project_docs:
         scope = f"项目 {project}" if project else "所有项目"
@@ -183,7 +198,8 @@ def main() -> int:
 
     print(
         f"[{ROLE}] 复盘范围：{'单项目=' + project if project else '所有项目'} / "
-        f"窗口={days}d / 项目文档={len(project_docs)} 份 / 角色笔记={len(role_notes)} 份",
+        f"窗口={days}d / 项目文档={len(project_docs)} 份 / 角色笔记={len(role_notes)} 份 / "
+        f"历史复盘={len(recent_reflections)} 份",
         flush=True,
     )
 
@@ -206,21 +222,35 @@ def main() -> int:
         f"# 复盘范围\n"
         f"- 项目：{project or '所有项目'}\n"
         f"- 时间窗口：最近 {days} 天\n"
-        f"- 共扫描 {len(project_docs)} 份项目产出 + {len(role_notes)} 份角色笔记\n\n"
+        f"- 共扫描 {len(project_docs)} 份项目产出 + {len(role_notes)} 份角色笔记 "
+        f"+ {len(recent_reflections)} 份历史复盘记录\n\n"
         f"# 输入文件全文\n\n{context}\n\n---\n\n"
-        f"# 你的任务\n\n"
-        f"基于以上输入，**识别在多次运行中重复出现**的失败模式或成功套路，"
-        f"按角色基因第 4 节『复盘记录主报告结构』产出 `{reflection_path}`。\n\n"
-        f"**最多**对 3 个工作角色的笔记下发补丁（DYNAMIC 区域更新）。"
-        f"角色笔记必须**整份重写**（输出完整的 frontmatter + 1-7 节正文 + DYNAMIC 区域），"
-        f"**只**修改 `<!-- DYNAMIC_START -->` 到 `<!-- DYNAMIC_END -->` 之间的内容。\n"
+        f"# 你的任务（必须严格按以下顺序）\n\n"
+        f"## Step 1：闭环验证（先做，不可跳过）\n\n"
+        f"按角色基因 §3.2 工作流，对每个工作角色当前 DYNAMIC 区域里**已存在**的补丁"
+        f"（即输入里 `角色-*.md` 的 `<!-- DYNAMIC_START -->` 到 `<!-- DYNAMIC_END -->` 之间的内容）"
+        f"做命中分析：\n\n"
+        f"- 解析每条补丁的目标失败模式\n"
+        f"- 在本轮项目产出（PRD / 系统设计 / 指令 / 脑暴 / 已生成代码若有）里搜证：是否再现？\n"
+        f"- 决定生命周期调整：保留原标记 / 升 `[GRADUATE?]` / 降 `[DROP?]`\n"
+        f"- **每次调整都要在补丁尾加证据行** `- 闭环验证 [<本轮日期>]: <命中证据 / 跨项目验证情况>`\n"
+        f"- 判定保守：拿不准就 `[KEEP]`；`[GRADUATE?]` 必须满足跨 ≥ 2 个项目验证 + 主体未含等价规则\n\n"
+        f"在主报告 `## 2.5 闭环验证：上轮补丁命中分析` 章节逐条记录证据。\n\n"
+        f"## Step 2：识别本轮新模式\n\n"
+        f"基于本轮项目产出 + 历史复盘记录，识别**多次出现**的失败模式或成功套路，"
+        f"为每个新模式准备一条 `[NEW]` 补丁。\n\n"
+        f"## Step 3：产出文件\n\n"
+        f"按角色基因 §4 产出 `{reflection_path}`。**最多**对 3 个工作角色的笔记下发补丁。"
+        f"角色笔记必须**整份重写**（完整 frontmatter + 1-7 节正文 + DYNAMIC 区域），"
+        f"**只**修改 `<!-- DYNAMIC_START -->` 到 `<!-- DYNAMIC_END -->` 之间的内容。\n\n"
+        f"DYNAMIC 区域 = Step 1 调整后的旧补丁（带新证据行）+ Step 2 新增 `[NEW]` 补丁。\n\n"
         f"5 个可补丁的工作角色：\n{role_paths_hint}\n\n"
         f"复盘者本身（`角色-复盘者.md`）**禁止**修改（元角色避免反身循环）。\n\n"
         f"---\n\n"
         f"**输出格式（强制）**\n\n"
         f"必须输出 1 个 FILE 块（复盘记录主报告）+ 0-3 个 FILE 块（角色补丁）：\n\n"
         f"<!-- FILE: {reflection_path} -->\n"
-        f"（复盘记录正文）\n"
+        f"（复盘记录正文，含 §2.5 闭环验证）\n"
         f"<!-- /FILE -->\n\n"
         f"<!-- FILE: 00-系统/角色基因/角色-<某角色>.md -->\n"
         f"（整份角色笔记，DYNAMIC 区域填入新补丁）\n"
