@@ -23,7 +23,8 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
-from ..config import project_dir
+from ..canvas_export import build_canvas_from_state, write_canvas_atomic
+from ..config import VAULT_ROOT, project_dir
 from ..llm import call_llm
 from ..obsidian_io import write_note
 from ..role_loader import load_role
@@ -239,6 +240,17 @@ def _node_write_log(state: DiscussionState) -> dict:
 
     write_note(rel_path, "\n".join(lines))
     print(f"\n💬 讨论结束（{state['current_round']} 轮），笔记已写入：{rel_path}")
+
+    # Phase 5a-2：同位写一份 Obsidian Canvas 视图（grid 默认布局）
+    try:
+        canvas = build_canvas_from_state(state, layout="grid", draw_edges=True)
+        canvas_rel = f"10-项目/{project}/脑暴-{name}.canvas"
+        write_canvas_atomic(canvas, VAULT_ROOT / canvas_rel)
+        print(f"💬 Canvas 视图已写入：{canvas_rel}（{len(canvas['nodes'])} 节点 / {len(canvas['edges'])} 边）")
+    except Exception as e:
+        # Canvas 是 nice-to-have，失败不影响主流程
+        print(f"⚠️  Canvas 写入失败（不影响讨论结果）：{e}")
+
     return {"finished": True}
 
 
