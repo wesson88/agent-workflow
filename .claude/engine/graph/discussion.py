@@ -175,6 +175,22 @@ def _node_speak(state: DiscussionState) -> dict:
         "content": text.strip(),
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
+
+    # Phase 5a-3：每轮发言后**增量覆写** canvas，让 Obsidian 实时刷新
+    # （讨论结束后 _node_write_log 还会再写一次最终版，几乎无差异）
+    try:
+        live_state = {
+            **state,
+            "messages": list(state.get("messages", []) or []) + [msg],
+            "current_round": next_round,
+        }
+        canvas = build_canvas_from_state(live_state, layout="grid", draw_edges=True)
+        canvas_rel = f"10-项目/{state['project']}/脑暴-{state['discussion_name']}.canvas"
+        write_canvas_atomic(canvas, VAULT_ROOT / canvas_rel)
+    except Exception as e:
+        # 增量 canvas 失败不阻塞讨论流程；最终版还会再写一次
+        print(f"⚠️  增量 canvas 写入失败（忽略，继续讨论）：{e}")
+
     return {"messages": [msg], "current_round": next_round}
 
 
