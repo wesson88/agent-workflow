@@ -10,11 +10,12 @@ DYNAMIC_START/END 标记**保留在** body 中，由 build_system_prompt 端拼�
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from .config import role_genes_dir
+from .config import VAULT_ROOT, role_genes_dir
 from .obsidian_io import read_note, split_frontmatter
 
 
@@ -53,7 +54,10 @@ class Role:
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
 
-    # 笔记正文（含 DYNAMIC 区域，未做替换）
+    # 外迁的技能引用（vault 相对路径），load_role 时已 inline 拼到 body 末尾
+    skill_refs: tuple[str, ...]
+
+    # 笔记正文（含 DYNAMIC 区域 + 已 inline 的 skill 内容）
     body: str
 
     # 完整 frontmatter（debug/扩展用）
@@ -77,11 +81,44 @@ def _seq(value, default=()) -> tuple[str, ...]:
     return (str(value),)
 
 
+def _resolve_skill_refs(refs: tuple[str, ...], vault_root: Path) -> str:
+    """读取每个 skill 文件，去掉自身 frontmatter，用分隔符拼成单段。
+
+    缺失文件 → 占位 `[SKILL MISSING: <path>]` + stderr 警告，不 fail。
+    """
+    if not refs:
+        return ""
+    parts: list[str] = []
+    for ref in refs:
+        rel = ref.strip()
+        if not rel:
+            continue
+        path = (vault_root / rel).resolve()
+        if not path.is_file():
+            print(f"⚠️ skill_refs 缺文件：{rel}", file=sys.stderr)
+            parts.append(f"=== Skill: {rel} ===\n[SKILL MISSING: {rel}]")
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"⚠️ skill_refs 读失败 {rel}：{e}", file=sys.stderr)
+            parts.append(f"=== Skill: {rel} ===\n[SKILL READ ERROR: {e}]")
+            continue
+        _, sk_body = split_frontmatter(raw)
+        parts.append(f"=== Skill: {rel} ===\n{sk_body.strip()}")
+    if not parts:
+        return ""
+    return "\n\n## 引用技能（来自 skill_refs）\n\n" + "\n\n".join(parts)
+
+
 def _build_role(note_path: Path) -> Role:
     content = read_note(note_path)
     fm, body = split_frontmatter(content)
     if not fm.get("role"):
         raise ValueError(f"{note_path} 缺少 frontmatter.role 字段")
+    skill_refs = _seq(fm.get("skill_refs"))
+    skill_block = _resolve_skill_refs(skill_refs, VAULT_ROOT) if skill_refs else ""
+    body_with_skills = body + ("\n\n" + skill_block if skill_block else "")
     return Role(
         name=str(fm["role"]),
         aliases=_seq(fm.get("aliases")),
@@ -98,7 +135,8 @@ def _build_role(note_path: Path) -> Role:
         monitors=_seq(fm.get("monitors")),
         inputs=_seq(fm.get("inputs")),
         outputs=_seq(fm.get("outputs")),
-        body=body,
+        skill_refs=skill_refs,
+        body=body_with_skills,
         frontmatter=fm,
     )
 
