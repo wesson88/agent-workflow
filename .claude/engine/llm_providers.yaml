@@ -32,7 +32,7 @@ claude-sonnet-4-6:
     path: claude
     model: claude-sonnet-4-6
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--tools", ""]
+    extra_args: ["--print", "--verbose", "--output-format", "stream-json"]
     use_system_prompt_flag: true
 
 claude-opus-4-7:
@@ -46,7 +46,7 @@ claude-opus-4-7:
     path: claude
     model: claude-opus-4-7
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--tools", ""]
+    extra_args: ["--print", "--verbose", "--output-format", "stream-json"]
     use_system_prompt_flag: true
 
 claude-haiku-4-5:
@@ -60,7 +60,7 @@ claude-haiku-4-5:
     path: claude
     model: claude-haiku-4-5
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--tools", ""]
+    extra_args: ["--print", "--verbose", "--output-format", "stream-json"]
     use_system_prompt_flag: true
 
 # ── DeepSeek（OpenAI 兼容）────────────────────────────────

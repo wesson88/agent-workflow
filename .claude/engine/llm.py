@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,10 @@ import yaml
 
 _PROVIDERS_FILE = Path(__file__).parent / "llm_providers.yaml"
 _providers_cache: dict[str, dict] | None = None
+
+# Windows 命令行总长度上限 32767；预留出余量给其它参数。
+# 超过此阈值的 system_prompt 自动改走 stdin inline。
+_CMD_ARG_LIMIT = 8192
 
 
 # ── 配置加载 ─────────────────────────────────────────────
@@ -198,6 +203,30 @@ def _call_openai_compat(
 
 
 # ── 通用 CLI 子进程 ──────────────────────────────────────
+def _filter_extra_args(extra_args: list[str]) -> list[str]:
+    """过滤掉空字符串值的参数对（如 `--tools ""` → 删除整对）。
+
+    Claude CLI 把 `--tools ""` 解析为非法工具列表；保留会让 CLI 启动即报错，
+    导致 stdout pipe 立即 EOF，被上层误判为"管道崩溃"。
+    """
+    out: list[str] = []
+    skip_next = False
+    for i, arg in enumerate(extra_args):
+        if skip_next:
+            skip_next = False
+            continue
+        # 形如 ["--tools", ""] 的相邻对：当前是 --flag、下一个是空字符串
+        if (
+            arg.startswith("--")
+            and i + 1 < len(extra_args)
+            and extra_args[i + 1] == ""
+        ):
+            skip_next = True
+            continue
+        out.append(arg)
+    return out
+
+
 def _call_cli(
     cli_cfg: dict, system_prompt: str, user_prompt: str,
     print_stream: bool,
@@ -208,19 +237,30 @@ def _call_cli(
     - plain：纯文本输出（Gemini CLI / Ollama CLI 等）
     - use_system_prompt_flag=True：用 --system-prompt 替换默认（推荐）
       False：把 system 内联到 user prompt 前部（兼容无此 flag 的 CLI）
+
+    防 Windows pipe 死锁的三道护栏：
+    1. `--system-prompt` 超过 _CMD_ARG_LIMIT 自动改走 stdin inline
+       （Windows 命令行总长 32767 限制 + 长参数易触发 CLI 解析失败）
+    2. stdin 后台线程写入；主线程同步读 stdout（不互等）
+    3. stderr=DEVNULL：彻底丢弃 stderr buffer。注意 Claude CLI 的
+       --verbose（stream-json 必需）会往 stderr 写进度信息，若用 PIPE 不读
+       会撑满 buffer 导致整个 pipe 死锁——这是真正的根因。
+    另外：_filter_extra_args 剔除空字符串值的参数对（如 --tools ""），
+    避免 CLI 启动即被参数解析失败拒绝、stdout 立即 EOF 被误判为崩溃。
     """
     cli = shutil.which(cli_cfg["path"]) or cli_cfg["path"]
-    extra_args = list(cli_cfg.get("extra_args") or [])
+    extra_args = _filter_extra_args(list(cli_cfg.get("extra_args") or []))
     cmd = [cli] + extra_args
 
     if cli_cfg.get("model"):
         cmd.extend(["--model", cli_cfg["model"]])
 
     use_flag = bool(cli_cfg.get("use_system_prompt_flag", False))
-    if use_flag:
+    if use_flag and len(system_prompt) <= _CMD_ARG_LIMIT:
         cmd.extend(["--system-prompt", system_prompt])
         stdin_text = user_prompt
     else:
+        # inline 模式：system 走 stdin（避开命令行长度限制 / 解析失败）
         stdin_text = (
             "=== 系统指令（必须严格遵守，覆盖默认助手行为）===\n"
             f"{system_prompt}\n\n"
@@ -228,15 +268,32 @@ def _call_cli(
             f"{user_prompt}"
         )
 
+    stdin_bytes = stdin_text.encode("utf-8")
+
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,   # 彻底丢弃 stderr，防 buffer 撑满
     )
-    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
-    proc.stdin.write(stdin_text.encode("utf-8"))
-    proc.stdin.close()
+    assert proc.stdin is not None and proc.stdout is not None
+
+    # stdin 后台线程写入：避免 "stdin write 阻塞 + stdout 没读 → 死锁"
+    write_exc: list[BaseException] = []
+
+    def _write_stdin() -> None:
+        try:
+            proc.stdin.write(stdin_bytes)
+        except (BrokenPipeError, OSError) as e:
+            write_exc.append(e)
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+    writer = threading.Thread(target=_write_stdin, daemon=True)
+    writer.start()
 
     output_format = cli_cfg.get("output_format", "stream-json")
     chunks: list[str] = []
@@ -253,12 +310,15 @@ def _call_cli(
     else:
         raise ValueError(f"未知 output_format：{output_format}")
 
+    writer.join(timeout=5)
     rc = proc.wait()
     if print_stream:
         print()
     if rc != 0:
-        err = proc.stderr.read().decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"{cli} 退出码 {rc}：{err}")
+        # stderr 已 DEVNULL，无法回带原始消息；给出可操作 hint
+        raise RuntimeError(
+            f"{cli} 退出码 {rc}（stderr 已丢弃；可手工跑 `{' '.join(cmd[:6])} ...` 排查）"
+        )
     return "".join(chunks)
 
 
