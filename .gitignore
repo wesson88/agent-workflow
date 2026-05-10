@@ -17,8 +17,6 @@ build/
 
 # ── Node / 前端 ────────────────────────────────────────────
 node_modules/
-meeting-chat/frontend/dist/
-meeting-chat/frontend/.vite/
 
 # ── 运行时日志 ────────────────────────────────────────────
 logs/

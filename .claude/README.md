@@ -88,6 +88,7 @@ python .claude/engine/_smoke_test.py
 ## Phase 路线图
 
 - **Phase 1-3a：完成** — vault + engine + 工作流模板系统
-- **Phase 3b（下一步）**：跨领域角色（自媒体/生活）+ 跨域工作流模板
-- **Phase 4**：LangGraph 编排（讨论循环、并行）+ 复盘 agent（替代旧 self-healing）
-- **Phase 5**：Obsidian Canvas 实时仪表盘 + meeting-chat 退役
+- **Phase 4：完成** — LangGraph 编排（含讨论循环 / 上下文注入）+ 自愈机制完整闭环（复盘 agent 4d / 生命周期标记 4d.5 / 闭环验证 4e / 晋升者 4f / 知识沉淀者 4g / 跨项目实战 4h）
+- **Phase 5a：完成** — Obsidian Canvas 同位导出（5a-2）+ 实时增量（5a-3）+ 用户介入回流（5a-4）
+- **Phase 5b：完成** — meeting-chat 退役（被 Canvas 完整替代）
+- **后续**：跨领域角色（自媒体/生活）+ 跨域工作流模板；自愈机制内卷优化（4i-4l 待办）
