@@ -139,13 +139,32 @@ def _strip_evidence_lines(text: str) -> str:
 
 
 def _extract_dynamic_patch(body: str) -> str:
-    """从角色笔记正文里抽出 DYNAMIC 区域的有效补丁（过滤注释行）。"""
-    m = _DYNAMIC_RE.search(body)
-    if not m:
+    """从角色笔记正文里抽出 DYNAMIC 区域的有效补丁（过滤注释行）。
+
+    取**最后一对** DYNAMIC_START/DYNAMIC_END：角色笔记的 §3.1 / §4 等说明
+    段经常字面引用 `<!-- DYNAMIC_START -->` / `<!-- DYNAMIC_END -->` marker
+    （在反引号内），non-greedy `.*?` 会误抓到首个 marker → 末尾 marker
+    之间的内容，包括所有正文。固定取最后一对就是真正的控制区。
+
+    过滤两类无效行：
+    - markdown 注释 `# 这是注释`（含模板说明 / 占位符行）
+    - HTML 注释 `<!-- 元角色不接收自身补丁 -->`（元角色 DYNAMIC 区惯用占位）
+    """
+    matches = list(_DYNAMIC_RE.finditer(body))
+    if not matches:
         return ""
-    text = m.group(1).strip()
-    lines = [l for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
-    return "\n".join(lines).strip()
+    text = matches[-1].group(1).strip()
+    keep = []
+    for l in text.splitlines():
+        s = l.strip()
+        if not s:
+            continue
+        if s.startswith("#"):                         # markdown 注释
+            continue
+        if s.startswith("<!--") and s.endswith("-->"):  # HTML 注释
+            continue
+        keep.append(l)
+    return "\n".join(keep).strip()
 
 
 def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> str:
