@@ -114,6 +114,30 @@ _DYNAMIC_RE = re.compile(
 )
 
 
+# 闭环验证证据行：复盘者跨次对比用，对当前角色 LLM 执行无价值，剥离省 token。
+# 形如 `- 闭环验证 [2026-05-10]: 第 3 项目 _quiz-game ...` 整行剥除。
+_EVIDENCE_LINE_RE = re.compile(
+    r"^[ \t]*-\s*闭环验证\s*\[[^\]]+\][:：].*\n?",
+    re.MULTILINE,
+)
+
+
+def _strip_evidence_lines(text: str) -> str:
+    """剥离 DYNAMIC 区的"闭环验证"证据行（系统认知图谱 §12 P0 token 控制）。
+
+    证据行是复盘者每轮往 DYNAMIC 累加的"上轮补丁是否被消费"对照证据，
+    用于判定 [GRADUATE?] / [DROP?] 生命周期。对正在执行的工作角色 LLM
+    无意义——它只需要"补丁约束本身"，不需要看历史命中证据。
+
+    实测剥离效果（2026-05-10）：后端 -33% / 前端 -28% / 架构师 -16%。
+    单步系统提示节约 1-1.5K tokens。
+
+    复盘者读工作角色笔记走 `_gather_worker_role_notes` 直接读 vault 全文，
+    不走 build_system_prompt，证据行对复盘者仍可见。
+    """
+    return _EVIDENCE_LINE_RE.sub("", text)
+
+
 def _extract_dynamic_patch(body: str) -> str:
     """从角色笔记正文里抽出 DYNAMIC 区域的有效补丁（过滤注释行）。"""
     m = _DYNAMIC_RE.search(body)
@@ -129,9 +153,11 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
 
     结构：
         本角色 frontmatter 摘要
-        本角色正文（含 DYNAMIC 区域）
-        上游角色的 DYNAMIC 补丁（如有）
+        本角色正文（含 DYNAMIC 区域；闭环验证证据行已剥离）
+        上游角色的 DYNAMIC 补丁（已剥离证据行，如有）
         OUTPUT_FORMAT_SPEC
+
+    Token 控制（系统认知图谱 §12 P0）：剥离 DYNAMIC 区的"闭环验证"证据行。
     """
     role = load_role(role_name_or_alias)
 
@@ -141,13 +167,13 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
         f"风格：{role.style}",
     ]
     if role.skills:
-        summary.append(f"技能：{', '.join(role.skills)}")
+        summary.append(f"技能:{', '.join(role.skills)}")
 
     parts = [
         "## 角色摘要",
         "\n".join(summary),
         "",
-        role.body.strip(),
+        _strip_evidence_lines(role.body.strip()),
     ]
 
     # 上游补丁注入（保留 Phase 1 的"上游通过 DYNAMIC 影响下游"机制）
@@ -156,8 +182,8 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
             up_role = load_role(upstream_name)
         except RoleNotFound:
             continue
-        patch = _extract_dynamic_patch(up_role.body)
-        if patch:
+        patch = _strip_evidence_lines(_extract_dynamic_patch(up_role.body))
+        if patch.strip():
             parts.append("")
             parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
             parts.append(patch)
