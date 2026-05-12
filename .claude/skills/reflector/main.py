@@ -140,6 +140,38 @@ def _gather_worker_role_notes() -> list[Path]:
     return out
 
 
+def _gather_worker_skill_refs() -> list[Path]:
+    """工作角色 frontmatter 中 skill_refs 引用的 skill 文件（去重）。
+
+    复盘者闭环验证时需要看到主体外迁的完整规则——否则只读角色基因主体会
+    误以为某条 grep gate 已消失（实际是迁到 skill 文件了）。
+    """
+    rgd = role_genes_dir()
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for role in WORKER_ROLES:
+        role_file = rgd / f"角色-{role}.md"
+        if not role_file.exists():
+            continue
+        try:
+            from engine.obsidian_io import split_frontmatter
+            from engine.config import VAULT_ROOT
+            fm, _ = split_frontmatter(role_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        refs = fm.get("skill_refs") or []
+        if isinstance(refs, str):
+            refs = [refs]
+        for ref in refs:
+            if not isinstance(ref, str) or not ref.strip():
+                continue
+            sk = (VAULT_ROOT / ref.strip()).resolve()
+            if sk.is_file() and sk not in seen:
+                seen.add(sk)
+                out.append(sk)
+    return out
+
+
 def _gather_recent_reflections(limit: int = 5) -> list[Path]:
     """读最近 N 份复盘记录（按 mtime 倒序），用于闭环验证：让复盘者看到
     上轮的补丁动机与判定，避免只盯当前 DYNAMIC 文本反复 churn。"""
@@ -172,11 +204,12 @@ def main() -> int:
 
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
-    # 输入：项目产出 + 工作角色笔记 + 最近 N 份复盘记录（闭环验证用）
+    # 输入：项目产出 + 工作角色笔记 + 角色 skill_refs 外迁内容 + 最近 N 份复盘记录
     project_docs = _gather_project_outputs(project, days)
     role_notes = _gather_worker_role_notes()
+    skill_refs = _gather_worker_skill_refs()
     recent_reflections = _gather_recent_reflections(limit=5)
-    inputs = project_docs + role_notes + recent_reflections
+    inputs = project_docs + role_notes + skill_refs + recent_reflections
 
     if not project_docs:
         scope = f"项目 {project}" if project else "所有项目"
@@ -199,7 +232,7 @@ def main() -> int:
     print(
         f"[{ROLE}] 复盘范围：{'单项目=' + project if project else '所有项目'} / "
         f"窗口={days}d / 项目文档={len(project_docs)} 份 / 角色笔记={len(role_notes)} 份 / "
-        f"历史复盘={len(recent_reflections)} 份",
+        f"skill_refs={len(skill_refs)} 份 / 历史复盘={len(recent_reflections)} 份",
         flush=True,
     )
 
@@ -223,7 +256,11 @@ def main() -> int:
         f"- 项目：{project or '所有项目'}\n"
         f"- 时间窗口：最近 {days} 天\n"
         f"- 共扫描 {len(project_docs)} 份项目产出 + {len(role_notes)} 份角色笔记 "
-        f"+ {len(recent_reflections)} 份历史复盘记录\n\n"
+        f"+ {len(skill_refs)} 份 skill_refs 外迁文件 + {len(recent_reflections)} 份历史复盘记录\n\n"
+        f"# 关于 skill_refs 外迁文件\n"
+        f"工作角色 frontmatter 中 `skill_refs` 引用的文件位于 `20-知识/角色技能/{{角色}}/` 子树。"
+        f"它们是角色基因主体外迁的详细规则（grep gate / 反例 / 跨项目证据）。**判断补丁是否再现 / 是否已被主体覆盖时，"
+        f"必须同时查阅角色基因 + 对应的 skill_refs 内容**——否则会误以为某条 grep gate 已消失（实际是迁到 skill 文件了）。\n\n"
         f"# 输入文件全文\n\n{context}\n\n---\n\n"
         f"# 你的任务（必须严格按以下顺序）\n\n"
         f"## Step 1：闭环验证（先做，不可跳过）\n\n"

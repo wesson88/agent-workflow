@@ -186,11 +186,21 @@ def main() -> int:
             f"2. 把上面 DROP 的补丁从 DYNAMIC 区域**删除**\n"
             f"3. KEEP / NEW / 带 `?` 的标记**全部保留**\n"
             f"4. frontmatter `version` 升次版本号；`## 9. 版本历史`（或同等章节）加一行说明\n"
-            f"5. 输出整份完整内容到 FILE 块：\n\n"
+            f"5. **承载分离判断**（规范 §6.8 + §10）：融入 [GRADUATE] 后，估算目标章节字符数。若 ≥ 1500 chars 或单条补丁正文 ≥ 1200 chars，**应外迁到 skill 文件**而非全文塞进主体：\n"
+            f"   - 主体只留\"一句话核心约束 + skill 指针\"（如 \"详见 skill `B5-空集守卫.md`\"）\n"
+            f"   - frontmatter `skill_refs` 列表新增对应路径\n"
+            f"   - 新建 skill 文件输出为额外 FILE 块（路径 `20-知识/角色技能/{role_name}/<patch_id>-<短标题>.md`），含 type: skill / role / patch_id 的 frontmatter + 核心约束 + 详细规则 + grep gate + 跨项目证据\n"
+            f"6. 输出 FILE 块（角色笔记必填 + 可选多份 skill 文件）：\n\n"
             f"<!-- FILE: 00-系统/角色基因/角色-{role_name}.md -->\n"
-            f"（整份重写后内容）\n"
+            f"（整份重写后内容；超限时主体已收窄 + frontmatter `skill_refs` 已添加新路径）\n"
             f"<!-- /FILE -->\n\n"
-            f"**绝对不要**：触碰其它无关章节、修改自己（晋升者）的角色笔记、合并多份角色到一份输出。"
+            f"<!-- FILE: 20-知识/角色技能/{role_name}/<patch_id>-<短标题>.md -->\n"
+            f"（仅在判定为外迁时输出；否则省略本块）\n"
+            f"<!-- /FILE -->\n\n"
+            f"**绝对不要**：\n"
+            f"- 触碰其它无关章节 / 修改自己（晋升者）的角色笔记 / 合并多份角色到一份输出\n"
+            f"- 输出 `20-知识/角色技能/{role_name}/` 以外路径的 FILE 块（其它路径会被引擎拒写）\n"
+            f"- 主体未超 1500 / 补丁正文未超 1200 时强行外迁（产生零碎短 skill 文件违反规范 §10.6 反例）"
         )
 
         print(f"\n{'='*60}")
@@ -226,7 +236,24 @@ def main() -> int:
             skipped.append(role_name)
             continue
 
-        # 5) 审计 diff 摘要：原文与新文的字符增量、DYNAMIC 区前后大小
+        # 5) 收集可选 skill 文件：仅允许 `20-知识/角色技能/{role_name}/` 子树
+        skill_prefix = f"20-知识/角色技能/{role_name}/"
+        skill_files: list[tuple[str, str]] = []
+        rejected_paths: list[str] = []
+        for rel_path, content in files.items():
+            if rel_path == target:
+                continue
+            if rel_path.startswith(skill_prefix) and rel_path.endswith(".md"):
+                skill_files.append((rel_path, content))
+            else:
+                rejected_paths.append(rel_path)
+        for rp in rejected_paths:
+            print(
+                f"[{ROLE}] ⚠️  拒写非法路径 {rp}（只接受角色文件本身 + `{skill_prefix}*.md`）",
+                file=sys.stderr,
+            )
+
+        # 6) 审计 diff 摘要：原文与新文的字符增量、DYNAMIC 区前后大小
         old_dyn = _last_dynamic_body(text) or ""
         new_dyn = _last_dynamic_body(new_content) or ""
         body_old_len = len(text) - len(old_dyn)
@@ -234,15 +261,22 @@ def main() -> int:
         print(
             f"[{ROLE}] {role_name} diff 摘要："
             f"主体 {body_old_len} → {body_new_len} 字符（Δ {body_new_len - body_old_len:+d}）；"
-            f"DYNAMIC {len(old_dyn.strip())} → {len(new_dyn.strip())} 字符（Δ {len(new_dyn.strip()) - len(old_dyn.strip()):+d}）",
+            f"DYNAMIC {len(old_dyn.strip())} → {len(new_dyn.strip())} 字符（Δ {len(new_dyn.strip()) - len(old_dyn.strip()):+d}）"
+            f"{'；新建 skill ' + str(len(skill_files)) + ' 份' if skill_files else ''}",
             file=sys.stderr,
         )
 
-        # 6) 写盘
+        # 7) 写盘（角色文件 + 可选 skill 文件）
         dest = resolve_path(target, project=None)
         write_output_atomic(dest, new_content)
         print(f"[{ROLE}] ✅ 写入 {dest}")
         written.append(target)
+
+        for sk_path, sk_content in skill_files:
+            sk_dest = resolve_path(sk_path, project=None)
+            write_output_atomic(sk_dest, sk_content)
+            print(f"[{ROLE}] ✅ 写入 skill {sk_dest}")
+            written.append(sk_path)
 
     set_role_status(ROLE, status="success", reset_counters=True)
     set_role_status(ROLE, status="idle")
