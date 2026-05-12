@@ -72,6 +72,14 @@ PROJECT_NAME: str = (
     or "default"
 ).strip()
 
+# 项目代码根目录模板。支持 {project} 占位符。
+# 不设置 → 退回 PROJECT_ROOT（即引擎仓自身，legacy 行为；多项目共用 src/）
+# 设置 → 每个项目独立目录，例如 PROJECT_CODE_ROOT=D:/workstation/ai/tools/{project}
+#        会让 _pain-point-radar 的代码写到 D:/workstation/ai/tools/_pain-point-radar/
+PROJECT_CODE_ROOT_TEMPLATE: str | None = (
+    os.environ.get("PROJECT_CODE_ROOT") or None
+)
+
 ANTHROPIC_API_KEY: str | None = os.environ.get("ANTHROPIC_API_KEY") or None
 
 OBSIDIAN_REST_API_URL: str = os.environ.get(
@@ -104,6 +112,21 @@ def reflection_dir() -> Path:
 
 def workflow_template_dir() -> Path:
     return VAULT_ROOT / "00-系统" / "工作流模板"
+
+
+def project_code_root(project: str | None = None) -> Path:
+    """返回当前项目的代码根目录（src / tests / requirements.txt 等的容器）。
+
+    - 设了 `PROJECT_CODE_ROOT` 环境变量 → 展开 `{project}` 占位符并 `mkdir -p`
+    - 未设 → fallback 到 `PROJECT_ROOT`（引擎仓自身；legacy 多项目共用 src/ 行为）
+    """
+    if PROJECT_CODE_ROOT_TEMPLATE:
+        name = (project or PROJECT_NAME).strip() or "default"
+        expanded = PROJECT_CODE_ROOT_TEMPLATE.replace("{project}", name)
+        path = Path(expanded).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return PROJECT_ROOT
 
 
 # ── 路径模板解析 ─────────────────────────────────────────
@@ -162,19 +185,26 @@ def resolve_path(path_template: str, project: str | None = None) -> Path:
     if head in _VAULT_PREFIXES:
         return (VAULT_ROOT / expanded).resolve()
 
-    # 路径含目录前缀（src/、tests/ 等）→ 项目仓
+    code_root = project_code_root(project)
+
+    # 路径含目录前缀（src/、tests/ 等）→ 项目代码根
     if "/" in norm:
-        return (PROJECT_ROOT / expanded).resolve()
+        return (code_root / expanded).resolve()
 
-    # 裸文件名：白名单 → 仓根
+    # 裸文件名：白名单 → 项目代码根
     if expanded in _REPO_ROOT_WHITELIST:
-        return (PROJECT_ROOT / expanded).resolve()
+        return (code_root / expanded).resolve()
 
-    # 裸文件名 + 不在白名单 → 自动重定向到 10-项目/{project}/
+    # 裸文件名 + 不在白名单
+    # per-project 模式：code_root 已是项目专属目录，直接放进去安全
+    if PROJECT_CODE_ROOT_TEMPLATE:
+        return (code_root / expanded).resolve()
+
+    # legacy 模式（PROJECT_CODE_ROOT 未设）：避免覆盖引擎仓文件，重定向到 vault
     redirected = f"10-项目/{name}/{expanded}"
     print(
         f"⚠️  路径自动重定向：'{path_template}' → '{redirected}' "
-        f"（裸文件名不在仓根白名单，避免覆盖引擎仓文件）",
+        f"（裸文件名不在仓根白名单 + 未配 PROJECT_CODE_ROOT，避免覆盖引擎仓文件）",
         file=sys.stderr,
     )
     return (VAULT_ROOT / redirected).resolve()
