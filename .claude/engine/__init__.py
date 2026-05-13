@@ -26,7 +26,7 @@ from .role_loader import (
 )
 from .state import (
     get_role_status, set_role_status, role_is_blocked,
-    summarize_all_roles,
+    summarize_all_roles, validate_transition,
 )
 from . import runtime_state
 from .git_sync import (

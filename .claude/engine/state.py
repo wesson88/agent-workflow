@@ -37,6 +37,25 @@ ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
 }
 
 
+def validate_transition(
+    role_name: str,
+    current_status: str,
+    target_status: str,
+) -> None:
+    """纯函数：校验状态机转换合法性，非法时抛出 ValueError。
+
+    单一职责：仅做校验，不读写任何状态存储。
+    调用方 set_role_status 在 enforce_transition=True 时使用本函数。
+    也可单独用于测试或 pre-flight 检查。
+    """
+    allowed = ALLOWED_TRANSITIONS.get(current_status, ())
+    if target_status not in allowed and target_status != current_status:
+        raise ValueError(
+            f"非法状态转换：{role_name} {current_status} → {target_status}"
+            f"（合法：{allowed}）"
+        )
+
+
 # ── 读 ───────────────────────────────────────────────────
 def get_role_status(name_or_alias: str) -> dict[str, Any]:
     """返回 {status, last_run, consecutive_failures, error_count, last_output_path}。
@@ -95,12 +114,7 @@ def set_role_status(
 
     if status is not None:
         if enforce_transition:
-            allowed = ALLOWED_TRANSITIONS.get(current.get("status", "idle"), ())
-            if status not in allowed and status != current.get("status"):
-                raise ValueError(
-                    f"非法状态转换：{role.name} {current.get('status')} → {status}"
-                    f"（合法：{allowed}）"
-                )
+            validate_transition(role.name, current.get("status", "idle"), status)
         patch["status"] = status
 
     if reset_counters:

@@ -365,8 +365,8 @@ def _read_stream_json(stdout, print_stream: bool) -> list[str]:
 
 
 # ── 向后兼容（Phase 2b 旧接口）──────────────────────────
-# common.py 用 `from engine.llm import call_claude as _llm_call_claude`；
-# 这里保留 alias 让现有调用零改动。
+# 原 call_claude alias 已合并入 call_llm（统一 provider-agnostic 入口）。
+# 保留 call_claude 仅供旧代码过渡，新代码请直接使用 call_llm。
 call_claude = call_llm
 
 

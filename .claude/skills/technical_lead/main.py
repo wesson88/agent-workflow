@@ -16,16 +16,16 @@ CLI：
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common import (
-    parse_args, build_system_prompt, read_input_files,
+    parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
+    enforce_output_limits,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -35,19 +35,10 @@ from engine import (
 ROLE = "技术主管"
 
 
-def _resolve_project(args) -> str:
-    return (
-        args.project
-        or os.environ.get("PROJECT")
-        or os.environ.get("PROJECT_NAME")
-        or "default"
-    ).strip() or "default"
-
-
 def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
-    project = _resolve_project(args)
+    project = resolve_project(args)
 
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
@@ -126,11 +117,14 @@ def main() -> int:
         })
         return 1
 
+    # § 15 层一强制执行：写盘前检查体积，超限触发 haiku 重写
+    LIMIT_CHARS = 30 * 1024  # 30KB，对应角色约束 §7
     output_files = parse_claude_output_to_files(raw_output)
     if not output_files:
         # 降级：整体写入给后端.md
         dest = proj_dir / "指令" / "给后端.md"
-        write_output_atomic(dest, raw_output)
+        enforced = enforce_output_limits(raw_output, ROLE, dest.name, LIMIT_CHARS)
+        write_output_atomic(dest, enforced)
         written = [f"10-项目/{project}/指令/给后端.md"]
         print(f"[{ROLE}] 未检测到 FILE 标签，降级写入 {dest}")
     else:
@@ -138,6 +132,9 @@ def main() -> int:
         for rel_path, content in output_files.items():
             rel_resolved = rel_path.replace("{project}", project)
             dest = resolve_path(rel_resolved, project)
+            # 对指令文件（给后端/给前端）强制执行体积约束
+            if "给后端" in dest.name or "给前端" in dest.name:
+                content = enforce_output_limits(content, ROLE, dest.name, LIMIT_CHARS)
             write_output_atomic(dest, content)
             print(f"[{ROLE}] 写入: {dest}")
             written.append(rel_resolved)

@@ -155,6 +155,44 @@ def _run_pre_flight(
     return splits
 
 
+# ── 执行策略（单一职责：仅负责运行 subprocess，不做判断/状态）─────────────────
+def _execute_single(
+    main_py: Path,
+    task: str,
+    project: str,
+    env: dict,
+) -> int:
+    """单次调用 main.py，返回 returncode。"""
+    return subprocess.run(
+        [sys.executable, str(main_py),
+         "--task", task,
+         "--project", project],
+        env=env,
+    ).returncode
+
+
+def _execute_with_subtasks(
+    main_py: Path,
+    task: str,
+    project: str,
+    sub_tasks: list[dict],
+    env: dict,
+) -> int:
+    """按子任务列表逐一调用 main.py，任意子任务失败即返回非零 returncode。"""
+    total = len(sub_tasks)
+    for i, st in enumerate(sub_tasks, 1):
+        focus = st.get("focus", f"子任务{i}")
+        outputs = st.get("outputs", [])
+        sub_task_desc = (
+            f"{task} [子任务 {i}/{total}：{focus}，产出={outputs}]"
+        )
+        print(f"\n── 子任务 {i}/{total}: focus={focus} ──")
+        rc = _execute_single(main_py, sub_task_desc, project, env)
+        if rc != 0:
+            return rc
+    return 0
+
+
 # ── 单角色 node（含 pre_flight + post_compress）─────────────────────────────────
 def make_role_node(
     role_name: str,
@@ -203,41 +241,23 @@ def make_role_node(
         env["TASK"] = state["task"]
 
         if sub_tasks_to_run:
-            # 拆分执行：每个 sub_task 独立一次 main.py 调用
             print(f"\n✂️  拆分为 {len(sub_tasks_to_run)} 个子任务执行")
-            for i, st in enumerate(sub_tasks_to_run, 1):
-                focus = st.get("focus", f"子任务{i}")
-                outputs = st.get("outputs", [])
-                sub_task_desc = f"{state['task']} [子任务 {i}/{len(sub_tasks_to_run)}：{focus}，产出={outputs}]"
-                print(f"\n── 子任务 {i}/{len(sub_tasks_to_run)}: focus={focus} ──")
-                rc = subprocess.run(
-                    [sys.executable, str(main_py),
-                     "--task", sub_task_desc,
-                     "--project", state["project"]],
-                    env=env,
-                ).returncode
-                if rc != 0:
-                    print(f"\n❌ {role_name} 子任务 {i} 失败（exit={rc}）")
-                    patch = {"failed": [role_name]}
-                    if halt_on_failure:
-                        patch["halted"] = True
-                    return patch
-            print(f"\n✅ {role_name} 所有子任务完成")
+            rc = _execute_with_subtasks(
+                main_py, state["task"], state["project"],
+                sub_tasks_to_run, env,
+            )
         else:
-            # 单次执行（原有逻辑）
-            rc = subprocess.run(
-                [sys.executable, str(main_py),
-                 "--task", state["task"],
-                 "--project", state["project"]],
-                env=env,
-            ).returncode
-            if rc != 0:
-                print(f"\n❌ {role_name} 失败（exit={rc}）")
-                patch = {"failed": [role_name]}
-                if halt_on_failure:
-                    patch["halted"] = True
-                    print("中断后续步骤（halt_on_failure=True）")
-                return patch
+            rc = _execute_single(
+                main_py, state["task"], state["project"], env,
+            )
+
+        if rc != 0:
+            print(f"\n❌ {role_name} 失败（exit={rc}）")
+            patch = {"failed": [role_name]}
+            if halt_on_failure:
+                patch["halted"] = True
+                print("中断后续步骤（halt_on_failure=True）")
+            return patch
 
         print(f"\n✅ {role_name} 完成")
 

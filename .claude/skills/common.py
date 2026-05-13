@@ -1,19 +1,18 @@
 """
 common.py - Skill 执行层共享工具（Phase 2b 起改为 vault-based）
 
-本模块的关键变化（vs Phase 1）：
-- read_skill_md / extract_dynamic_patch 移除 → 由 engine.role_loader 取代
-- build_system_prompt 改为基于 vault 角色笔记
-- get_*_dir 快捷方式移除 → 用 engine.config 的 project_dir / rules_dir 等
-- update_skill_status / load_status / save_status 移除 → 用 engine.state.set_role_status
+Phase 5 重构：本文件已按职责拆分为四个子模块：
+  - prompt_builder.py：build_system_prompt / OUTPUT_FORMAT_SPEC / render_required_outputs
+  - input_reader.py：read_input_files / _extract_sections
+  - output_parser.py：parse_claude_output_to_files / write_output_atomic
+  - audit.py：append_audit / utc_now
 
-仍保留在本模块的：
-- parse_args（CLI，新增 --project）
-- read_input_files（文件批量读取）
-- write_output_atomic（原子写入）
-- parse_claude_output_to_files（解析 <!-- FILE: --> 标签）
-- call_claude（Anthropic API 调用，max_tokens/model 自动从角色 frontmatter 读取）
-- append_audit / utc_now（审计日志，Phase 4 会迁到 vault 复盘记录）
+本文件继续作为向后兼容的 re-export 聚合入口，各 skill/main.py 无需修改 import。
+
+仍在本模块的核心功能：
+  - parse_args / resolve_project（CLI）
+  - call_claude（Anthropic API 调用）
+  - check_size_limit / compress_to_limit / enforce_output_limits（层一体积控制）
 """
 
 from __future__ import annotations
@@ -38,10 +37,26 @@ except (AttributeError, ValueError):
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine import load_role, RoleNotFound  # noqa: E402
 from engine.config import PROJECT_ROOT  # noqa: E402
-from engine.llm import call_claude as _llm_call_claude  # noqa: E402
+from engine.llm import call_llm as _llm_call_llm  # noqa: E402
 
 
 # ── CLI ─────────────────────────────────────────────────
+def resolve_project(args: argparse.Namespace) -> str:
+    """从 CLI 参数或环境变量解析项目名，最终默认 'default'。
+
+    优先级：--project > $PROJECT > $PROJECT_NAME > 'default'
+    集中到 common.py，各 skill/main.py 无需重复实现。
+    """
+    import os
+    raw = (
+        args.project
+        or os.environ.get("PROJECT")
+        or os.environ.get("PROJECT_NAME")
+        or "default"
+    )
+    return raw.strip() or "default"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -450,16 +465,16 @@ def append_audit(entry: dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-# ── Claude API 调用 ──────────────────────────────────────
+# ── LLM API 调用（按角色配置路由）──────────────────────────────────────────────
 _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
-def call_claude(system_prompt: str, user_prompt: str, role_name_or_alias: str) -> str:
-    """Streaming 调用 Claude；max_tokens / model 从角色 frontmatter 读取。
+def call_llm_for_role(system_prompt: str, user_prompt: str, role_name_or_alias: str) -> str:
+    """从角色 frontmatter 读取 model/max_tokens 后调用 engine.llm.call_llm。
 
-    底层路由由 engine.llm 处理：API key 在则走 Anthropic SDK，
-    否则走 `claude --print` CLI（用户的 Claude Code MAX 订阅）。
+    单一职责：负责"角色配置读取 + 调用路由"，不重复实现 streaming 逻辑。
+    底层路由由 engine.llm 处理（API key → SDK，否则 → CLI）。
     """
     try:
         role = load_role(role_name_or_alias)
@@ -472,11 +487,121 @@ def call_claude(system_prompt: str, user_prompt: str, role_name_or_alias: str) -
         display_name = role_name_or_alias
 
     print(
-        f"[{display_name}] 调用 Claude (model={model}, max_tokens={max_tokens})...",
+        f"[{display_name}] 调用 LLM (model={model}, max_tokens={max_tokens})...",
         flush=True,
     )
 
-    return _llm_call_claude(
+    return _llm_call_llm(
         system_prompt, user_prompt,
         model=model, max_tokens=max_tokens,
+    )
+
+
+# 向后兼容：旧代码调用 call_claude(system, user, role) 继续有效
+call_claude = call_llm_for_role
+
+
+# ── 层一强制执行：输出体积硬校验 ────────────────────────────────────────────────
+_ENFORCE_SYSTEM = """你是文档精简专家。将输入文档重写为符合体积约束的版本。
+
+规则：
+- 目标：最终文档 ≤ {limit_chars} 字符
+- 保留：所有接口定义、验收标准、路径约束、功能点编号
+- 删除：背景说明、架构推理、设计原因、重复的上下文、示例代码（>10行的）
+- 格式：保持原有 Markdown 结构，任务用编号列表
+- 禁止新增任何原文没有的需求或接口
+- 直接输出重写后的文档，不加任何解释前缀
+"""
+
+
+def check_size_limit(content: str, limit_chars: int) -> bool:
+    """纯函数：判断 content 是否在 limit_chars 以内。
+
+    单一职责：仅做尺寸检测，不产生任何副作用。
+    """
+    return len(content) <= limit_chars
+
+
+def compress_to_limit(
+    content: str,
+    filename: str,
+    limit_chars: int,
+    *,
+    max_retries: int = 2,
+) -> str:
+    """调用 haiku 将 content 重写至 ≤ limit_chars；重试耗尽则硬截断。
+
+    单一职责：仅做压缩/截断，不做判断（判断由调用方或 check_size_limit 负责）。
+    返回合规的内容字符串（硬截断时附加警告注释）。
+    """
+    from engine.llm import call_llm
+
+    system = _ENFORCE_SYSTEM.format(limit_chars=limit_chars)
+    current = content
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            rewritten = call_llm(
+                system,
+                f"请将以下文档重写为 ≤ {limit_chars} 字符的版本：\n\n{current}",
+                model="claude-haiku-4-5",
+                max_tokens=4096,
+                print_stream=False,
+            )
+        except Exception as e:
+            print(
+                f"[compress_to_limit] ❌ haiku 重写失败（尝试 {attempt}/{max_retries}）：{e}",
+                file=sys.stderr,
+            )
+            break
+
+        print(
+            f"[compress_to_limit] 尝试 {attempt}/{max_retries}："
+            f"{len(current)} → {len(rewritten)} chars",
+            file=sys.stderr,
+        )
+
+        if check_size_limit(rewritten, limit_chars):
+            print(
+                f"[compress_to_limit] ✅ {filename} 重写合规 ({len(rewritten)} chars)",
+                file=sys.stderr,
+            )
+            return rewritten
+
+        current = rewritten  # 仍超限，用重写结果继续压缩
+
+    # 重试耗尽：硬截断兜底
+    print(
+        f"[compress_to_limit] ⚠️ {filename} 重写 {max_retries} 次后仍超限，硬截断。",
+        file=sys.stderr,
+    )
+    truncated = current[:limit_chars]
+    truncated += f"\n\n<!-- ⚠️ 文档已被强制截断至 {limit_chars} 字符。原文 {len(content)} 字符。-->"
+    return truncated
+
+
+def enforce_output_limits(
+    content: str,
+    role: str,
+    filename: str,
+    limit_chars: int,
+    *,
+    max_retries: int = 2,
+) -> str:
+    """层一强制执行：若内容超出 limit_chars，调用 haiku 重写直到合规。
+    § 15 层一增强：把"约束写在 prompt 里靠模型自觉"升级为"程序检测 + 强制压缩"。
+
+    组合调用：check_size_limit（判断）+ compress_to_limit（重写/截断）。
+    返回合规的内容字符串。
+    """
+    if check_size_limit(content, limit_chars):
+        return content  # 已合规，直接返回
+
+    print(
+        f"[enforce_output_limits] ⚠️ {filename} 超限 "
+        f"({len(content)} > {limit_chars} chars)，触发 haiku 强制重写...",
+        file=sys.stderr,
+    )
+    return compress_to_limit(
+        content, filename, limit_chars, max_retries=max_retries
     )
