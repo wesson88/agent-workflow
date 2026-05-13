@@ -79,6 +79,16 @@ def main() -> int:
         })
         return 2
 
+    # § 15 层二：输入预检 —— 给后端.md 体积告警
+    backend_size = to_backend.stat().st_size if to_backend.exists() else 0
+    if backend_size > 30 * 1024:  # 30KB
+        print(
+            f"[{ROLE}] ⚠️ 给后端.md 体积 {backend_size // 1024}KB 超过 30KB 约束。"
+            f"技术主管产出可能未遵守输出体积限制（§15 层一）。"
+            f"本次仍继续执行，但输入将被截断到 25000 chars。",
+            file=sys.stderr,
+        )
+
     system_prompt = build_system_prompt(ROLE, project=project)
     context = read_input_files([to_backend, sys_design, prd, tech_stack])
 
@@ -104,6 +114,17 @@ def main() -> int:
     try:
         raw_output = call_claude(system_prompt, user_prompt, ROLE)
     except Exception as e:
+        err_str = str(e)
+        # § 15 层四：输出端超限检测
+        error_phase = "llm_call"
+        if any(k in err_str.lower() for k in ["context", "token", "length", "limit"]):
+            error_phase = "output_overflow"
+            print(
+                f"[{ROLE}] ⚠️ 疑似输出超限（max_tokens）。建议：\n"
+                f"  1. 检查给后端.md 是否仍超 30KB（§15 层一）\n"
+                f"  2. 在工作流 YAML 中为后端工程师配置 sub_tasks 分轮执行（§15 层四）",
+                file=sys.stderr,
+            )
         print(f"[{ROLE}] Claude API 调用失败：{e}", file=sys.stderr)
         set_role_status(
             ROLE, status="failed",
@@ -112,7 +133,8 @@ def main() -> int:
         )
         append_audit({
             "timestamp": utc_now(), "role": ROLE, "project": project,
-            "task": task, "result": "failed", "error": str(e),
+            "task": task, "result": "failed", "error": err_str,
+            "error_phase": error_phase,
         })
         return 1
 
