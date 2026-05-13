@@ -39,6 +39,13 @@ class WorkflowStep:
     type=discussion: 多角色辩论（Phase 4b 起支持）
     type=parallel: 多角色并发（未实现）
     type=discussion-loop: 多角色循环对话（已被 type=discussion 取代）
+
+    Phase 5 新增字段（层三/层四）：
+      post_compress: 角色完成后压缩指定输出文件（层三 haiku 钩子）
+        格式: {target_chars: 8000, outputs: ["10-项目/{project}/指令/给后端.md"]}
+      pre_flight: 执行前用 haiku 评估复杂度，决定是否拆分（层四）
+        格式: {instruction_file: "10-项目/{project}/指令/给后端.md", split_limit_lines: 400}
+      auto_split: true 时自动触发 pre_flight（需同时提供 pre_flight 配置）
     """
     type: str = "linear"
 
@@ -51,6 +58,13 @@ class WorkflowStep:
     moderator: str | None = None               # 主持人（None = 第一个参与者主持）
     max_rounds: int = 5                        # 讨论最大轮数（每轮 = 一个角色发言）
     topic_template: str | None = None          # 议题模板（可引用 {project} 等占位符）
+
+    # 层三：post_compress haiku 钩子
+    post_compress: dict | None = None
+
+    # 层四：pre_flight 复杂度评估 + 自动拆分
+    pre_flight: dict | None = None
+    auto_split: bool = False
 
     # 兜底未识别字段
     extras: dict = field(default_factory=dict, repr=False)
@@ -67,7 +81,17 @@ class WorkflowStep:
                 role = data.get("role")
                 if not role:
                     raise ValueError(f"linear step 缺少 role 字段: {data}")
-                return cls(type="linear", role=str(role))
+                # 解析层三/层四配置
+                post_compress = data.get("post_compress") or None
+                pre_flight = data.get("pre_flight") or None
+                auto_split = bool(data.get("auto_split", False))
+                return cls(
+                    type="linear",
+                    role=str(role),
+                    post_compress=post_compress,
+                    pre_flight=pre_flight,
+                    auto_split=auto_split,
+                )
             if t == "discussion":
                 roles = tuple(str(r) for r in (data.get("roles") or data.get("participants") or ()))
                 if not roles:

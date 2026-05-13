@@ -211,15 +211,82 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     return "\n".join(parts)
 
 
-# ── 输入文件批量读取 ─────────────────────────────────────
-def read_input_files(file_paths: list) -> str:
+# ── 输入文件批量读取 ──────────────────────────────────────────────────────────────
+def _extract_sections(content: str, sections: list[str]) -> str:
+    """从 Markdown 文档中只提取指定章节（## 标题匹配）。
+    匹配规则：标题文字包含 section 关键词即命中（大小写不敏感）。
+    若无任何章节命中，返回原文并附加警告。
+    """
+    if not sections:
+        return content
+    lines = content.splitlines(keepends=True)
+    result: list[str] = []
+    in_section = False
+    current_level = 0
+    for line in lines:
+        heading = None
+        for lvl in range(1, 7):
+            prefix = "#" * lvl + " "
+            if line.startswith(prefix):
+                heading = (lvl, line[lvl + 1:].strip())
+                break
+        if heading:
+            lvl, title = heading
+            # 检查是否命中目标章节
+            is_target = any(s.lower() in title.lower() for s in sections)
+            if is_target:
+                in_section = True
+                current_level = lvl
+                result.append(line)
+            elif in_section and lvl <= current_level:
+                # 遇到同级或更高级标题，退出当前章节
+                in_section = False
+            elif in_section:
+                result.append(line)
+        elif in_section:
+            result.append(line)
+    if not result:
+        section_list = ", ".join(sections)
+        return (
+            content
+            + f"\n\n⚠️ [sections 警告] 未找到章节 [{section_list}]，已返回全文。"
+        )
+    return "".join(result)
+
+
+def read_input_files(
+    file_paths: list,
+    max_chars_per_file: int = 25000,
+    max_total_chars: int = 80000,
+) -> str:
     """合并多个输入文件为带分隔符的上下文块，供 user prompt 使用。
+    § 15 上游堆积治理（层二：引擎截断兜底）：
+
+    - max_chars_per_file：单文件超限时截断并追加警告，防止单一大文件打爆上下文
+    - max_total_chars：所有文件合计超限时，按声明顺序优先保留，丢弃末尾文件
+
+    层二扩展（section 选择器）：
+    file_paths 中每个元素可以是：
+      - str / Path：直接读取整个文件（原有行为）
+      - dict：{ "path": ..., "max_chars": ..., "sections": [...] }
+        max_chars  覆盖默认单文件上限
+        sections   只提取指定 ## 章节（关键词匹配）
 
     文件不存在或读取失败时不阻断流程，写入占位说明。
     """
     parts = []
-    for fp in file_paths:
-        fp = Path(fp)
+    total_chars = 0
+    for fp_entry in file_paths:
+        # 解析结构化 entry
+        if isinstance(fp_entry, dict):
+            fp = Path(fp_entry["path"])
+            file_max = int(fp_entry.get("max_chars", max_chars_per_file))
+            sections = fp_entry.get("sections") or []
+        else:
+            fp = Path(fp_entry)
+            file_max = max_chars_per_file
+            sections = []
+
         if fp.exists() and fp.is_file():
             try:
                 content = fp.read_text(encoding="utf-8")
@@ -227,7 +294,53 @@ def read_input_files(file_paths: list) -> str:
                 content = f"（读取失败：{e}）"
         else:
             content = "（文件不存在或为空）"
-        parts.append(f"=== {fp.name} ===\n{content}\n===")
+
+        # 层二扩展：章节裁剪（在截断前做，尽量保留有效内容）
+        if sections:
+            content = _extract_sections(content, sections)
+
+        # 单文件截断
+        if len(content) > file_max:
+            original_len = len(content)
+            content = content[:file_max]
+            content += (
+                f"\n\n⚠️ [截断警告] 原文 {original_len} 字符，"
+                f"已截取前 {file_max} 字符。"
+                f"请检查角色产出体积是否超出约束（§15 层一：≤30KB）。"
+            )
+            print(
+                f"[read_input_files] ⚠️ {fp.name} 超过单文件限制"
+                f"（{original_len} > {file_max} chars），已截断。",
+                file=sys.stderr,
+            )
+
+        block = f"=== {fp.name} ===\n{content}\n==="
+        block_len = len(block)
+
+        # 总量截断：超出后丢弃后续文件
+        if total_chars + block_len > max_total_chars:
+            remaining = max_total_chars - total_chars
+            if remaining > 500:
+                block = block[:remaining] + (
+                    f"\n\n⚠️ [总量截断] 已达 {max_total_chars} 字符上限，"
+                    f"{fp.name} 剩余内容及后续文件已丢弃。"
+                )
+                parts.append(block)
+            else:
+                parts.append(
+                    f"=== {fp.name} ===\n"
+                    f"⚠️ [总量截断] 已达 {max_total_chars} 字符上限，本文件已跳过。\n==="
+                )
+            print(
+                f"[read_input_files] ⚠️ 总输入量超过 {max_total_chars} chars 上限，"
+                f"从 {fp.name} 起截断，后续文件丢弃。",
+                file=sys.stderr,
+            )
+            break
+
+        parts.append(block)
+        total_chars += block_len
+
     return "\n\n".join(parts)
 
 
