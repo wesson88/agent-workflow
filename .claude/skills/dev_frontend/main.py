@@ -58,15 +58,20 @@ def main() -> int:
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
     proj_dir = project_dir(project)
-    to_frontend = proj_dir / "指令" / "给前端.md"
+    to_frontend_orig = proj_dir / "指令" / "给前端.md"
+    to_frontend_compressed = proj_dir / "指令" / "给前端-压缩.md"
+    # § 15 层三：优先使用 haiku 压缩版
+    to_frontend = to_frontend_compressed if to_frontend_compressed.exists() else to_frontend_orig
+    if to_frontend_compressed.exists():
+        print(f"[{ROLE}] 📄 使用压缩版指令：给前端-压缩.md")
     prd = proj_dir / "PRD.md"
     sys_design = proj_dir / "系统设计.md"
     api_spec = proj_dir / "API契约.md"     # 可选（后端先跑则有）
     tech_stack = rules_dir() / "技术栈.md"
 
-    if not to_frontend.exists() or not sys_design.exists():
+    if not to_frontend_orig.exists() or not sys_design.exists():
         print(
-            f"[{ROLE}] 必需输入缺失：{to_frontend} 或 {sys_design}。请先跑技术主管。",
+            f"[{ROLE}] 必需输入缺失：{to_frontend_orig} 或 {sys_design}。请先跑技术主管。",
             file=sys.stderr,
         )
         set_role_status(
@@ -151,11 +156,11 @@ def main() -> int:
     else:
         written = []
         for rel_path, content in output_files.items():
-            rel_resolved = rel_path.replace("{project}", project)
-            dest = resolve_path(rel_resolved, project)
+            rel_path = rel_path.replace("{project}", project)
+            dest = resolve_path(rel_path, project)
             write_output_atomic(dest, content)
             print(f"[{ROLE}] 写入: {dest}")
-            written.append(rel_resolved)
+            written.append(rel_path)
 
     set_role_status(
         ROLE, status="success",

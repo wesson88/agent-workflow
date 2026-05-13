@@ -58,14 +58,19 @@ def main() -> int:
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
     proj_dir = project_dir(project)
-    to_backend = proj_dir / "指令" / "给后端.md"
+    to_backend_orig = proj_dir / "指令" / "给后端.md"
+    to_backend_compressed = proj_dir / "指令" / "给后端-压缩.md"
+    # § 15 层三：优先使用 haiku 压缩版（体积更小，下游读取更安全）
+    to_backend = to_backend_compressed if to_backend_compressed.exists() else to_backend_orig
+    if to_backend_compressed.exists():
+        print(f"[{ROLE}] 📄 使用压缩版指令：给后端-压缩.md")
     sys_design = proj_dir / "系统设计.md"
     prd = proj_dir / "PRD.md"
     tech_stack = rules_dir() / "技术栈.md"
 
-    if not to_backend.exists() or not sys_design.exists():
+    if not to_backend_orig.exists() or not sys_design.exists():
         print(
-            f"[{ROLE}] 必需输入缺失：{to_backend} 或 {sys_design}。请先跑技术主管。",
+            f"[{ROLE}] 必需输入缺失：{to_backend_orig} 或 {sys_design}。请先跑技术主管。",
             file=sys.stderr,
         )
         set_role_status(
