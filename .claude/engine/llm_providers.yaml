@@ -6,6 +6,11 @@
 # Schema：
 #   mode:    dual_track / api_only / cli_only
 #   prefer:  auto / api / cli  （仅 dual_track 有效；auto = api 优先，回退 cli）
+#   tokenizer: cl100k_base / o200k_base / chars
+#              由 engine/token_counter.py 使用，决定 tiktoken 分词器。
+#              cl100k_base  — Claude / DeepSeek / LLaMA 等
+#              o200k_base   — GPT-4o / GPT-4o-mini
+#              chars        — 无公开分词器，用 chars // 2.5 估算（Gemini 等）
 #   api:
 #     kind:     anthropic / openai_compat
 #     key_env:  存放 API key 的环境变量名
@@ -24,6 +29,7 @@
 claude-sonnet-4-6:
   mode: dual_track
   prefer: auto
+  tokenizer: cl100k_base
   api:
     kind: anthropic
     key_env: ANTHROPIC_API_KEY
@@ -38,6 +44,7 @@ claude-sonnet-4-6:
 claude-opus-4-7:
   mode: dual_track
   prefer: auto
+  tokenizer: cl100k_base
   api:
     kind: anthropic
     key_env: ANTHROPIC_API_KEY
@@ -52,6 +59,7 @@ claude-opus-4-7:
 claude-haiku-4-5:
   mode: dual_track
   prefer: auto
+  tokenizer: cl100k_base
   api:
     kind: anthropic
     key_env: ANTHROPIC_API_KEY
@@ -67,6 +75,7 @@ claude-haiku-4-5:
 # 启用前需在 .env 中设置 DEEPSEEK_API_KEY=sk-...
 deepseek-v3:
   mode: api_only
+  tokenizer: cl100k_base
   api:
     kind: openai_compat
     key_env: DEEPSEEK_API_KEY
@@ -75,6 +84,7 @@ deepseek-v3:
 
 deepseek-reasoner:
   mode: api_only
+  tokenizer: cl100k_base
   api:
     kind: openai_compat
     key_env: DEEPSEEK_API_KEY
@@ -85,6 +95,7 @@ deepseek-reasoner:
 # 启用前需在 .env 中设置 OPENAI_API_KEY=sk-...
 gpt-4o:
   mode: api_only
+  tokenizer: o200k_base
   api:
     kind: openai_compat
     key_env: OPENAI_API_KEY
@@ -93,27 +104,102 @@ gpt-4o:
 
 gpt-4o-mini:
   mode: api_only
+  tokenizer: o200k_base
   api:
     kind: openai_compat
     key_env: OPENAI_API_KEY
     base_url: https://api.openai.com/v1
     model: gpt-4o-mini
 
-# ── Gemini CLI（仅 CLI，无官方 OpenAI 兼容端点）───────────
-# 启用前需安装 gemini CLI 工具
-gemini-pro:
-  mode: cli_only
+# ── Gemini ────────────────────────────────────────────────
+# Gemini 使用 SentencePiece 分词器，tiktoken 不支持。
+# tokenizer: chars → 由 token_counter.py 用 chars // 2.5 估算。
+# API 路由：Gemini 官方提供 OpenAI 兼容端点（需 GEMINI_API_KEY）。
+# CLI 路由：Google Gemini CLI（gemini），无 --system-prompt flag。
+#
+# 精度说明：chars 估算对 Gemini 误差约 ±20%（英文偏低，中文偏高）。
+# 如需精确计数，安装 google-generativeai 并调用 model.count_tokens()。
+
+gemini-2.0-pro:
+  mode: dual_track
+  prefer: auto
+  tokenizer: chars
+  api:
+    kind: openai_compat
+    key_env: GEMINI_API_KEY
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.0-pro
   cli:
     path: gemini
     model: gemini-2.0-pro
     output_format: plain
     extra_args: []
-    use_system_prompt_flag: false   # gemini cli 没有 --system-prompt，inline
+    use_system_prompt_flag: false
+
+gemini-2.0-flash:
+  mode: dual_track
+  prefer: auto
+  tokenizer: chars
+  api:
+    kind: openai_compat
+    key_env: GEMINI_API_KEY
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.0-flash
+  cli:
+    path: gemini
+    model: gemini-2.0-flash
+    output_format: plain
+    extra_args: []
+    use_system_prompt_flag: false
+
+gemini-2.5-pro:
+  mode: dual_track
+  prefer: auto
+  tokenizer: chars
+  api:
+    kind: openai_compat
+    key_env: GEMINI_API_KEY
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.5-pro-preview-05-06
+  cli:
+    path: gemini
+    model: gemini-2.5-pro
+    output_format: plain
+    extra_args: []
+    use_system_prompt_flag: false
+
+gemini-2.5-flash:
+  mode: dual_track
+  prefer: auto
+  tokenizer: chars
+  api:
+    kind: openai_compat
+    key_env: GEMINI_API_KEY
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.5-flash-preview-04-17
+  cli:
+    path: gemini
+    model: gemini-2.5-flash
+    output_format: plain
+    extra_args: []
+    use_system_prompt_flag: false
+
+# 保留旧 key 向后兼容
+gemini-pro:
+  mode: cli_only
+  tokenizer: chars
+  cli:
+    path: gemini
+    model: gemini-2.0-pro
+    output_format: plain
+    extra_args: []
+    use_system_prompt_flag: false
 
 # ── Ollama（本地）─────────────────────────────────────────
 # 默认监听 http://localhost:11434/v1，OpenAI 兼容
 ollama-llama3:
   mode: api_only
+  tokenizer: cl100k_base   # LLaMA 系列用 cl100k_base 近似
   api:
     kind: openai_compat
     key_env: OLLAMA_API_KEY      # ollama 无需 key，但 SDK 要求传一个非空字符串

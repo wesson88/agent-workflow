@@ -104,12 +104,21 @@ def _run_pre_flight(
     task: str,
     instruction_file: str,
     split_limit_lines: int = 400,
+    *,
+    model_key: str = "claude-haiku-4-5",
+    split_limit_tokens: int | None = None,
 ) -> list[dict] | None:
     """层四 Pre-flight：用 haiku 评估任务复杂度，返回 sub_tasks 列表或 None（不需拆分）。
+
+    split_limit_tokens 优先于 split_limit_lines：
+      - 传入 split_limit_tokens → 用 token_counter 精确估算是否需要拆分
+      - 不传 → 沿用原有 split_limit_lines（行数估算，向后兼容）
+
     返回 None  → 单次调用即可
     返回 list  → 需要拆分，每个元素是 {focus, outputs}
     """
     from ..config import VAULT_ROOT
+    from ..token_counter import count_tokens, estimate_tokens
 
     resolved = instruction_file.replace("{project}", project)
     full_path = VAULT_ROOT / resolved
@@ -118,10 +127,20 @@ def _run_pre_flight(
         return None
 
     content = full_path.read_text(encoding="utf-8")
-    print(f"[pre_flight] 🔍 评估任务复杂度（{full_path.name}, {len(content)}chars）...")
+
+    # token 感知：计算指令文件自身的 token 数，用于日志和早期拆分判断
+    if split_limit_tokens is not None:
+        instruction_tokens = count_tokens(content, model_key)
+        print(
+            f"[pre_flight] 🔍 评估任务复杂度（{full_path.name},"
+            f" {instruction_tokens} tokens / {len(content)} chars）..."
+        )
+    else:
+        instruction_tokens = None
+        print(f"[pre_flight] 🔍 评估任务复杂度（{full_path.name}, {len(content)} chars）...")
+
     try:
         raw = _call_haiku(_PREFLIGHT_SYSTEM, f"项目：{project}\n任务：{task}\n\n{content}")
-        # 提取 JSON（haiku 有时会在前后加说明文字）
         start = raw.find("{")
         end = raw.rfind("}") + 1
         result = json.loads(raw[start:end])
@@ -137,12 +156,22 @@ def _run_pre_flight(
     for f in files:
         print(f"  - {f['path']} (~{f['est_lines']} 行, {f.get('layer','')})")
 
-    # 程序判断：不依赖模型决策
-    needs_split = total > split_limit_lines or any(
-        f.get("est_lines", 0) > split_limit_lines * 0.6 for f in files
-    )
+    # 程序判断：token 感知优先，行数兜底
+    if split_limit_tokens is not None:
+        # 用 haiku 预估的行数换算 token（1 行 ≈ 15 tokens，保守估算）
+        est_output_tokens = total * 15
+        needs_split = est_output_tokens > split_limit_tokens or any(
+            f.get("est_lines", 0) * 15 > split_limit_tokens * 0.6 for f in files
+        )
+        threshold_desc = f"{split_limit_tokens} tokens"
+    else:
+        needs_split = total > split_limit_lines or any(
+            f.get("est_lines", 0) > split_limit_lines * 0.6 for f in files
+        )
+        threshold_desc = f"{split_limit_lines} 行"
+
     if not needs_split:
-        print(f"[pre_flight] ✅ 总行数 {total} ≤ {split_limit_lines}，单次执行。")
+        print(f"[pre_flight] ✅ 预估产出在阈值 {threshold_desc} 以内，单次执行。")
         return None
 
     if not splits:
