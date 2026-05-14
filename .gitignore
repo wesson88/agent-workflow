@@ -22,6 +22,7 @@ node_modules/
 logs/
 
 # ── Claude 工作流运行时产物（仅排除运行时，保留框架本体）──
+.claude/settings.local.json
 .claude/audit.jsonl
 .claude/status.json
 .claude/instructions/

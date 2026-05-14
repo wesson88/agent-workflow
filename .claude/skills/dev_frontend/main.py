@@ -65,6 +65,19 @@ def main() -> int:
     task_files, use_split = _collect_task_files(proj_dir, "给前端")
 
     if not task_files:
+        # 检查是否存在索引文件且明确说明无前端任务
+        index_file = proj_dir / "指令" / "给前端-索引.md"
+        if index_file.exists():
+            index_content = index_file.read_text(encoding="utf-8")
+            no_frontend_signals = ["无前端任务", "无前端 MVP", "不包含前端", "no frontend", "MVP 阶段无前端"]
+            if any(s.lower() in index_content.lower() for s in no_frontend_signals):
+                print(f"[{ROLE}] ℹ️ 索引文件说明本项目无前端任务，跳过。")
+                set_role_status(ROLE, status="idle")
+                append_audit({
+                    "timestamp": utc_now(), "role": ROLE, "project": project,
+                    "task": task, "result": "skipped", "reason": "no_frontend_tasks",
+                })
+                return 0
         print(
             f"[{ROLE}] 必需输入缺失：{proj_dir}/指令/给前端*.md。请先跑技术主管。",
             file=sys.stderr,
