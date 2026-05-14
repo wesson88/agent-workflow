@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +106,7 @@ def is_provider_available(name: str) -> bool:
 
 # ── 公共入口 ────────────────────────────────────────────
 def call_llm(
-    system_prompt: str,
+    system_prompt: str | tuple[str, str],
     user_prompt: str,
     *,
     model: str,
@@ -115,7 +116,9 @@ def call_llm(
     """统一 LLM 调用入口。
 
     参数：
-        system_prompt: 系统提示词
+        system_prompt: 系统提示词，或 (static, dynamic) 两段 tuple。
+            tuple 形式仅对 Anthropic SDK 路径生效：static 块打 cache_control，
+            dynamic 块不缓存；CLI 路径自动拼接为单字符串。
         user_prompt: 用户输入
         model: 必传；同时是 llm_providers.yaml 中的 key
         max_tokens: API 路径有效；CLI 路径不直接控制（受模型/订阅限制）
@@ -128,13 +131,20 @@ def call_llm(
         api_cfg = cfg["api"]
         kind = api_cfg.get("kind", "anthropic")
         if kind == "anthropic":
-            return _call_anthropic_sdk(api_cfg, system_prompt, user_prompt, max_tokens, print_stream)
+            if isinstance(system_prompt, tuple):
+                static, dynamic = system_prompt
+            else:
+                static, dynamic = system_prompt, ""
+            return _call_anthropic_sdk(api_cfg, static, dynamic, user_prompt, max_tokens, print_stream)
+        # openai_compat：拼接为单字符串
+        flat = "\n\n".join(filter(None, system_prompt)) if isinstance(system_prompt, tuple) else system_prompt
         if kind == "openai_compat":
-            return _call_openai_compat(api_cfg, system_prompt, user_prompt, max_tokens, print_stream)
+            return _call_openai_compat(api_cfg, flat, user_prompt, max_tokens, print_stream)
         raise ValueError(f"未知 api kind：{kind}（provider={model}）")
 
     if track == "cli":
-        return _call_cli(cfg["cli"], system_prompt, user_prompt, print_stream)
+        flat = "\n\n".join(filter(None, system_prompt)) if isinstance(system_prompt, tuple) else system_prompt
+        return _call_cli(cfg["cli"], flat, user_prompt, print_stream)
 
     # unavailable：给出可操作的提示
     api_cfg = cfg.get("api") or {}
@@ -149,43 +159,66 @@ def call_llm(
 
 # ── Anthropic SDK ────────────────────────────────────────
 def _call_anthropic_sdk(
-    api_cfg: dict, system_prompt: str, user_prompt: str,
+    api_cfg: dict, system_static: str, system_dynamic: str, user_prompt: str,
     max_tokens: int, print_stream: bool,
 ) -> str:
-    """调用 Anthropic SDK，自动启用 Prompt Caching。
+    """调用 Anthropic SDK，静态/动态 system prompt 分块缓存。
 
-    system_prompt 标记 cache_control=ephemeral：
-    - 静态角色基因 / 全局约束常驻缓存，命中后费用降至 1/10，延迟 -50%
-    - 缓存有效期 5 分钟（同一 API key 内跨请求共享）
-    - 不支持 caching 的旧模型会自动忽略该字段，向后兼容
+    - system_static：角色设定 + 全局约束 + 输出格式规范，几乎不变 → cache_control=ephemeral
+    - system_dynamic：DYNAMIC 补丁（每轮可能变化）→ 不缓存
+    - 缓存有效期 5 分钟（同一 API key 内跨请求共享），命中后费用降至 1/10
     """
     import anthropic  # 延迟 import
     key = os.environ.get(api_cfg["key_env"], "")
-    client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
-    chunks: list[str] = []
+    client = anthropic.Anthropic(api_key=key, timeout=300.0) if key else anthropic.Anthropic(timeout=300.0)
 
-    # system prompt 作为可缓存静态块（角色基因 + 全局约束，几乎不变）
-    system_block = [
-        {
-            "type": "text",
-            "text": system_prompt,
-            "cache_control": {"type": "ephemeral"},
-        }
+    system_block: list[dict] = [
+        {"type": "text", "text": system_static, "cache_control": {"type": "ephemeral"}},
     ]
+    if system_dynamic.strip():
+        system_block.append({"type": "text", "text": system_dynamic})
 
-    with client.messages.stream(
-        model=api_cfg["model"],
-        max_tokens=max_tokens,
-        system=system_block,
-        messages=[{"role": "user", "content": user_prompt}],
-    ) as stream:
-        for text in stream.text_stream:
+    _RETRYABLE = (
+        anthropic.RateLimitError,
+        anthropic.APITimeoutError,
+        anthropic.APIConnectionError,
+    )
+    base_delay = 5.0
+    for attempt in range(4):
+        chunks: list[str] = []
+        try:
+            with client.messages.stream(
+                model=api_cfg["model"],
+                max_tokens=max_tokens,
+                system=system_block,
+                messages=[{"role": "user", "content": user_prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    if print_stream:
+                        print(text, end="", flush=True)
+                    chunks.append(text)
+                usage = stream.get_final_message().usage
             if print_stream:
-                print(text, end="", flush=True)
-            chunks.append(text)
-    if print_stream:
-        print()
-    return "".join(chunks)
+                print()
+            print(
+                f"[tokens] input={usage.input_tokens}"
+                f"(cache_read={getattr(usage, 'cache_read_input_tokens', 0)}"
+                f" cache_create={getattr(usage, 'cache_creation_input_tokens', 0)})"
+                f" output={usage.output_tokens}"
+                f" total={usage.input_tokens + usage.output_tokens}"
+            )
+            return "".join(chunks)
+        except _RETRYABLE as e:
+            if attempt == 3:
+                raise
+            if isinstance(e, anthropic.RateLimitError):
+                retry_after = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+                wait = float(retry_after) if retry_after else base_delay * (2 ** attempt)
+            else:
+                wait = base_delay * (2 ** attempt)
+            print(f"[llm_retry] {type(e).__name__}，等待 {wait:.0f}s 后重试（{attempt + 1}/3）", flush=True)
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
 
 
 # ── OpenAI 兼容 SDK（GPT / DeepSeek / Ollama / 国产模型）─

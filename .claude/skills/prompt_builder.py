@@ -105,14 +105,11 @@ def _extract_dynamic_patch(body: str) -> str:
 
 
 # ── 公开 API ──────────────────────────────────────────────
-def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> str:
-    """从 vault 加载角色笔记，组装 system prompt。
+def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> tuple[str, str]:
+    """从 vault 加载角色笔记，返回 (static, dynamic) 两段 system prompt。
 
-    结构：
-        本角色 frontmatter 摘要
-        本角色正文（含 DYNAMIC 区域；闭环验证证据行已剥离）
-        上游角色的 DYNAMIC 补丁（已剥离证据行，如有）
-        OUTPUT_FORMAT_SPEC
+    static：角色设定 + 全局约束 + 输出格式规范（几乎不变，适合 prompt cache）
+    dynamic：DYNAMIC 补丁 + 上游补丁（每轮可能变化，不缓存）
     """
     role = load_role(role_name_or_alias)
 
@@ -124,13 +121,16 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     if role.skills:
         summary.append(f"技能:{', '.join(role.skills)}")
 
-    parts = [
+    static_parts = [
         "## 角色摘要",
         "\n".join(summary),
         "",
         _strip_evidence_lines(role.body.strip()),
+        OUTPUT_FORMAT_SPEC,
     ]
+    static = "\n".join(static_parts)
 
+    dynamic_parts: list[str] = []
     for upstream_name in role.upstream:
         try:
             up_role = load_role(upstream_name)
@@ -138,9 +138,8 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
             continue
         patch = _strip_evidence_lines(_extract_dynamic_patch(up_role.body))
         if patch.strip():
-            parts.append("")
-            parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
-            parts.append(patch)
+            dynamic_parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
+            dynamic_parts.append(patch)
 
-    parts.append(OUTPUT_FORMAT_SPEC)
-    return "\n".join(parts)
+    dynamic = "\n".join(dynamic_parts)
+    return static, dynamic

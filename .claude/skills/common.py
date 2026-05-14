@@ -182,31 +182,18 @@ def _extract_dynamic_patch(body: str) -> str:
     return "\n".join(keep).strip()
 
 
-def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> str:
-    """从 vault 加载角色笔记，组装分层 system prompt。
+def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> tuple[str, str]:
+    """从 vault 加载角色笔记，返回 (static, dynamic) 两段 system prompt。
 
-    分层结构（对应 Prompt Caching 静态块）：
-
-    ① 核心层（常驻，适合 cache）：角色设定 + 全局约束
-       - 从角色笔记中提取 ## 全局约束 / ## 角色设定 / ## 角色 / ## 身份 章节
-       - 无匹配时降级使用 frontmatter 摘要
-
-    ② 动态层（按任务变化，不缓存）：DYNAMIC 补丁 + 上游补丁
-       - 仅当有实际内容时才追加，避免空块浪费 tokens
-
-    ③ 格式规范：OUTPUT_FORMAT_SPEC（常驻，适合 cache）
-
-    Token 控制：
-    - 剥离 DYNAMIC 区的"闭环验证"证据行（§12 P0）
-    - 不再把角色笔记全文塞入 system prompt，仅提取核心约束段
+    static：角色设定 + 全局约束 + 输出格式规范（几乎不变，适合 prompt cache）
+    dynamic：DYNAMIC 补丁 + 上游补丁（每轮可能变化，不缓存）
     """
     role = load_role(role_name_or_alias)
 
-    # ── ① 核心层：角色设定 + 全局约束 ───────────────────────
+    # ── static：核心层 ────────────────────────────────────
     CORE_SECTIONS = ["全局约束", "角色设定", "角色", "身份", "编码规范", "技术约束"]
     core_text = _extract_sections(role.body, CORE_SECTIONS)
 
-    # 若角色笔记无上述章节（如简单角色），降级用 frontmatter 摘要
     if "⚠️ [sections 警告]" in core_text:
         summary = [
             f"角色：{role.name}",
@@ -217,21 +204,20 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
             summary.append(f"技能：{', '.join(role.skills)}")
         core_text = "\n".join(summary)
 
-    core_text = _strip_evidence_lines(core_text.strip())
-
-    parts = [
+    static_parts = [
         f"## 角色：{role.name}",
-        core_text,
+        _strip_evidence_lines(core_text.strip()),
+        OUTPUT_FORMAT_SPEC,
     ]
+    static = "\n".join(static_parts)
 
-    # ── ② 动态层：DYNAMIC 补丁 ────────────────────────────
+    # ── dynamic：DYNAMIC 补丁 ─────────────────────────────
+    dynamic_parts: list[str] = []
     own_patch = _strip_evidence_lines(_extract_dynamic_patch(role.body))
     if own_patch.strip():
-        parts.append("")
-        parts.append("## 当前动态约束")
-        parts.append(own_patch)
+        dynamic_parts.append("## 当前动态约束")
+        dynamic_parts.append(own_patch)
 
-    # 上游角色 DYNAMIC 补丁（保留跨角色约束传递机制）
     for upstream_name in role.upstream:
         try:
             up_role = load_role(upstream_name)
@@ -239,13 +225,11 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
             continue
         patch = _strip_evidence_lines(_extract_dynamic_patch(up_role.body))
         if patch.strip():
-            parts.append("")
-            parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
-            parts.append(patch)
+            dynamic_parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
+            dynamic_parts.append(patch)
 
-    # ── ③ 格式规范 ────────────────────────────────────────
-    parts.append(OUTPUT_FORMAT_SPEC)
-    return "\n".join(parts)
+    dynamic = "\n".join(dynamic_parts)
+    return static, dynamic
 
 
 # ── 输入文件批量读取 ──────────────────────────────────────────────────────────────
@@ -492,7 +476,7 @@ _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
-def call_llm_for_role(system_prompt: str, user_prompt: str, role_name_or_alias: str) -> str:
+def call_llm_for_role(system_prompt: tuple[str, str] | str, user_prompt: str, role_name_or_alias: str) -> str:
     """从角色 frontmatter 读取 model/max_tokens 后调用 engine.llm.call_llm。
 
     单一职责：负责"角色配置读取 + 调用路由"，不重复实现 streaming 逻辑。
@@ -521,6 +505,15 @@ def call_llm_for_role(system_prompt: str, user_prompt: str, role_name_or_alias: 
 
 # 向后兼容：旧代码调用 call_claude(system, user, role) 继续有效
 call_claude = call_llm_for_role
+
+
+def warn_if_no_files(raw_output: str, role: str) -> None:
+    """输出解析返回空 dict 时打印结构化告警，供各 main.py 降级路径调用。"""
+    print(
+        f"[{role}] ⚠️ FILE 块解析失败，已降级写入。"
+        f" raw_output 长度={len(raw_output)}，前200字：{raw_output[:200]!r}",
+        file=sys.stderr,
+    )
 
 
 # ── 层一强制执行：输出体积硬校验 ────────────────────────────────────────────────

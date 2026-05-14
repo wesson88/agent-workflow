@@ -22,6 +22,7 @@ Phase 2b 起，运行时字段（status / last_run / consecutive_failures / erro
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from . import role_loader, runtime_state
@@ -31,7 +32,7 @@ ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "idle":       ("busy",),
     "busy":       ("success", "failed", "blocked"),
     "failed":     ("busy", "idle"),
-    "blocked":    (),                  # blocked 只能由外部介入
+    "blocked":    ("idle",),             # 允许超时自动恢复
     "success":    ("idle",),
     "monitoring": ("monitoring",),
 }
@@ -99,6 +100,7 @@ def set_role_status(
     reset_counters: bool = False,
     last_output_path: str | None = None,
     extra: dict | None = None,
+    max_blocked_seconds: float = 3600.0,
 ) -> None:
     """统一的状态写入入口。
 
@@ -107,15 +109,35 @@ def set_role_status(
     - reset_counters：consecutive_failures 与 error_count 都清零
     - last_output_path：dev_backend / dev_frontend 写代码后的产出根路径
     - extra：兜底字典，额外要写入运行时状态的字段
+    - max_blocked_seconds：blocked 状态超过此秒数自动恢复为 idle（默认 1 小时）
     """
     role = role_loader.load_role(name_or_alias)
     current = runtime_state.load(role.name)
     patch: dict[str, Any] = {}
 
+    # blocked 超时自动恢复
+    if current.get("status") == "blocked":
+        blocked_since = current.get("blocked_since")
+        if blocked_since and (time.time() - blocked_since) > max_blocked_seconds:
+            print(
+                f"[auto_recover] {role.name} blocked 超过 {max_blocked_seconds:.0f}s，自动恢复为 idle",
+                flush=True,
+            )
+            patch["status"] = "idle"
+            patch["blocked_since"] = None
+            runtime_state.update(role.name, **patch)
+            current = runtime_state.load(role.name)
+            patch = {}
+
     if status is not None:
         if enforce_transition:
             validate_transition(role.name, current.get("status", "idle"), status)
         patch["status"] = status
+        # 进入 blocked 时记录时间戳，退出时清除
+        if status == "blocked":
+            patch["blocked_since"] = time.time()
+        elif status != "blocked":
+            patch["blocked_since"] = None
 
     if reset_counters:
         patch["consecutive_failures"] = 0

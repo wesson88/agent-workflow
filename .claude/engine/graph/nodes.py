@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from ..config import PROJECT_ROOT
@@ -191,19 +192,35 @@ def _run_pre_flight(
 
 
 # ── 执行策略（单一职责：仅负责运行 subprocess，不做判断/状态）─────────────────
+# 永久错误码：不重试（2=参数错误/argparse，3=输出解析失败）
+_PERMANENT_RC = {2, 3}
+
+
 def _execute_single(
     main_py: Path,
     task: str,
     project: str,
     env: dict,
 ) -> int:
-    """单次调用 main.py，返回 returncode。"""
-    return subprocess.run(
-        [sys.executable, str(main_py),
-         "--task", task,
-         "--project", project],
-        env=env,
-    ).returncode
+    """单次调用 main.py，返回 returncode。失败时指数退避重试最多 3 次。"""
+    for attempt in range(3):
+        try:
+            rc = subprocess.run(
+                [sys.executable, str(main_py), "--task", task, "--project", project],
+                env=env,
+                timeout=600,
+            ).returncode
+        except subprocess.TimeoutExpired:
+            print(f"[subprocess_timeout] {main_py.name} 超时（600s），attempt={attempt + 1}/3", flush=True)
+            rc = 1
+        if rc == 0:
+            return 0
+        if rc in _PERMANENT_RC or attempt == 2:
+            return rc
+        wait = 2.0 * (2 ** attempt)
+        print(f"[subprocess_retry] rc={rc}，等待 {wait:.0f}s 后重试（{attempt + 1}/3）", flush=True)
+        time.sleep(wait)
+    return rc  # unreachable but satisfies type checker
 
 
 def _execute_with_subtasks(
