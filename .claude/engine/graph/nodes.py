@@ -70,33 +70,39 @@ def _run_post_compress(
     """层三：对指定输出文件调用 haiku 压缩，生成 <name>-压缩.md 副本。
     原文件保留供人工审阅，压缩版供下游角色读取。
     """
-    vault_root = PROJECT_ROOT.parent  # 假设 vault 在 agent-workflow 同级，实际由 config 决定
     from ..config import VAULT_ROOT
-
-    vault_root = VAULT_ROOT
 
     system = _COMPRESS_SYSTEM.format(target_chars=target_chars)
     for rel_path in outputs:
         resolved = rel_path.replace("{project}", project)
-        full_path = vault_root / resolved
-        if not full_path.exists():
-            print(f"[post_compress] ⚠️ 文件不存在，跳过压缩：{resolved}", file=sys.stderr)
+        # 支持 glob 模式（如 "10-项目/{project}/指令/给后端-T*.md"）
+        if "*" in resolved:
+            matched = sorted(VAULT_ROOT.glob(resolved))
+        else:
+            matched = [VAULT_ROOT / resolved]
+
+        if not matched:
+            print(f"[post_compress] ⚠️ 无匹配文件，跳过压缩：{resolved}", file=sys.stderr)
             continue
-        original = full_path.read_text(encoding="utf-8")
-        original_len = len(original)
-        if original_len <= target_chars:
-            print(f"[post_compress] ✅ {full_path.name} ({original_len}chars) ≤ 目标，跳过压缩。")
-            continue
-        print(f"[post_compress] 🗜️ 压缩 {full_path.name} ({original_len}chars → 目标≤{target_chars}chars)...")
-        try:
-            compressed = _call_haiku(system, original)
-        except Exception as e:
-            print(f"[post_compress] ❌ haiku 调用失败：{e}", file=sys.stderr)
-            continue
-        # 写入 <stem>-压缩.md（如 给后端-压缩.md）
-        compressed_path = full_path.with_name(full_path.stem + "-压缩" + full_path.suffix)
-        compressed_path.write_text(compressed, encoding="utf-8")
-        print(f"[post_compress] ✅ 压缩完成：{compressed_path.name} ({len(compressed)}chars)")
+
+        for full_path in matched:
+            if not full_path.exists():
+                print(f"[post_compress] ⚠️ 文件不存在，跳过压缩：{full_path.name}", file=sys.stderr)
+                continue
+            original = full_path.read_text(encoding="utf-8")
+            original_len = len(original)
+            if original_len <= target_chars:
+                print(f"[post_compress] ✅ {full_path.name} ({original_len}chars) ≤ 目标，跳过压缩。")
+                continue
+            print(f"[post_compress] 🗜️ 压缩 {full_path.name} ({original_len}chars → 目标≤{target_chars}chars)...")
+            try:
+                compressed = _call_haiku(system, original)
+            except Exception as e:
+                print(f"[post_compress] ❌ haiku 调用失败：{e}", file=sys.stderr)
+                continue
+            compressed_path = full_path.with_name(full_path.stem + "-压缩" + full_path.suffix)
+            compressed_path.write_text(compressed, encoding="utf-8")
+            print(f"[post_compress] ✅ 压缩完成：{compressed_path.name} ({len(compressed)}chars)")
 
 
 def _run_pre_flight(

@@ -111,22 +111,42 @@ def main() -> int:
         # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
         context = read_input_files([task_file, tech_stack])
 
+        # 注入已生成文件列表，防止后续任务重新发明架构
+        prior_files = [p for p in written_all if p.startswith("src/backend/") or p.startswith("tests/")]
+        prior_context = ""
+        if prior_files:
+            prior_context = (
+                "\n**已生成文件（保持架构一致，禁止重新设计已有模块）**：\n"
+                + "\n".join(f"  - {p}" for p in prior_files)
+                + "\n"
+            )
+
+        # API契约.md 只在最后一个任务写入，避免多次覆盖
+        is_last_task = (task_file == task_files[-1])
+        required = [
+            "src/backend/main.py",
+            "src/backend/<module>.py",
+            "tests/backend/test_<module>.py",
+        ]
+        api_hint = ""
+        if is_last_task:
+            required.append(f"10-项目/{project}/API契约.md")
+        else:
+            api_hint = f"  - **不要**输出 `10-项目/{project}/API契约.md`（留给最后一个任务统一输出）\n"
+
         user_prompt = (
             f"项目名：`{project}`\n\n"
-            f"{context}\n\n---\n"
+            f"{context}\n\n"
+            f"{prior_context}"
+            "---\n"
             f"本轮任务：{task or f'实现 {task_label} 中的后端代码'}\n\n"
             "请按指令清单完整实现后端：\n"
             "  - 后端代码：路径以 `src/backend/...` 开头（项目仓内）\n"
             "  - 测试代码：路径以 `tests/backend/...` 开头\n"
-            f"  - API 文档：路径为 `10-项目/{project}/API契约.md`（vault 内，Swagger/OpenAPI 风格）\n\n"
+            f"{api_hint}"
             "技术栈严格按 `00-系统/规则/技术栈.md`，禁止引入未授权依赖。\n"
             "所有 API 必须含输入校验、鉴权、结构化日志。\n"
-            + render_required_outputs([
-                "src/backend/main.py",
-                "src/backend/<module>.py",
-                "tests/backend/test_<module>.py",
-                f"10-项目/{project}/API契约.md",
-            ])
+            + render_required_outputs(required)
             + "\n上面是路径**示例**；请根据指令清单中的实际模块产出对应文件，每个文件用一个 FILE 块。"
         )
 
