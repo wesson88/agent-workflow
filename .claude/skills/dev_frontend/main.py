@@ -36,8 +36,16 @@ from engine import (
 ROLE = "前端工程师"
 
 
+_NO_FRONTEND_SIGNALS = ("无前端任务", "无前端 mvp", "不包含前端", "no frontend", "mvp 阶段无前端")
+
+
 def _collect_task_files(proj_dir, role_prefix: str):
-    """收集前端任务文件列表，优先按编号拆分，降级到整体文件。"""
+    """收集前端任务文件列表，优先按编号拆分，降级到整体文件。
+
+    若降级到的 single 文件（给前端.md / 给前端-压缩.md）含跳过信号词
+    （技术主管 fallback 写入的"无前端"自然语言），视为空列表——让外层
+    fallback 到信号词检测分支，避免硬跑前端任务。
+    """
     instr_dir = proj_dir / "指令"
     split_files = sorted(instr_dir.glob(f"{role_prefix}-T*.md"))
     if split_files:
@@ -45,7 +53,12 @@ def _collect_task_files(proj_dir, role_prefix: str):
     compressed = instr_dir / f"{role_prefix}-压缩.md"
     original = instr_dir / f"{role_prefix}.md"
     single = compressed if compressed.exists() else original
-    return ([single] if single.exists() else []), False
+    if not single.exists():
+        return [], False
+    head = single.read_text(encoding="utf-8", errors="replace")[:1000].lower()
+    if any(sig in head for sig in _NO_FRONTEND_SIGNALS):
+        return [], False
+    return [single], False
 
 
 def main() -> int:
@@ -72,6 +85,7 @@ def main() -> int:
             no_frontend_signals = ["无前端任务", "无前端 MVP", "不包含前端", "no frontend", "MVP 阶段无前端"]
             if any(s.lower() in index_content.lower() for s in no_frontend_signals):
                 print(f"[{ROLE}] ℹ️ 索引文件说明本项目无前端任务，跳过。")
+                set_role_status(ROLE, status="success", reset_counters=True)
                 set_role_status(ROLE, status="idle")
                 append_audit({
                     "timestamp": utc_now(), "role": ROLE, "project": project,

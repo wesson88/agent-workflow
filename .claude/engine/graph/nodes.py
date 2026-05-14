@@ -13,15 +13,57 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from ..config import PROJECT_ROOT
+from ..config import PROJECT_ROOT, VAULT_ROOT
 from ..workflow import role_to_skill_dir, WorkflowStep
 from .discussion import build_discussion_graph
 from .state import ProjectState
+
+
+def _evaluate_skip_if(skip_if: dict, project: str) -> tuple[bool, str]:
+    """评估工作流步骤的 skip_if 条件。
+
+    支持的条件类型：
+      frontmatter_eq:
+        file: <vault 相对路径，可含 {project} 占位>
+        key:  <frontmatter key>
+        value: <期望值，字符串相等比较>
+
+    返回 (should_skip, reason)。条件文件不存在或解析失败均返回 (False, ...)，
+    保守不跳过——避免误杀。
+    """
+    cond = skip_if.get("frontmatter_eq")
+    if not isinstance(cond, dict):
+        return False, f"unknown skip_if shape: {skip_if!r}"
+
+    rel = str(cond.get("file", "")).replace("{project}", project)
+    key = str(cond.get("key", ""))
+    expected = str(cond.get("value", ""))
+    if not rel or not key:
+        return False, "skip_if.frontmatter_eq 缺少 file/key"
+
+    target = VAULT_ROOT / rel
+    if not target.exists():
+        return False, f"目标文件不存在：{rel}（条件不命中，按不跳过处理）"
+
+    text = target.read_text(encoding="utf-8")
+    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not fm_match:
+        return False, f"{rel} 无 frontmatter"
+
+    key_match = re.search(rf"^{re.escape(key)}:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
+    if not key_match:
+        return False, f"{rel} frontmatter 无 {key} 字段"
+
+    actual = key_match.group(1).strip().strip('"').strip("'")
+    if actual == expected:
+        return True, f"{key}={actual} 匹配（来自 {rel}）"
+    return False, f"{key}={actual} ≠ {expected}"
 
 # ── 层三：post_compress 压缩提示词 ─────────────────────────────────────────────
 _COMPRESS_SYSTEM = """你是一个文档压缩专家。
@@ -252,6 +294,7 @@ def make_role_node(
     *,
     post_compress: dict | None = None,
     pre_flight: dict | None = None,
+    skip_if: dict | None = None,
 ):
     """工厂函数：返回一个 LangGraph node 函数。
     role_name 是 vault 角色 frontmatter 的 role 字段（中文名）。
@@ -275,6 +318,13 @@ def make_role_node(
         if state.get("halted"):
             print(f"\n⏭️  跳过 {role_name}（上游 halt）")
             return {"skipped": [role_name]}
+
+        # 工作流层条件跳过（skip_if）：节点执行前评估，命中即跳过 subprocess
+        if skip_if:
+            should_skip, reason = _evaluate_skip_if(skip_if, state["project"])
+            if should_skip:
+                print(f"\n⏭️  跳过 {role_name}（skip_if 命中：{reason}）")
+                return {"skipped": [role_name]}
 
         print(f"\n{'=' * 60}\n▶ 运行 {role_name} ({skill_dir})  项目={state['project']}\n{'=' * 60}")
 

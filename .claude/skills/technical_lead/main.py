@@ -16,6 +16,7 @@ CLI：
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -30,9 +31,70 @@ from common import (
 from engine import (
     set_role_status, role_is_blocked,
     project_dir, rules_dir, resolve_path,
+    VAULT_ROOT,
 )
 
 ROLE = "技术主管"
+
+_VALID_PROJECT_TYPES = ("backend-only", "frontend-only", "full-stack")
+
+
+def _backend_done_marker() -> Path:
+    """后端轮 done marker：子进程超时 retry 时用来跳过已成功的后端轮。"""
+    return VAULT_ROOT / "00-系统" / ".runtime-state" / "技术主管.backend_done"
+
+
+def _read_project_type(to_lead_path: Path) -> tuple[str, str]:
+    """读取「给技术主管.md」frontmatter 中的 project_type 字段。
+
+    返回 (project_type, source)；source ∈ {"frontmatter", "default_full_stack"}。
+    架构师未声明时默认 full-stack（向后兼容，旧项目行为不变）。
+    """
+    try:
+        text = to_lead_path.read_text(encoding="utf-8")
+    except OSError:
+        return "full-stack", "default_full_stack"
+
+    # 匹配 frontmatter 块：开头 --- 到下一个 ---
+    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not fm_match:
+        return "full-stack", "default_full_stack"
+
+    fm_body = fm_match.group(1)
+    type_match = re.search(r"^project_type:\s*([a-z-]+)", fm_body, re.MULTILINE)
+    if not type_match:
+        return "full-stack", "default_full_stack"
+
+    declared = type_match.group(1).strip()
+    if declared not in _VALID_PROJECT_TYPES:
+        print(f"[{ROLE}] ⚠️ project_type='{declared}' 不在合法集 {_VALID_PROJECT_TYPES}，"
+              f"按 full-stack 处理", file=sys.stderr)
+        return "full-stack", "default_full_stack"
+    return declared, "frontmatter"
+
+
+def _write_skip_stub(proj_dir: Path, side: str, project_type: str) -> Path:
+    """写「给{side}-索引.md」stub，触发 dev_{side} 的 idle 跳过。
+
+    side ∈ {"后端", "前端"}；project_type 用于落档可观测性。
+    """
+    dest = proj_dir / "指令" / f"给{side}-索引.md"
+    other = "前端" if side == "后端" else "后端"
+    content = (
+        f"---\n"
+        f"type: task-index\n"
+        f"role: {side}工程师\n"
+        f"decided_by: project_type-frontmatter\n"
+        f"project_type: {project_type}\n"
+        f"decided_at: {utc_now()}\n"
+        f"---\n\n"
+        f"# 无{side}任务\n\n"
+        f"本项目 `project_type={project_type}`，仅含{other}业务，无{side}实现。\n\n"
+        "若架构师判定有误，请改「给技术主管.md」frontmatter 中的 `project_type` 字段"
+        f"后重跑 `--start-from 技术主管`。\n"
+    )
+    write_output_atomic(dest, content)
+    return dest
 
 
 def main() -> int:
@@ -101,7 +163,11 @@ def main() -> int:
     backend_prompt = base_prompt + (
         "**本次只输出后端任务文件**，不要输出任何前端内容。\n"
         "每个任务单独一个 FILE 块，按编号命名：\n"
-        f"  `10-项目/{project}/指令/给后端-T01.md`、`给后端-T02.md` ...\n"
+        f"  `10-项目/{project}/指令/给后端-T01.md`、`给后端-T02.md` ...\n\n"
+        "**无后端业务时的合法出口**：如果项目本身无服务端业务"
+        "（静态站 / 纯前端 SPA / 浏览器扩展），\n"
+        f"允许只输出一份 `10-项目/{project}/指令/给后端-索引.md`，内容首行写 `# 无后端任务`，\n"
+        "并简述判定理由（≤ 100 字）。**不要凑后端任务**。\n"
         + render_required_outputs([f"10-项目/{project}/指令/给后端-索引.md"])
     )
 
@@ -109,14 +175,52 @@ def main() -> int:
         "**本次只输出前端任务文件**，不要输出任何后端内容。\n"
         "标注与后端的协作关系（API 契约、数据流）。\n"
         "每个任务单独一个 FILE 块，按编号命名：\n"
-        f"  `10-项目/{project}/指令/给前端-T01.md`、`给前端-T02.md` ...\n"
+        f"  `10-项目/{project}/指令/给前端-T01.md`、`给前端-T02.md` ...\n\n"
+        "**无前端业务时的合法出口**：如果项目本身无浏览器/移动端 UI"
+        "（CLI / 库 / 工具 / 数据管线 / 后台 job / API-only 服务），\n"
+        f"允许只输出一份 `10-项目/{project}/指令/给前端-索引.md`，内容首行写 `# 无前端任务`，\n"
+        "并简述判定理由（≤ 100 字）。**不要凑前端任务**——拼凑出来的前端任务会让\n"
+        "下游 dev_frontend 浪费 token 并误导用户。\n"
         + render_required_outputs([f"10-项目/{project}/指令/给前端-索引.md"])
     )
 
     LIMIT_CHARS = 30 * 1024
     written = []
+    marker = _backend_done_marker()
+
+    # 读取「给技术主管.md」frontmatter 中的 project_type，驱动对称跳过
+    project_type, type_source = _read_project_type(to_lead)
+    print(f"[{ROLE}] 🏷️ project_type={project_type}（来源：{type_source}）")
+    if type_source == "default_full_stack":
+        print(f"[{ROLE}] ℹ️ 「给技术主管.md」frontmatter 未声明 project_type，"
+              f"默认按 full-stack 跑两轮。若实际为单端项目，请改 frontmatter "
+              f"加 `project_type: backend-only` 或 `frontend-only` 后重跑。")
 
     for pass_name, user_prompt in [("后端任务", backend_prompt), ("前端任务", frontend_prompt)]:
+        side = "后端" if pass_name == "后端任务" else "前端"
+
+        # ── project_type 驱动的对称跳过 ────────────────────────────────
+        should_skip = (
+            (side == "前端" and project_type == "backend-only")
+            or (side == "后端" and project_type == "frontend-only")
+        )
+        if should_skip:
+            dest = _write_skip_stub(proj_dir, side, project_type)
+            print(f"[{ROLE}] ⏭️ 跳过{side}轮（project_type={project_type}），写 stub: {dest.name}")
+            written.append(f"10-项目/{project}/指令/给{side}-索引.md")
+            continue
+
+        # ── 后端轮：检测 done marker，子进程超时 retry 时跳过重跑 ────────
+        if pass_name == "后端任务":
+            existing = sorted((proj_dir / "指令").glob("给后端-T*.md"))
+            backend_index = proj_dir / "指令" / "给后端-索引.md"
+            if marker.exists() and backend_index.exists() and existing:
+                print(f"[{ROLE}] ⏩ 后端轮已完成（marker 存在 + {len(existing)} 个任务卡），跳过重跑")
+                for p in [backend_index, *existing]:
+                    rel = f"10-项目/{project}/指令/{p.name}"
+                    written.append(rel)
+                continue
+
         print(f"[{ROLE}] 📝 生成{pass_name}...")
         try:
             raw_output = call_claude(system_prompt, user_prompt, ROLE)
@@ -156,6 +260,23 @@ def main() -> int:
                 write_output_atomic(dest, content)
                 print(f"[{ROLE}] 写入: {dest}")
                 written.append(rel_resolved)
+
+        # 后端轮成功后写 marker（前端轮超时 retry 时复用已有产出）
+        if pass_name == "后端任务":
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(f"done at {utc_now()}\nfiles: {len(written)}\n",
+                                  encoding="utf-8")
+            except OSError as e:
+                print(f"[{ROLE}] ⚠️ 写 backend_done marker 失败（{e}），retry 时会重跑后端轮",
+                      file=sys.stderr)
+
+    # 整轮成功，清理 marker（下次重跑工作流自然失效）
+    if marker.exists():
+        try:
+            marker.unlink()
+        except OSError:
+            pass
 
     set_role_status(ROLE, status="success", reset_counters=True)
     set_role_status(ROLE, status="idle")

@@ -84,7 +84,23 @@ def main() -> int:
 
     task_prompt = base_prompt + (
         "**本次只输出给技术主管的任务清单**，不要重复系统设计内容。\n"
-        "每项标注归属角色（后端/前端）、输入输出、验收标准、工作量（不超过 4 小时）。\n"
+        "每项标注归属角色（后端/前端）、输入输出、验收标准、工作量（不超过 4 小时）。\n\n"
+        "**文件首部 frontmatter 必须包含 `project_type` 字段**（用于驱动技术主管"
+        "的对称跳过判断）：\n"
+        "- `project_type: backend-only` — CLI / 库 / 工具 / 数据管线 / 后台 job / "
+        "API-only 服务（无浏览器或移动端 UI）\n"
+        "- `project_type: frontend-only` — 静态站 / 纯前端 SPA / 浏览器扩展 "
+        "（无服务端业务逻辑）\n"
+        "- `project_type: full-stack` — 同时含前端 UI 与后端服务\n\n"
+        "frontmatter 模板示例：\n"
+        "```yaml\n"
+        "---\n"
+        "type: tech-lead-brief\n"
+        "project_type: backend-only   # 必填，driving 技术主管对称跳过\n"
+        "from: 架构师\n"
+        "to: 技术主管\n"
+        "---\n"
+        "```\n\n"
         + render_required_outputs([f"10-项目/{project}/指令/给技术主管.md"])
     )
 

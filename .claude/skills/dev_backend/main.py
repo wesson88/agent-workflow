@@ -36,11 +36,15 @@ from engine import (
 ROLE = "后端工程师"
 
 
+_NO_BACKEND_SIGNALS = ("无后端任务", "no backend", "纯前端", "frontend-only")
+
+
 def _collect_task_files(proj_dir, role_prefix: str, tech_stack):
     """收集任务文件列表。
 
     优先使用按任务编号拆分的文件（给后端-T01.md、给后端-T02.md ...）。
     若不存在则降级到整体文件（给后端.md / 给后端-压缩.md）。
+    若 fallback 文件含"无后端"信号词，返回空列表（让外层走 idle 跳过路径）。
 
     返回 (task_files: list[Path], use_split: bool)
     """
@@ -53,7 +57,12 @@ def _collect_task_files(proj_dir, role_prefix: str, tech_stack):
     compressed = instr_dir / f"{role_prefix}-压缩.md"
     original = instr_dir / f"{role_prefix}.md"
     single = compressed if compressed.exists() else original
-    return ([single] if single.exists() else []), False
+    if not single.exists():
+        return [], False
+    head = single.read_text(encoding="utf-8", errors="replace")[:1000].lower()
+    if any(sig in head for sig in _NO_BACKEND_SIGNALS):
+        return [], False
+    return [single], False
 
 
 def main() -> int:
@@ -73,6 +82,19 @@ def main() -> int:
     task_files, use_split = _collect_task_files(proj_dir, "给后端", tech_stack)
 
     if not task_files:
+        # 检查是否存在索引文件且明确说明无后端任务（对称 dev_frontend 的跳过逻辑）
+        index_file = proj_dir / "指令" / "给后端-索引.md"
+        if index_file.exists():
+            index_content = index_file.read_text(encoding="utf-8")
+            if any(s.lower() in index_content.lower() for s in _NO_BACKEND_SIGNALS):
+                print(f"[{ROLE}] ℹ️ 索引文件说明本项目无后端任务，跳过。")
+                set_role_status(ROLE, status="success", reset_counters=True)
+                set_role_status(ROLE, status="idle")
+                append_audit({
+                    "timestamp": utc_now(), "role": ROLE, "project": project,
+                    "task": task, "result": "skipped", "reason": "no_backend_tasks",
+                })
+                return 0
         print(
             f"[{ROLE}] 必需输入缺失：{proj_dir}/指令/给后端*.md。请先跑技术主管。",
             file=sys.stderr,

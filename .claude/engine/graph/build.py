@@ -86,6 +86,7 @@ def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool):
             halt_on_failure,
             post_compress=step.post_compress,
             pre_flight=step.pre_flight if (step.pre_flight or step.auto_split) else None,
+            skip_if=step.skip_if,
         )
     if step.type == "discussion":
         return make_discussion_node(step, halt_on_failure)

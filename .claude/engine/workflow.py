@@ -66,6 +66,11 @@ class WorkflowStep:
     pre_flight: dict | None = None
     auto_split: bool = False
 
+    # 工作流层条件跳过（v2026-05-15 新增）：
+    # 格式：{"frontmatter_eq": {"file": "...路径...", "key": "...", "value": "..."}}
+    # 节点执行前评估，命中即跳过 subprocess 调用（对称 dev_*/main.py 内部跳过的上移版）
+    skip_if: dict | None = None
+
     # 兜底未识别字段
     extras: dict = field(default_factory=dict, repr=False)
 
@@ -85,12 +90,14 @@ class WorkflowStep:
                 post_compress = data.get("post_compress") or None
                 pre_flight = data.get("pre_flight") or None
                 auto_split = bool(data.get("auto_split", False))
+                skip_if = data.get("skip_if") or None
                 return cls(
                     type="linear",
                     role=str(role),
                     post_compress=post_compress,
                     pre_flight=pre_flight,
                     auto_split=auto_split,
+                    skip_if=skip_if,
                 )
             if t == "discussion":
                 roles = tuple(str(r) for r in (data.get("roles") or data.get("participants") or ()))
