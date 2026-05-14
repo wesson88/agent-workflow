@@ -14,7 +14,6 @@ CLI：
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -22,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common import (
-    parse_args, build_system_prompt, read_input_files,
+    parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now,
 )
@@ -58,19 +57,10 @@ def collect_input_docs(inputs_dir: Path) -> list[Path]:
     return docs
 
 
-def _resolve_project(args) -> str:
-    return (
-        args.project
-        or os.environ.get("PROJECT")
-        or os.environ.get("PROJECT_NAME")
-        or "default"
-    ).strip() or "default"
-
-
 def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
-    project = _resolve_project(args)
+    project = resolve_project(args)
 
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。需上级或人工介入解除。", file=sys.stderr)
