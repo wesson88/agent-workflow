@@ -36,6 +36,18 @@ from engine import (
 ROLE = "前端工程师"
 
 
+def _collect_task_files(proj_dir, role_prefix: str):
+    """收集前端任务文件列表，优先按编号拆分，降级到整体文件。"""
+    instr_dir = proj_dir / "指令"
+    split_files = sorted(instr_dir.glob(f"{role_prefix}-T*.md"))
+    if split_files:
+        return split_files, True
+    compressed = instr_dir / f"{role_prefix}-压缩.md"
+    original = instr_dir / f"{role_prefix}.md"
+    single = compressed if compressed.exists() else original
+    return ([single] if single.exists() else []), False
+
+
 def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
@@ -48,20 +60,13 @@ def main() -> int:
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
     proj_dir = project_dir(project)
-    to_frontend_orig = proj_dir / "指令" / "给前端.md"
-    to_frontend_compressed = proj_dir / "指令" / "给前端-压缩.md"
-    # § 15 层三：优先使用 haiku 压缩版
-    to_frontend = to_frontend_compressed if to_frontend_compressed.exists() else to_frontend_orig
-    if to_frontend_compressed.exists():
-        print(f"[{ROLE}] 📄 使用压缩版指令：给前端-压缩.md")
-    prd = proj_dir / "PRD.md"
-    sys_design = proj_dir / "系统设计.md"
-    api_spec = proj_dir / "API契约.md"     # 可选（后端先跑则有）
     tech_stack = rules_dir() / "技术栈.md"
 
-    if not to_frontend_orig.exists() or not sys_design.exists():
+    task_files, use_split = _collect_task_files(proj_dir, "给前端")
+
+    if not task_files:
         print(
-            f"[{ROLE}] 必需输入缺失：{to_frontend_orig} 或 {sys_design}。请先跑技术主管。",
+            f"[{ROLE}] 必需输入缺失：{proj_dir}/指令/给前端*.md。请先跑技术主管。",
             file=sys.stderr,
         )
         set_role_status(
@@ -75,82 +80,88 @@ def main() -> int:
         })
         return 2
 
-    # § 15 层二：输入预检 —— 给前端.md 体积告警
-    frontend_size = to_frontend.stat().st_size if to_frontend.exists() else 0
-    if frontend_size > 30 * 1024:
-        print(
-            f"[{ROLE}] ⚠️ 给前端.md 体积 {frontend_size // 1024}KB 超过 30KB 约束。"
-            f"技术主管产出可能未遵守输出体积限制（§15 层一）。"
-            f"本次仍继续执行，但输入将被截断到 25000 chars。",
-            file=sys.stderr,
-        )
-
-    system_prompt = build_system_prompt(ROLE, project=project)
-    context = read_input_files([prd, to_frontend, sys_design, api_spec, tech_stack])
-
-    user_prompt = (
-        f"项目名：`{project}`\n\n"
-        f"{context}\n\n---\n"
-        f"本轮任务：{task or '按指令实现前端代码'}\n\n"
-        "请按指令清单完整实现前端：\n"
-        "  - 入口 HTML + 主 JS：`src/frontend/index.html`、`src/frontend/app.js`\n"
-        "  - 公共组件：`src/frontend/components/...`\n"
-        "  - 页面：`src/frontend/pages/...`\n"
-        "  - 状态管理：`src/frontend/store/...`\n"
-        "  - 样式：`src/frontend/styles/...`\n"
-        "  - 测试：`tests/frontend/...`\n\n"
-        "技术栈严格按 `00-系统/规则/技术栈.md`；需含全局 Error Boundary、"
-        "loading/error 状态、响应式适配。\n"
-        + render_required_outputs([
-            "src/frontend/index.html",
-            "src/frontend/app.js",
-            "src/frontend/styles/main.css",
-            "tests/frontend/test_<x>.js",
-        ])
-        + "\n上面是路径**示例**；请根据指令清单中的实际功能划分产出对应文件，每个文件用一个 FILE 块。"
-    )
-
-    try:
-        raw_output = call_claude(system_prompt, user_prompt, ROLE)
-    except Exception as e:
-        err_str = str(e)
-        error_phase = "llm_call"
-        if any(k in err_str.lower() for k in ["context", "token", "length", "limit"]):
-            error_phase = "output_overflow"
+    if use_split:
+        print(f"[{ROLE}] 📋 按任务拆分模式，共 {len(task_files)} 个任务文件")
+    else:
+        single = task_files[0]
+        size = single.stat().st_size if single.exists() else 0
+        if size > 30 * 1024:
             print(
-                f"[{ROLE}] ⚠️ 疑似输出超限（max_tokens）。建议：\n"
-                f"  1. 检查给前端.md 是否仍超 30KB（§15 层一）\n"
-                f"  2. 在工作流 YAML 中为前端工程师配置 sub_tasks 分轮执行（§15 层四）",
+                f"[{ROLE}] ⚠️ {single.name} 体积 {size // 1024}KB 超过 30KB 约束。"
+                f"建议技术主管切换为按任务拆分输出。",
                 file=sys.stderr,
             )
-        print(f"[{ROLE}] Claude API 调用失败：{e}", file=sys.stderr)
-        set_role_status(
-            ROLE, status="failed",
-            increment_consecutive_failures=True, increment_error=True,
-            enforce_transition=False,
-        )
-        append_audit({
-            "timestamp": utc_now(), "role": ROLE, "project": project,
-            "task": task, "result": "failed", "error": err_str,
-            "error_phase": error_phase,
-        })
-        return 1
 
-    output_files = parse_claude_output_to_files(raw_output)
-    if not output_files:
-        # 降级：整体写入 src/frontend/index.html
-        dest = PROJECT_ROOT / "src" / "frontend" / "index.html"
-        write_output_atomic(dest, raw_output)
-        written = ["src/frontend/index.html"]
-        print(f"[{ROLE}] 未检测到 FILE 标签，降级写入 {dest}")
-    else:
-        written = []
-        for rel_path, content in output_files.items():
-            rel_path = rel_path.replace("{project}", project)
-            dest = resolve_path(rel_path, project)
-            write_output_atomic(dest, content)
-            print(f"[{ROLE}] 写入: {dest}")
-            written.append(rel_path)
+    system_prompt = build_system_prompt(ROLE, project=project)
+    written_all: list[str] = []
+
+    for task_file in task_files:
+        task_label = task_file.stem
+        print(f"[{ROLE}] ▶ 执行任务：{task_label}")
+
+        # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
+        context = read_input_files([task_file, tech_stack])
+
+        user_prompt = (
+            f"项目名：`{project}`\n\n"
+            f"{context}\n\n---\n"
+            f"本轮任务：{task or f'实现 {task_label} 中的前端代码'}\n\n"
+            "请按指令清单完整实现前端：\n"
+            "  - 入口 HTML + 主 JS：`src/frontend/index.html`、`src/frontend/app.js`\n"
+            "  - 公共组件：`src/frontend/components/...`\n"
+            "  - 页面：`src/frontend/pages/...`\n"
+            "  - 状态管理：`src/frontend/store/...`\n"
+            "  - 样式：`src/frontend/styles/...`\n"
+            "  - 测试：`tests/frontend/...`\n\n"
+            "技术栈严格按 `00-系统/规则/技术栈.md`；需含全局 Error Boundary、"
+            "loading/error 状态、响应式适配。\n"
+            + render_required_outputs([
+                "src/frontend/index.html",
+                "src/frontend/app.js",
+                "src/frontend/styles/main.css",
+                "tests/frontend/test_<x>.js",
+            ])
+            + "\n上面是路径**示例**；请根据指令清单中的实际功能划分产出对应文件，每个文件用一个 FILE 块。"
+        )
+
+        try:
+            raw_output = call_claude(system_prompt, user_prompt, ROLE)
+        except Exception as e:
+            err_str = str(e)
+            error_phase = "llm_call"
+            if any(k in err_str.lower() for k in ["context", "token", "length", "limit"]):
+                error_phase = "output_overflow"
+                print(
+                    f"[{ROLE}] ⚠️ 疑似输出超限（{task_label}）。任务文件过大，"
+                    f"建议进一步拆分。",
+                    file=sys.stderr,
+                )
+            print(f"[{ROLE}] Claude API 调用失败（{task_label}）：{e}", file=sys.stderr)
+            set_role_status(
+                ROLE, status="failed",
+                increment_consecutive_failures=True, increment_error=True,
+                enforce_transition=False,
+            )
+            append_audit({
+                "timestamp": utc_now(), "role": ROLE, "project": project,
+                "task": task_label, "result": "failed", "error": err_str,
+                "error_phase": error_phase,
+            })
+            return 1
+
+        output_files = parse_claude_output_to_files(raw_output)
+        if not output_files:
+            dest = PROJECT_ROOT / "src" / "frontend" / f"{task_label}_index.html"
+            write_output_atomic(dest, raw_output)
+            written_all.append(str(dest))
+            print(f"[{ROLE}] 未检测到 FILE 标签，降级写入 {dest}")
+        else:
+            for rel_path, content in output_files.items():
+                rel_path = rel_path.replace("{project}", project)
+                dest = resolve_path(rel_path, project)
+                write_output_atomic(dest, content)
+                print(f"[{ROLE}] 写入: {dest}")
+                written_all.append(rel_path)
 
     set_role_status(
         ROLE, status="success",
@@ -159,9 +170,9 @@ def main() -> int:
     set_role_status(ROLE, status="idle")
     append_audit({
         "timestamp": utc_now(), "role": ROLE, "project": project,
-        "task": task, "result": "success", "outputs": written,
+        "task": task, "result": "success", "outputs": written_all,
     })
-    print(f"[{ROLE}] 完成，输出：{written}")
+    print(f"[{ROLE}] 完成，输出：{written_all}")
     return 0
 
 

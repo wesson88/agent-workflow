@@ -183,34 +183,55 @@ def _extract_dynamic_patch(body: str) -> str:
 
 
 def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> str:
-    """从 vault 加载角色笔记，组装 system prompt。
+    """从 vault 加载角色笔记，组装分层 system prompt。
 
-    结构：
-        本角色 frontmatter 摘要
-        本角色正文（含 DYNAMIC 区域；闭环验证证据行已剥离）
-        上游角色的 DYNAMIC 补丁（已剥离证据行，如有）
-        OUTPUT_FORMAT_SPEC
+    分层结构（对应 Prompt Caching 静态块）：
 
-    Token 控制（系统认知图谱 §12 P0）：剥离 DYNAMIC 区的"闭环验证"证据行。
+    ① 核心层（常驻，适合 cache）：角色设定 + 全局约束
+       - 从角色笔记中提取 ## 全局约束 / ## 角色设定 / ## 角色 / ## 身份 章节
+       - 无匹配时降级使用 frontmatter 摘要
+
+    ② 动态层（按任务变化，不缓存）：DYNAMIC 补丁 + 上游补丁
+       - 仅当有实际内容时才追加，避免空块浪费 tokens
+
+    ③ 格式规范：OUTPUT_FORMAT_SPEC（常驻，适合 cache）
+
+    Token 控制：
+    - 剥离 DYNAMIC 区的"闭环验证"证据行（§12 P0）
+    - 不再把角色笔记全文塞入 system prompt，仅提取核心约束段
     """
     role = load_role(role_name_or_alias)
 
-    summary = [
-        f"角色：{role.name}",
-        f"领域：{role.domain}",
-        f"风格：{role.style}",
-    ]
-    if role.skills:
-        summary.append(f"技能:{', '.join(role.skills)}")
+    # ── ① 核心层：角色设定 + 全局约束 ───────────────────────
+    CORE_SECTIONS = ["全局约束", "角色设定", "角色", "身份", "编码规范", "技术约束"]
+    core_text = _extract_sections(role.body, CORE_SECTIONS)
+
+    # 若角色笔记无上述章节（如简单角色），降级用 frontmatter 摘要
+    if "⚠️ [sections 警告]" in core_text:
+        summary = [
+            f"角色：{role.name}",
+            f"领域：{role.domain}",
+            f"风格：{role.style}",
+        ]
+        if role.skills:
+            summary.append(f"技能：{', '.join(role.skills)}")
+        core_text = "\n".join(summary)
+
+    core_text = _strip_evidence_lines(core_text.strip())
 
     parts = [
-        "## 角色摘要",
-        "\n".join(summary),
-        "",
-        _strip_evidence_lines(role.body.strip()),
+        f"## 角色：{role.name}",
+        core_text,
     ]
 
-    # 上游补丁注入（保留 Phase 1 的"上游通过 DYNAMIC 影响下游"机制）
+    # ── ② 动态层：DYNAMIC 补丁 ────────────────────────────
+    own_patch = _strip_evidence_lines(_extract_dynamic_patch(role.body))
+    if own_patch.strip():
+        parts.append("")
+        parts.append("## 当前动态约束")
+        parts.append(own_patch)
+
+    # 上游角色 DYNAMIC 补丁（保留跨角色约束传递机制）
     for upstream_name in role.upstream:
         try:
             up_role = load_role(upstream_name)
@@ -222,6 +243,7 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
             parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
             parts.append(patch)
 
+    # ── ③ 格式规范 ────────────────────────────────────────
     parts.append(OUTPUT_FORMAT_SPEC)
     return "\n".join(parts)
 

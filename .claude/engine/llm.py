@@ -152,14 +152,31 @@ def _call_anthropic_sdk(
     api_cfg: dict, system_prompt: str, user_prompt: str,
     max_tokens: int, print_stream: bool,
 ) -> str:
+    """调用 Anthropic SDK，自动启用 Prompt Caching。
+
+    system_prompt 标记 cache_control=ephemeral：
+    - 静态角色基因 / 全局约束常驻缓存，命中后费用降至 1/10，延迟 -50%
+    - 缓存有效期 5 分钟（同一 API key 内跨请求共享）
+    - 不支持 caching 的旧模型会自动忽略该字段，向后兼容
+    """
     import anthropic  # 延迟 import
     key = os.environ.get(api_cfg["key_env"], "")
     client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
     chunks: list[str] = []
+
+    # system prompt 作为可缓存静态块（角色基因 + 全局约束，几乎不变）
+    system_block = [
+        {
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
     with client.messages.stream(
         model=api_cfg["model"],
         max_tokens=max_tokens,
-        system=system_prompt,
+        system=system_block,
         messages=[{"role": "user", "content": user_prompt}],
     ) as stream:
         for text in stream.text_stream:

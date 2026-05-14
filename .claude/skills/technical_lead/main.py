@@ -96,11 +96,18 @@ def main() -> int:
         "  - 功能描述、对应模块/接口、输入输出、验收标准\n"
         "  - 单任务工作量 ≤ 4 小时，超过须再拆分\n"
         "  - 标注前后端协作关系（如 API 契约、数据流）\n"
+        "\n"
+        "**输出要求（重要）**：\n"
+        "  - 每个任务单独一个 FILE 块，按编号命名：\n"
+        f"    `10-项目/{project}/指令/给后端-T01.md`、`给后端-T02.md` ...\n"
+        f"    `10-项目/{project}/指令/给前端-T01.md`、`给前端-T02.md` ...\n"
+        "  - 每个文件只包含该任务自身的描述 + 验收标准 + 必要的接口约束\n"
+        "  - **禁止**在单个文件中汇总所有任务（避免下游 agent 一次性加载全量）\n"
+        "  - 同时产出索引文件列出任务顺序和依赖关系：\n"
         + render_required_outputs([
-            f"10-项目/{project}/指令/给后端.md",
-            f"10-项目/{project}/指令/给前端.md",
-        ])
-    )
+            f"10-项目/{project}/指令/给后端-索引.md",
+            f"10-项目/{project}/指令/给前端-索引.md",
+        ]))
 
     try:
         raw_output = call_claude(system_prompt, user_prompt, ROLE)
@@ -132,8 +139,13 @@ def main() -> int:
         for rel_path, content in output_files.items():
             rel_resolved = rel_path.replace("{project}", project)
             dest = resolve_path(rel_resolved, project)
-            # 对指令文件（给后端/给前端）强制执行体积约束
-            if "给后端" in dest.name or "给前端" in dest.name:
+            # 对指令文件（给后端/给前端任务文件）强制执行体积约束
+            is_instruction = (
+                ("给后端" in dest.name or "给前端" in dest.name)
+                and dest.suffix == ".md"
+                and "索引" not in dest.name  # 索引文件无需限制
+            )
+            if is_instruction:
                 content = enforce_output_limits(content, ROLE, dest.name, LIMIT_CHARS)
             write_output_atomic(dest, content)
             print(f"[{ROLE}] 写入: {dest}")
