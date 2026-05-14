@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -31,6 +32,18 @@ _providers_cache: dict[str, dict] | None = None
 # Windows 命令行总长度上限 32767；预留出余量给其它参数。
 # 超过此阈值的 system_prompt 自动改走 stdin inline。
 _CMD_ARG_LIMIT = 8192
+
+# ── token 预算护栏阈值 ───────────────────────────────────
+# system prompt 单独阈值（与 context_window 无关，是 prompt 设计原则）：
+#   角色基因抽 section 后约 3-5K，DYNAMIC 累积 > 15K 说明应触发 GRADUATE/DROP 收敛，
+#   > 30K 视为设计失控（无论 model 容量多大都不应放任）。
+_SYSTEM_WARN_TOKENS = 15_000
+_SYSTEM_RAISE_TOKENS = 30_000
+
+# 总量阈值（按 context_window 百分比）：
+#   ≥ 80% 打告警；≥ 95% 主动 raise，比被 SDK 拒错误更早、定位更清晰。
+_TOTAL_WARN_RATIO = 0.80
+_TOTAL_RAISE_RATIO = 0.95
 
 
 # ── 配置加载 ─────────────────────────────────────────────
@@ -127,23 +140,28 @@ def call_llm(
     cfg = get_provider(model)
     track = _resolve_track(cfg)
 
+    # 规范化 system_prompt 为 (static, dynamic)，给审计 + 各路径分发统一格式
+    if isinstance(system_prompt, tuple):
+        static, dynamic = system_prompt
+    else:
+        static, dynamic = system_prompt, ""
+
+    # 入口审计：在真正调用 LLM 前过两道护栏（system 单独阈值 + 总量百分比）
+    _audit_token_budget(model, static, dynamic, user_prompt)
+
     if track == "api":
         api_cfg = cfg["api"]
         kind = api_cfg.get("kind", "anthropic")
         if kind == "anthropic":
-            if isinstance(system_prompt, tuple):
-                static, dynamic = system_prompt
-            else:
-                static, dynamic = system_prompt, ""
             return _call_anthropic_sdk(api_cfg, static, dynamic, user_prompt, max_tokens, print_stream)
         # openai_compat：拼接为单字符串
-        flat = "\n\n".join(filter(None, system_prompt)) if isinstance(system_prompt, tuple) else system_prompt
+        flat = "\n\n".join(filter(None, [static, dynamic])) if dynamic else static
         if kind == "openai_compat":
             return _call_openai_compat(api_cfg, flat, user_prompt, max_tokens, print_stream)
         raise ValueError(f"未知 api kind：{kind}（provider={model}）")
 
     if track == "cli":
-        flat = "\n\n".join(filter(None, system_prompt)) if isinstance(system_prompt, tuple) else system_prompt
+        flat = "\n\n".join(filter(None, [static, dynamic])) if dynamic else static
         return _call_cli(cfg["cli"], flat, user_prompt, print_stream)
 
     # unavailable：给出可操作的提示
@@ -155,6 +173,74 @@ def call_llm(
     if cli_cfg:
         parts.append(f"  CLI 轨道：安装并确保 `{cli_cfg.get('path')}` 在 PATH 中")
     raise RuntimeError("\n".join(parts))
+
+
+# ── token 预算审计 ───────────────────────────────────────
+def _audit_token_budget(
+    model: str, static: str, dynamic: str, user_prompt: str,
+) -> None:
+    """入口护栏：在真正调用 LLM 前估算 input token 总量，按阈值告警/阻断。
+
+    两道护栏：
+      1. system prompt（static + dynamic）单独阈值
+         - > 15K tokens → WARNING（DYNAMIC 累积线，提醒 GRADUATE/DROP）
+         - > 30K tokens → raise（prompt 设计失控）
+      2. 总量（system + user）按 context_window 百分比
+         - ≥ 80% → WARNING（早期信号）
+         - ≥ 95% → raise（避免被 SDK 拒，定位更清晰）
+
+    token_counter 失败时静默降级（不阻断主路径）：
+      - tiktoken 未装、provider 未知、字符编码异常等场景仍能调用。
+    """
+    try:
+        from engine.token_counter import count_tokens, get_context_window
+        static_tok = count_tokens(static, model) if static else 0
+        dynamic_tok = count_tokens(dynamic, model) if dynamic else 0
+        user_tok = count_tokens(user_prompt, model) if user_prompt else 0
+        cw = get_context_window(model)
+    except Exception as e:
+        print(
+            f"[audit] ⚠️ token 审计降级（{type(e).__name__}: {e}），跳过校验。",
+            file=sys.stderr,
+        )
+        return
+
+    sys_tok = static_tok + dynamic_tok
+    total_tok = sys_tok + user_tok
+
+    # 护栏 1：system prompt 单独阈值
+    if sys_tok > _SYSTEM_RAISE_TOKENS:
+        raise RuntimeError(
+            f"[audit] system prompt 过大（{sys_tok} tokens > {_SYSTEM_RAISE_TOKENS} "
+            f"阈值）— static={static_tok}, dynamic={dynamic_tok}。"
+            f" 排查建议：(1) 角色笔记是否含未被 build_system_prompt 抽取的冗余章节；"
+            f" (2) DYNAMIC 区是否累积过多、需要 graduator/reflector 收敛；"
+            f" (3) 上游 role.upstream 链是否过长。"
+        )
+    if sys_tok > _SYSTEM_WARN_TOKENS:
+        print(
+            f"[audit] ⚠️ system prompt 偏大（{sys_tok} tokens > "
+            f"{_SYSTEM_WARN_TOKENS} 告警线）— static={static_tok}, "
+            f"dynamic={dynamic_tok}。建议关注 DYNAMIC 累积。",
+            file=sys.stderr,
+        )
+
+    # 护栏 2：总量按 context_window 百分比
+    ratio = total_tok / cw if cw else 0.0
+    if ratio >= _TOTAL_RAISE_RATIO:
+        raise RuntimeError(
+            f"[audit] input token 总量触顶（{total_tok}/{cw} = {ratio:.1%} ≥ "
+            f"{_TOTAL_RAISE_RATIO:.0%}）— system={sys_tok}, user={user_tok}, "
+            f"model={model}。建议：拆分 user prompt 或精简 system；"
+            f"继续调用预计将被 SDK 拒绝。"
+        )
+    if ratio >= _TOTAL_WARN_RATIO:
+        print(
+            f"[audit] ⚠️ input token 偏高（{total_tok}/{cw} = {ratio:.1%} ≥ "
+            f"{_TOTAL_WARN_RATIO:.0%}）— system={sys_tok}, user={user_tok}, "
+            f"model={model}。",
+            file=sys.stderr,
+        )
 
 
 # ── Anthropic SDK ────────────────────────────────────────

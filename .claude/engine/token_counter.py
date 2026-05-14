@@ -136,6 +136,10 @@ def count_tokens_multi(texts: list[str], model_key: str) -> int:
 
 # ── 内部：从 providers YAML 读取 tokenizer 字段 ───────────────────────────────
 _MODEL_TOKENIZER_CACHE: dict[str, str] = {}
+_MODEL_CONTEXT_WINDOW_CACHE: dict[str, int] = {}
+
+# 未声明 context_window 时的保守默认值（覆盖 Claude / GPT-4o / DeepSeek 等主流模型）
+_DEFAULT_CONTEXT_WINDOW = 200_000
 
 
 def _get_tokenizer_for_model(model_key: str) -> str:
@@ -159,9 +163,35 @@ def _get_tokenizer_for_model(model_key: str) -> str:
     return tokenizer
 
 
+def get_context_window(model_key: str) -> int:
+    """从 llm_providers.yaml 读取 model 的 context_window；进程内缓存。
+
+    用于 engine/llm.py 的 _audit_token_budget 做入口总量审计：
+    - input_tokens ≥ context_window × 80% → WARNING
+    - input_tokens ≥ context_window × 95% → raise
+
+    找不到 model 或未声明 context_window 时，返回保守默认值 200000。
+    """
+    if model_key in _MODEL_CONTEXT_WINDOW_CACHE:
+        return _MODEL_CONTEXT_WINDOW_CACHE[model_key]
+
+    cw = _DEFAULT_CONTEXT_WINDOW
+    try:
+        from engine.llm import get_provider  # type: ignore
+        cfg = get_provider(model_key)
+        raw = cfg.get("context_window", _DEFAULT_CONTEXT_WINDOW)
+        cw = int(raw) if raw else _DEFAULT_CONTEXT_WINDOW
+    except Exception:
+        pass
+
+    _MODEL_CONTEXT_WINDOW_CACHE[model_key] = cw
+    return cw
+
+
 def clear_cache() -> None:
     """清空所有缓存（测试或配置变更后使用）。"""
     global _TIKTOKEN_AVAILABLE
     _TIKTOKEN_CACHE.clear()
     _MODEL_TOKENIZER_CACHE.clear()
+    _MODEL_CONTEXT_WINDOW_CACHE.clear()
     _TIKTOKEN_AVAILABLE = None

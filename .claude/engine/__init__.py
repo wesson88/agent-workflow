@@ -44,7 +44,8 @@ from .llm import (
     reload_providers, is_api_available, is_cli_available,
 )
 from .token_counter import (
-    count_tokens, count_tokens_multi, estimate_tokens, clear_cache as clear_token_cache,
+    count_tokens, count_tokens_multi, estimate_tokens,
+    get_context_window, clear_cache as clear_token_cache,
 )
 
 __all__ = [
@@ -73,5 +74,6 @@ __all__ = [
     "get_provider", "list_providers", "is_provider_available",
     "reload_providers", "is_api_available", "is_cli_available",
     # token_counter
-    "count_tokens", "count_tokens_multi", "estimate_tokens", "clear_token_cache",
+    "count_tokens", "count_tokens_multi", "estimate_tokens",
+    "get_context_window", "clear_token_cache",
 ]

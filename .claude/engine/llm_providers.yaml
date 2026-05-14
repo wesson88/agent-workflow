@@ -11,6 +11,10 @@
 #              cl100k_base  — Claude / DeepSeek / LLaMA 等
 #              o200k_base   — GPT-4o / GPT-4o-mini
 #              chars        — 无公开分词器，用 chars // 2.5 估算（Gemini 等）
+#   context_window: 模型上下文窗口 token 数（input+output 上限）。
+#              由 engine/llm.py 的 _audit_token_budget 使用，做入口总量审计：
+#              ≥ 80% 打 WARNING，≥ 95% raise RuntimeError 提前阻断。
+#              未声明时默认 200000（保守值）。
 #   api:
 #     kind:     anthropic / openai_compat
 #     key_env:  存放 API key 的环境变量名
@@ -30,6 +34,7 @@ claude-sonnet-4-6:
   mode: dual_track
   prefer: auto
   tokenizer: cl100k_base
+  context_window: 200000
   api:
     kind: anthropic
     key_env: ANTHROPIC_API_KEY
@@ -45,6 +50,7 @@ claude-opus-4-7:
   mode: dual_track
   prefer: auto
   tokenizer: cl100k_base
+  context_window: 1000000  # Opus 4.7 默认走 1M extended context
   api:
     kind: anthropic
     key_env: ANTHROPIC_API_KEY
@@ -60,6 +66,7 @@ claude-haiku-4-5:
   mode: dual_track
   prefer: auto
   tokenizer: cl100k_base
+  context_window: 200000
   api:
     kind: anthropic
     key_env: ANTHROPIC_API_KEY
@@ -76,6 +83,7 @@ claude-haiku-4-5:
 deepseek-v3:
   mode: api_only
   tokenizer: cl100k_base
+  context_window: 128000
   api:
     kind: openai_compat
     key_env: DEEPSEEK_API_KEY
@@ -85,6 +93,7 @@ deepseek-v3:
 deepseek-reasoner:
   mode: api_only
   tokenizer: cl100k_base
+  context_window: 128000
   api:
     kind: openai_compat
     key_env: DEEPSEEK_API_KEY
@@ -96,6 +105,7 @@ deepseek-reasoner:
 gpt-4o:
   mode: api_only
   tokenizer: o200k_base
+  context_window: 128000
   api:
     kind: openai_compat
     key_env: OPENAI_API_KEY
@@ -105,6 +115,7 @@ gpt-4o:
 gpt-4o-mini:
   mode: api_only
   tokenizer: o200k_base
+  context_window: 128000
   api:
     kind: openai_compat
     key_env: OPENAI_API_KEY
@@ -124,6 +135,7 @@ gemini-2.0-pro:
   mode: dual_track
   prefer: auto
   tokenizer: chars
+  context_window: 2000000
   api:
     kind: openai_compat
     key_env: GEMINI_API_KEY
@@ -140,6 +152,7 @@ gemini-2.0-flash:
   mode: dual_track
   prefer: auto
   tokenizer: chars
+  context_window: 1000000
   api:
     kind: openai_compat
     key_env: GEMINI_API_KEY
@@ -156,6 +169,7 @@ gemini-2.5-pro:
   mode: dual_track
   prefer: auto
   tokenizer: chars
+  context_window: 1000000
   api:
     kind: openai_compat
     key_env: GEMINI_API_KEY
@@ -172,6 +186,7 @@ gemini-2.5-flash:
   mode: dual_track
   prefer: auto
   tokenizer: chars
+  context_window: 1000000
   api:
     kind: openai_compat
     key_env: GEMINI_API_KEY
@@ -188,6 +203,7 @@ gemini-2.5-flash:
 gemini-pro:
   mode: cli_only
   tokenizer: chars
+  context_window: 32000
   cli:
     path: gemini
     model: gemini-2.0-pro
@@ -200,6 +216,7 @@ gemini-pro:
 ollama-llama3:
   mode: api_only
   tokenizer: cl100k_base   # LLaMA 系列用 cl100k_base 近似
+  context_window: 8192     # 默认 llama3 8K；如本地跑 llama3-128k 等扩展版需手工覆盖
   api:
     kind: openai_compat
     key_env: OLLAMA_API_KEY      # ollama 无需 key，但 SDK 要求传一个非空字符串
