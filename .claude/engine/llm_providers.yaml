@@ -80,25 +80,27 @@ claude-haiku-4-5:
 
 # ── DeepSeek（OpenAI 兼容）────────────────────────────────
 # 启用前需在 .env 中设置 DEEPSEEK_API_KEY=sk-...
-deepseek-v3:
+# 官方文档（2026-05 查证）：context_window=1M，max output=384K，默认开 thinking mode。
+# deepseek-chat / deepseek-reasoner 将在 2026-07-24 弃用，统一收敛到 v4 系列。
+deepseek-v4-pro:
   mode: api_only
   tokenizer: cl100k_base
-  context_window: 128000
+  context_window: 1000000
   api:
     kind: openai_compat
     key_env: DEEPSEEK_API_KEY
     base_url: https://api.deepseek.com
-    model: deepseek-chat
+    model: deepseek-v4-pro
 
-deepseek-reasoner:
+deepseek-v4-flash:
   mode: api_only
   tokenizer: cl100k_base
-  context_window: 128000
+  context_window: 1000000
   api:
     kind: openai_compat
     key_env: DEEPSEEK_API_KEY
     base_url: https://api.deepseek.com
-    model: deepseek-reasoner
+    model: deepseek-v4-flash
 
 # ── OpenAI ────────────────────────────────────────────────
 # 启用前需在 .env 中设置 OPENAI_API_KEY=sk-...
