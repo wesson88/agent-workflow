@@ -250,10 +250,10 @@ def _execute_single(
             rc = subprocess.run(
                 [sys.executable, str(main_py), "--task", task, "--project", project],
                 env=env,
-                timeout=600,
+                timeout=1800,
             ).returncode
         except subprocess.TimeoutExpired:
-            print(f"[subprocess_timeout] {main_py.name} 超时（600s），attempt={attempt + 1}/3", flush=True)
+            print(f"[subprocess_timeout] {main_py.name} 超时（1800s），attempt={attempt + 1}/3", flush=True)
             rc = 1
         if rc == 0:
             return 0

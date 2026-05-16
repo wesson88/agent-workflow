@@ -31,12 +31,22 @@ from common import (
 from engine import (
     set_role_status, role_is_blocked,
     project_dir, rules_dir, resolve_path, PROJECT_ROOT,
+    VAULT_ROOT,
 )
 
 ROLE = "后端工程师"
 
 
 _NO_BACKEND_SIGNALS = ("无后端任务", "no backend", "纯前端", "frontend-only")
+
+
+def _task_marker(project: str, task_label: str):
+    """单任务完成 marker：subprocess retry 时跳过已成功 task。
+
+    每个 task_label（如 `给后端-T01`）一个 marker，整轮 success 时统一清理。
+    """
+    safe = task_label.replace("/", "_").replace("\\", "_")
+    return VAULT_ROOT / "00-系统" / ".runtime-state" / f"dev_backend.{project}.{safe}.done"
 
 
 def _collect_task_files(proj_dir, role_prefix: str, tech_stack):
@@ -128,6 +138,13 @@ def main() -> int:
 
     for task_file in task_files:
         task_label = task_file.stem  # 如 "给后端-T02"
+
+        # subprocess retry 跳过：已 marker 即认为本 task 之前已成功落盘
+        marker = _task_marker(project, task_label)
+        if marker.exists():
+            print(f"[{ROLE}] ⏩ {task_label} 已完成（marker 存在），跳过重跑")
+            continue
+
         print(f"[{ROLE}] ▶ 执行任务：{task_label}")
 
         # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
@@ -210,6 +227,24 @@ def main() -> int:
                 write_output_atomic(dest, content)
                 print(f"[{ROLE}] 写入: {dest}")
                 written_all.append(rel_resolved)
+
+        # task 成功（含降级写入）后写 marker
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(f"done at {utc_now()}\nlabel: {task_label}\n",
+                              encoding="utf-8")
+        except OSError as e:
+            print(f"[{ROLE}] ⚠️ 写 {marker.name} 失败（{e}），retry 时会重跑此 task",
+                  file=sys.stderr)
+
+    # 整轮成功，清理所有 task marker
+    for task_file in task_files:
+        m = _task_marker(project, task_file.stem)
+        if m.exists():
+            try:
+                m.unlink()
+            except OSError:
+                pass
 
     set_role_status(
         ROLE, status="success",
