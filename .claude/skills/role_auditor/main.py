@@ -16,7 +16,6 @@ CLI：
                  - 不传 = 全部角色（除审计者本身）
                  - --target 后端工程师 = 单个
                  - --target 后端,前端 = 多个
-    --role       兼容旧用法的 alias（等价于单值 --target）
 """
 
 from __future__ import annotations
@@ -298,13 +297,7 @@ def _parse_args() -> argparse.Namespace:
         "--target", action="append", default=None,
         help="治理对象（可重复 / 逗号分隔 / 'all'）；缺省审计全部角色",
     )
-    # 向后兼容旧 --role 参数（等价单值 --target）
-    p.add_argument("--role", default=None, help="[已废弃，请用 --target] 单角色名")
-    args = p.parse_args()
-    # 把 --role 合并进 --target（缺省 None 时不动）
-    if args.role:
-        args.target = (args.target or []) + [args.role]
-    return args
+    return p.parse_args()
 
 
 def _today_stamp() -> str:
