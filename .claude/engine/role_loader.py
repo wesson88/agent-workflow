@@ -63,6 +63,11 @@ class Role:
     # 完整 frontmatter（debug/扩展用）
     frontmatter: dict = field(repr=False)
 
+    # token 预算 override（可选，单位 tokens）；缺省 None 则走 engine.llm 默认窗口百分比
+    # 用法：角色 frontmatter 显式声明 `budget_input_tokens: 80000`，engine.llm 入口
+    # 护栏会按此值做 RAISE（warn = 60% × 此值），代替 _TOTAL_RAISE_RATIO 百分比
+    budget_input_tokens: int | None = None
+
     @property
     def all_names(self) -> tuple[str, ...]:
         """name + aliases 的并集，用于查找匹配。"""
@@ -138,6 +143,8 @@ def _build_role(note_path: Path) -> Role:
         skill_refs=skill_refs,
         body=body_with_skills,
         frontmatter=fm,
+        budget_input_tokens=(int(fm["budget_input_tokens"])
+                             if fm.get("budget_input_tokens") else None),
     )
 
 

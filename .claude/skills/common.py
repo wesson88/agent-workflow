@@ -477,29 +477,37 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
 def call_llm_for_role(system_prompt: tuple[str, str] | str, user_prompt: str, role_name_or_alias: str) -> str:
-    """从角色 frontmatter 读取 model/max_tokens 后调用 engine.llm.call_llm。
+    """从角色 frontmatter 读取 model/max_tokens/budget_input_tokens 后调用 engine.llm.call_llm。
 
     单一职责：负责"角色配置读取 + 调用路由"，不重复实现 streaming 逻辑。
     底层路由由 engine.llm 处理（API key → SDK，否则 → CLI）。
+
+    `budget_input_tokens`（可选，来自角色 frontmatter）会覆盖 engine.llm 入口护栏
+    的默认 ratio 计算，按显式 token 数做 RAISE / WARN（适合"注定吃大上下文"的
+    角色显式声明上限，如复盘者 / 角色规范师 / 讨论场参与者）。
     """
+    input_budget: int | None = None
     try:
         role = load_role(role_name_or_alias)
         max_tokens = role.max_tokens
         model = role.model
         display_name = role.name
+        input_budget = role.budget_input_tokens
     except RoleNotFound:
         max_tokens = _DEFAULT_MAX_TOKENS
         model = _DEFAULT_MODEL
         display_name = role_name_or_alias
 
+    budget_note = f", input_budget={input_budget}" if input_budget else ""
     print(
-        f"[{display_name}] 调用 LLM (model={model}, max_tokens={max_tokens})...",
+        f"[{display_name}] 调用 LLM (model={model}, max_tokens={max_tokens}{budget_note})...",
         flush=True,
     )
 
     return _llm_call_llm(
         system_prompt, user_prompt,
         model=model, max_tokens=max_tokens,
+        input_budget=input_budget,
     )
 
 

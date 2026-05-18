@@ -35,15 +35,21 @@ _CMD_ARG_LIMIT = 8192
 
 # ── token 预算护栏阈值 ───────────────────────────────────
 # system prompt 单独阈值（与 context_window 无关，是 prompt 设计原则）：
-#   角色基因抽 section 后约 3-5K，DYNAMIC 累积 > 15K 说明应触发 GRADUATE/DROP 收敛，
-#   > 30K 视为设计失控（无论 model 容量多大都不应放任）。
-_SYSTEM_WARN_TOKENS = 15_000
-_SYSTEM_RAISE_TOKENS = 30_000
+#   - 健康 system 抽 section 后 3-5K；DYNAMIC 累积 > 8K 说明应触发 GRADUATE/DROP 收敛
+#   - > 20K 视为设计失控（无论 model 容量多大都不应放任）
+# 2026-05-18 v0.2：原阈值（15K/30K）过宽容，DYNAMIC 累积到 15K 时已经晚了。
+_SYSTEM_WARN_TOKENS = 8_000
+_SYSTEM_RAISE_TOKENS = 20_000
 
-# 总量阈值（按 context_window 百分比）：
-#   ≥ 80% 打告警；≥ 95% 主动 raise，比被 SDK 拒错误更早、定位更清晰。
-_TOTAL_WARN_RATIO = 0.80
-_TOTAL_RAISE_RATIO = 0.95
+# 总量阈值（按 context_window 百分比，可被 input_budget 覆盖）：
+#   ≥ 50% 早期信号（一次调用占了一半窗口，必有累积或注入过载）
+#   ≥ 85% 主动 raise（留 30K 给 output + retry 余量，比 SDK 拒错更早）
+# 2026-05-18 v0.2：原 80/95 太晚，95% 触发时模型实际拒绝距离只剩 10K。
+_TOTAL_WARN_RATIO = 0.50
+_TOTAL_RAISE_RATIO = 0.85
+
+# 按角色 override 时的 WARN 比例：触发 RAISE = override 值，WARN = override × 0.6
+_BUDGET_WARN_RATIO_OF_OVERRIDE = 0.60
 
 
 # ── 配置加载 ─────────────────────────────────────────────
@@ -125,6 +131,7 @@ def call_llm(
     model: str,
     max_tokens: int = 4096,
     print_stream: bool = True,
+    input_budget: int | None = None,
 ) -> str:
     """统一 LLM 调用入口。
 
@@ -136,6 +143,10 @@ def call_llm(
         model: 必传；同时是 llm_providers.yaml 中的 key
         max_tokens: API 路径有效；CLI 路径不直接控制（受模型/订阅限制）
         print_stream: 是否流式打印到 stdout（默认 True）
+        input_budget: 可选的按角色 input token 预算（来自角色 frontmatter
+            `budget_input_tokens` 字段）。传入时**覆盖**默认 ratio 计算：
+              RAISE 阈值 = input_budget，WARN 阈值 = input_budget × 0.6。
+            None（默认）走 _TOTAL_WARN_RATIO / _TOTAL_RAISE_RATIO 的窗口百分比逻辑。
     """
     cfg = get_provider(model)
     track = _resolve_track(cfg)
@@ -146,8 +157,8 @@ def call_llm(
     else:
         static, dynamic = system_prompt, ""
 
-    # 入口审计：在真正调用 LLM 前过两道护栏（system 单独阈值 + 总量百分比）
-    _audit_token_budget(model, static, dynamic, user_prompt)
+    # 入口审计：在真正调用 LLM 前过两道护栏（system 单独阈值 + 总量百分比/角色预算）
+    _audit_token_budget(model, static, dynamic, user_prompt, input_budget=input_budget)
 
     if track == "api":
         api_cfg = cfg["api"]
@@ -178,16 +189,18 @@ def call_llm(
 # ── token 预算审计 ───────────────────────────────────────
 def _audit_token_budget(
     model: str, static: str, dynamic: str, user_prompt: str,
+    *, input_budget: int | None = None,
 ) -> None:
     """入口护栏：在真正调用 LLM 前估算 input token 总量，按阈值告警/阻断。
 
     两道护栏：
       1. system prompt（static + dynamic）单独阈值
-         - > 15K tokens → WARNING（DYNAMIC 累积线，提醒 GRADUATE/DROP）
-         - > 30K tokens → raise（prompt 设计失控）
-      2. 总量（system + user）按 context_window 百分比
-         - ≥ 80% → WARNING（早期信号）
-         - ≥ 95% → raise（避免被 SDK 拒，定位更清晰）
+         - > _SYSTEM_WARN_TOKENS  → WARNING（DYNAMIC 累积线，提醒 GRADUATE/DROP）
+         - > _SYSTEM_RAISE_TOKENS → raise（prompt 设计失控）
+      2. 总量（system + user）：
+         - 传入 input_budget（角色 frontmatter 显式预算）：
+           >= input_budget × 0.6 → WARN；>= input_budget → RAISE
+         - 否则按 context_window 百分比（_TOTAL_WARN_RATIO / _TOTAL_RAISE_RATIO）
 
     token_counter 失败时静默降级（不阻断主路径）：
       - tiktoken 未装、provider 未知、字符编码异常等场景仍能调用。
@@ -225,14 +238,35 @@ def _audit_token_budget(
             file=sys.stderr,
         )
 
-    # 护栏 2：总量按 context_window 百分比
+    # 护栏 2：总量阈值
+    # 优先用角色 frontmatter 的 input_budget（显式声明）；否则按 context_window 比例
+    if input_budget is not None and input_budget > 0:
+        raise_at = input_budget
+        warn_at = int(input_budget * _BUDGET_WARN_RATIO_OF_OVERRIDE)
+        budget_desc = f"角色预算 {input_budget}"
+        if total_tok >= raise_at:
+            raise RuntimeError(
+                f"[audit] input token 超角色预算（{total_tok} ≥ {raise_at}）— "
+                f"system={sys_tok}, user={user_tok}, model={model}。"
+                f"建议：拆分 user prompt 或精简 system；"
+                f"或角色 frontmatter 调高 budget_input_tokens。"
+            )
+        if total_tok >= warn_at:
+            print(
+                f"[audit] ⚠️ input token 接近角色预算（{total_tok} ≥ {warn_at}, "
+                f"上限 {raise_at}）— system={sys_tok}, user={user_tok}, model={model}。",
+                file=sys.stderr,
+            )
+        return
+
+    # 未声明 input_budget：走 context_window 百分比
     ratio = total_tok / cw if cw else 0.0
     if ratio >= _TOTAL_RAISE_RATIO:
         raise RuntimeError(
             f"[audit] input token 总量触顶（{total_tok}/{cw} = {ratio:.1%} ≥ "
             f"{_TOTAL_RAISE_RATIO:.0%}）— system={sys_tok}, user={user_tok}, "
-            f"model={model}。建议：拆分 user prompt 或精简 system；"
-            f"继续调用预计将被 SDK 拒绝。"
+            f"model={model}。建议：拆分 user prompt / 精简 system / 角色加 "
+            f"budget_input_tokens 显式声明；继续调用预计将被 SDK 拒绝。"
         )
     if ratio >= _TOTAL_WARN_RATIO:
         print(
