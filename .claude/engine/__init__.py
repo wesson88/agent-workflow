@@ -47,6 +47,11 @@ from .token_counter import (
     count_tokens, count_tokens_multi, estimate_tokens,
     get_context_window, clear_cache as clear_token_cache,
 )
+from .wikilink import (
+    Wikilink, Expansion, ExpandResult, DuplicateStemError,
+    parse_wikilinks, resolve_target, load_wikilink, expand_wikilinks,
+    invalidate_cache as invalidate_wikilink_cache,
+)
 
 __all__ = [
     # config
@@ -76,4 +81,8 @@ __all__ = [
     # token_counter
     "count_tokens", "count_tokens_multi", "estimate_tokens",
     "get_context_window", "clear_token_cache",
+    # wikilink
+    "Wikilink", "Expansion", "ExpandResult", "DuplicateStemError",
+    "parse_wikilinks", "resolve_target", "load_wikilink", "expand_wikilinks",
+    "invalidate_wikilink_cache",
 ]

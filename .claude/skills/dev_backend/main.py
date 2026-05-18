@@ -18,6 +18,7 @@ CLI：
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -32,12 +33,70 @@ from engine import (
     set_role_status, role_is_blocked,
     project_dir, rules_dir, resolve_path, PROJECT_ROOT,
     VAULT_ROOT,
+    expand_wikilinks, invalidate_wikilink_cache,
 )
 
 ROLE = "后端工程师"
 
 
 _NO_BACKEND_SIGNALS = ("无后端任务", "no backend", "纯前端", "frontend-only")
+
+# 后端 skill wikilink 识别：匹配 stem `B<N>-描述` 或完整路径末尾 `.../B<N>-...`
+# 注意：filter 在 wl.target 字符串上做匹配，target 已剥离 [[]] 和 #section / |alias
+_BACKEND_SKILL_RE = re.compile(r"(?:^|/)B\d+-")
+
+
+def _load_task_skills(task_text: str) -> tuple[str, list[str], list[str]]:
+    """从 task 正文解析 backend skill wikilink，按需展开为可注入 prompt 的文本块。
+
+    返回 (skill_block, loaded_targets, unresolved_targets)
+      skill_block: 待注入 user_prompt 的文本（无引用时为空串）
+      loaded_targets: 成功展开的 wikilink target 列表（用于日志）
+      unresolved_targets: 写了 wikilink 但找不到对应文件的 target 列表（warn 不 fail）
+
+    设计要点：
+    - filter 只匹配 backend skill 命名规约（`B<N>-...`），其他 wikilink 跳过
+    - 预算双层：单 skill ≤ 3000 char，总 ≤ 12000 char
+    - max_depth=0：skill 文件内的 wikilink 不再递归展开
+    - on_unresolved="warn"：task 写错 wikilink 不阻断 task，只打告警
+    """
+    try:
+        result = expand_wikilinks(
+            task_text, VAULT_ROOT,
+            filter=lambda wl: bool(_BACKEND_SKILL_RE.search(wl.target)),
+            max_chars_per_link=3000,
+            total_char_budget=12_000,
+            max_depth=0,
+            on_unresolved="warn",
+        )
+    except Exception as e:
+        # DuplicateStemError 等命名规则破坏 → 不阻断 task，但要让人看见
+        print(
+            f"[{ROLE}] ⚠️ wikilink 展开失败（{type(e).__name__}: {e}），"
+            f"本 task 不注入 skill。",
+            file=sys.stderr,
+        )
+        return "", [], []
+
+    loaded: list[str] = []
+    parts: list[str] = []
+    for e in result.expansions:
+        if e.reason == "ok" and e.content:
+            loaded.append(e.wikilink.target)
+            parts.append(
+                f"=== Skill 引用: [[{e.wikilink.target}]] "
+                f"({e.path.name if e.path else '?'}) ===\n{e.content}"
+            )
+
+    skill_block = ""
+    if parts:
+        skill_block = (
+            "\n\n## 相关技能（按 task 正文 wikilink 加载）\n\n"
+            + "\n\n".join(parts)
+            + "\n"
+        )
+
+    return skill_block, loaded, result.unresolved
 
 
 def _task_marker(project: str, task_label: str):
@@ -136,6 +195,9 @@ def main() -> int:
     system_prompt = build_system_prompt(ROLE, project=project)
     written_all: list[str] = []
 
+    # 批处理多 task 前刷新 wikilink stem 索引（vault 可能被 git pull 更新）
+    invalidate_wikilink_cache()
+
     for task_file in task_files:
         task_label = task_file.stem  # 如 "给后端-T02"
 
@@ -149,6 +211,19 @@ def main() -> int:
 
         # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
         context = read_input_files([task_file, tech_stack])
+
+        # 按 task 正文里的 wikilink 按需注入 skill（仅 backend skill `B<N>-...`）
+        # 未引用任何 skill 时 skill_block="" —— 完全省 token，不主动注入兜底集
+        task_text = task_file.read_text(encoding="utf-8")
+        skill_block, loaded_skills, unresolved = _load_task_skills(task_text)
+        if loaded_skills:
+            print(f"[{ROLE}] 📚 task 引用 skill: {', '.join(loaded_skills)}")
+        if unresolved:
+            print(
+                f"[{ROLE}] ⚠️ task 引用了 {len(unresolved)} 个未解析 wikilink: "
+                f"{', '.join(unresolved)}（已跳过，task 继续）",
+                file=sys.stderr,
+            )
 
         # 注入已生成文件列表，防止后续任务重新发明架构
         prior_files = [p for p in written_all if p.startswith("src/backend/") or p.startswith("tests/")]
@@ -175,7 +250,8 @@ def main() -> int:
 
         user_prompt = (
             f"项目名：`{project}`\n\n"
-            f"{context}\n\n"
+            f"{context}"
+            f"{skill_block}\n\n"
             f"{prior_context}"
             "---\n"
             f"本轮任务：{task or f'实现 {task_label} 中的后端代码'}\n\n"
