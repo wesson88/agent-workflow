@@ -74,6 +74,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_targets(target_args: list[str] | None) -> set[str] | None:
+    """元角色 CLI 共用 helper：统一解析 --target 参数。
+
+    支持调用形态（任选其一，可混合）：
+      --target 后端工程师                 # 单个
+      --target 后端工程师 --target 前端工程师   # 重复
+      --target 后端工程师,前端工程师        # 逗号分隔
+      --target all                       # 显式全部（同缺省）
+      （不传 --target）                    # 默认全部
+
+    返回 None = 全量（默认行为）；返回非空 set = 显式过滤集。
+    """
+    if not target_args:
+        return None
+    out: set[str] = set()
+    for v in target_args:
+        if not v:
+            continue
+        for item in v.split(","):
+            item = item.strip()
+            if not item or item.lower() == "all":
+                continue
+            out.add(item)
+    return out or None
+
+
 # ── Claude 输出格式规范 ───────────────────────────────────
 OUTPUT_FORMAT_SPEC = """
 ## 输出格式规范（强制遵守）

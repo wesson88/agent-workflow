@@ -10,9 +10,13 @@ role_auditor/main.py — 角色规范师执行入口
   并产出最终报告。
 
 CLI：
-  python .claude/skills/role_auditor/main.py [--dry-run] [--role 角色名]
-    --dry-run  只打印测量结果，不调 LLM、不写盘
-    --role     只审计指定角色（缺省审计全部）
+  python .claude/skills/role_auditor/main.py [--dry-run] [--target X [--target Y]]
+    --dry-run    只打印测量结果，不调 LLM、不写盘
+    --target     治理对象选择（可重复 / 逗号分隔 / "all"）
+                 - 不传 = 全部角色（除审计者本身）
+                 - --target 后端工程师 = 单个
+                 - --target 后端,前端 = 多个
+    --role       兼容旧用法的 alias（等价于单值 --target）
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import (
     build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
-    call_claude, append_audit, utc_now,
+    call_claude, append_audit, utc_now, parse_targets,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -288,10 +292,19 @@ def _format_measurements(measures: list[dict]) -> str:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="角色规范师：审计所有角色基因文件的合规性")
+    p = argparse.ArgumentParser(description="角色规范师：审计指定 / 全部角色基因文件")
     p.add_argument("--dry-run", action="store_true", help="只打印测量结果，不调 LLM、不写盘")
-    p.add_argument("--role", default=None, help="只审计指定角色名（缺省全部）")
-    return p.parse_args()
+    p.add_argument(
+        "--target", action="append", default=None,
+        help="治理对象（可重复 / 逗号分隔 / 'all'）；缺省审计全部角色",
+    )
+    # 向后兼容旧 --role 参数（等价单值 --target）
+    p.add_argument("--role", default=None, help="[已废弃，请用 --target] 单角色名")
+    args = p.parse_args()
+    # 把 --role 合并进 --target（缺省 None 时不动）
+    if args.role:
+        args.target = (args.target or []) + [args.role]
+    return args
 
 
 def _today_stamp() -> str:
@@ -301,7 +314,7 @@ def _today_stamp() -> str:
 def main() -> int:
     args = _parse_args()
     dry_run = bool(args.dry_run)
-    filter_role = (args.role or "").strip()
+    targets = parse_targets(args.target)   # None = 全部
     date_stamp = _today_stamp()
 
     if role_is_blocked(ROLE):
@@ -316,7 +329,7 @@ def main() -> int:
     role_files = [
         f for f in all_role_files
         if f.name != SELF_FILENAME
-        and (not filter_role or filter_role in f.stem)
+        and (targets is None or any(t in f.stem for t in targets))
     ]
 
     if not role_files:

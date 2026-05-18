@@ -16,8 +16,9 @@ graduator/main.py — 晋升者执行入口（Phase 4f）
   - stderr: 每处改动的简短 diff 摘要
 
 CLI：
-  python .claude/skills/graduator/main.py --task "..." [--dry-run]
+  python .claude/skills/graduator/main.py --task "..." [--target X] [--dry-run]
     --task     本次晋升说明（必填，记录到 audit）
+    --target   治理对象（可重复 / 逗号分隔 / 'all'）；缺省扫 5 个工作角色
     --dry-run  只列待执行标记，不调 LLM、不写盘
 """
 
@@ -32,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common import (
     build_system_prompt, write_output_atomic, parse_claude_output_to_files,
-    call_claude, append_audit, utc_now,
+    call_claude, append_audit, utc_now, parse_targets,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -86,6 +87,10 @@ def _scan_pending_patches(role_text: str) -> list[dict]:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="晋升者：把用户已确认的 GRADUATE/DROP 补丁固化到主体")
     p.add_argument("--task", required=True, help="本次晋升说明（写入 audit）")
+    p.add_argument(
+        "--target", action="append", default=None,
+        help="治理对象（可重复 / 逗号分隔 / 'all'）；缺省扫 5 个工作角色",
+    )
     p.add_argument("--dry-run", action="store_true", help="只列待执行标记，不调 LLM、不写盘")
     return p.parse_args()
 
@@ -100,6 +105,7 @@ def main() -> int:
     args = _parse_args()
     task = (args.task or "").strip()
     dry_run = bool(args.dry_run)
+    targets = parse_targets(args.target)   # None = 全部 WORKER_ROLES
 
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
@@ -107,10 +113,26 @@ def main() -> int:
 
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
-    # 1) 扫描所有工作角色，找待执行标记
+    # 1) 按 target 过滤要扫的工作角色
+    scope_roles = (
+        WORKER_ROLES if targets is None
+        else tuple(r for r in WORKER_ROLES if any(t in r for t in targets))
+    )
+    if not scope_roles:
+        print(
+            f"[{ROLE}] --target={sorted(targets)} 不匹配任何工作角色（{list(WORKER_ROLES)}），"
+            f"无可处理。", file=sys.stderr,
+        )
+        set_role_status(ROLE, status="success", reset_counters=True)
+        set_role_status(ROLE, status="idle")
+        return 0
+    if targets is not None:
+        print(f"[{ROLE}] 🎯 target 过滤命中 {len(scope_roles)} 个角色：{list(scope_roles)}")
+
+    # 2) 扫描 scope 内的工作角色，找待执行标记
     rgd = role_genes_dir()
     workplans: list[tuple[str, Path, str, list[dict]]] = []  # (role, path, text, patches)
-    for role_name in WORKER_ROLES:
+    for role_name in scope_roles:
         path = rgd / f"角色-{role_name}.md"
         if not path.exists():
             continue

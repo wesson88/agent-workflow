@@ -14,9 +14,12 @@ archivist/main.py — 知识沉淀者执行入口（Phase 4g）
   - 99-临时/memory-shrink-suggestions-{date}.md  收紧建议（用户手工执行）
 
 CLI：
-  python .claude/skills/archivist/main.py --task "..." [--memory-dir <path>] [--dry-run]
+  python .claude/skills/archivist/main.py --task "..." [--memory-dir <path>] [--target X] [--dry-run]
     --task         本次沉淀说明（必填，写入 audit）
     --memory-dir   memory 目录（默认通过 CLAUDE_MEMORY_DIR 或自动定位本项目 memory）
+    --target       治理对象（可重复 / 逗号分隔 / 'all'）；按 memory 文件名子串匹配
+                   缺省 = 整个 memory_dir 全扫
+                   例：--target feedback (只扫文件名含 feedback 的)
     --dry-run      只列候选 + 不调 LLM
 
 注意：archivist 不写 Claude memory 本身（用户隐私域），只输出建议报告。
@@ -34,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common import (
     build_system_prompt, write_output_atomic, parse_claude_output_to_files,
-    call_claude, append_audit, utc_now,
+    call_claude, append_audit, utc_now, parse_targets,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -51,6 +54,10 @@ def _parse_args() -> argparse.Namespace:
         "--memory-dir", default=None,
         help="memory 目录路径（默认从 CLAUDE_MEMORY_DIR 环境变量读，"
              "再回退到自动定位 ~/.claude/projects/d--<repo-slug>/memory/）",
+    )
+    p.add_argument(
+        "--target", action="append", default=None,
+        help="按 memory 文件名子串过滤（可重复 / 逗号分隔 / 'all'）；缺省全扫",
     )
     p.add_argument("--dry-run", action="store_true", help="只列候选 + 不调 LLM")
     return p.parse_args()
@@ -85,10 +92,21 @@ def _autodetect_memory_dir() -> Path | None:
     return None
 
 
-def _gather_memory_files(memory_dir: Path) -> list[Path]:
-    """所有 *.md（按 name 排序）。MEMORY.md 索引放最前。"""
+def _gather_memory_files(
+    memory_dir: Path,
+    targets: set[str] | None = None,
+) -> list[Path]:
+    """所有 *.md（按 name 排序），MEMORY.md 索引放最前。
+
+    targets 非空时按文件名子串过滤；MEMORY.md 始终保留（索引文件，让 LLM 看到全局
+    上下文也好做去重判断）。
+    """
     files = sorted(memory_dir.glob("*.md"))
-    # MEMORY.md 置顶
+    if targets is not None:
+        files = [
+            f for f in files
+            if f.name == "MEMORY.md" or any(t in f.name for t in targets)
+        ]
     files.sort(key=lambda p: (0 if p.name == "MEMORY.md" else 1, p.name))
     return files
 
@@ -126,6 +144,7 @@ def main() -> int:
     args = _parse_args()
     task = (args.task or "").strip()
     dry_run = bool(args.dry_run)
+    targets = parse_targets(args.target)   # None = 全扫；非空 set = 按文件名子串过滤
     date_stamp = _today_stamp()
 
     if role_is_blocked(ROLE):
@@ -167,9 +186,11 @@ def main() -> int:
         )
         return 2
 
-    memory_files = _gather_memory_files(memory_dir)
+    memory_files = _gather_memory_files(memory_dir, targets=targets)
     vault_knowledge = _gather_existing_vault_knowledge()
 
+    if targets is not None:
+        print(f"[{ROLE}] 🎯 target 过滤命中 {len(memory_files)} 份 memory 文件")
     print(
         f"[{ROLE}] 输入：memory_dir={memory_dir} ({len(memory_files)} 份) / "
         f"vault `20-知识/项目记录/` ({len(vault_knowledge)} 份已有)"

@@ -12,10 +12,13 @@ reflector/main.py — 复盘者执行入口（Phase 4d）
   - 00-系统/角色基因/角色-*.md                              5 个工作角色（不含复盘者本身）
 
 CLI：
-  python .claude/skills/reflector/main.py --task "..." [--project X] [--days 7]
-    --task   复盘焦点（必填，强制写明此次想关注什么）
+  python .claude/skills/reflector/main.py --task "..." [--project X] [--target Y] [--days 7]
+    --task    复盘焦点（必填，强制写明此次想关注什么）
     --project 仅复盘单个项目（缺省扫所有 10-项目/*）
-    --days   时间窗口，默认 14；mtime 超出窗口的产出忽略
+    --target  治理对象（可重复 / 逗号分隔 / 'all'）；与 --project 正交：
+              --project 过滤"用哪些项目素材"，--target 过滤"复盘 + 下补丁给哪些角色"
+              缺省 = 5 个工作角色全部
+    --days    时间窗口，默认 14；mtime 超出窗口的产出忽略
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ import re
 from common import (
     build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
-    call_claude, append_audit, utc_now,
+    call_claude, append_audit, utc_now, parse_targets,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -82,6 +85,10 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="复盘者：跨多次运行识别模式 + 下发角色补丁")
     p.add_argument("--task", required=True, help="复盘焦点（必填）")
     p.add_argument("--project", default=None, help="仅复盘单个项目（缺省全部）")
+    p.add_argument(
+        "--target", action="append", default=None,
+        help="过滤复盘 + 下补丁的工作角色（可重复 / 逗号分隔 / 'all'）；与 --project 正交",
+    )
     p.add_argument("--days", type=int, default=14, help="时间窗口（天），默认 14")
     return p.parse_args()
 
@@ -129,27 +136,32 @@ def _gather_project_outputs(project: str | None, days: int) -> list[Path]:
     return docs
 
 
-def _gather_worker_role_notes() -> list[Path]:
-    """5 个工作角色当前 .md 全文（用于复盘者了解 DYNAMIC 当前内容）。"""
+def _gather_worker_role_notes(scope_roles: tuple[str, ...] = WORKER_ROLES) -> list[Path]:
+    """工作角色当前 .md 全文（用于复盘者了解 DYNAMIC 当前内容）。
+
+    scope_roles 默认全 5 个；--target 过滤时由调用方传入子集。
+    """
     rgd = role_genes_dir()
     out: list[Path] = []
-    for role in WORKER_ROLES:
+    for role in scope_roles:
         f = rgd / f"角色-{role}.md"
         if f.exists():
             out.append(f)
     return out
 
 
-def _gather_worker_skill_refs() -> list[Path]:
+def _gather_worker_skill_refs(scope_roles: tuple[str, ...] = WORKER_ROLES) -> list[Path]:
     """工作角色 frontmatter 中 skill_refs 引用的 skill 文件（去重）。
 
     复盘者闭环验证时需要看到主体外迁的完整规则——否则只读角色基因主体会
     误以为某条 grep gate 已消失（实际是迁到 skill 文件了）。
+
+    scope_roles 默认全 5 个；--target 过滤时由调用方传入子集。
     """
     rgd = role_genes_dir()
     seen: set[Path] = set()
     out: list[Path] = []
-    for role in WORKER_ROLES:
+    for role in scope_roles:
         role_file = rgd / f"角色-{role}.md"
         if not role_file.exists():
             continue
@@ -196,6 +208,7 @@ def main() -> int:
     task = (args.task or "").strip()
     project = _resolve_project(args)
     days = max(1, int(args.days))
+    targets = parse_targets(args.target)   # None = 全 5 个 WORKER_ROLES
     date_stamp = _today_stamp()
 
     if role_is_blocked(ROLE):
@@ -204,10 +217,30 @@ def main() -> int:
 
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
+    # --target 过滤：缩小复盘 + 下补丁的角色范围；--project 仍独立控制素材项目
+    scope_worker_roles = (
+        WORKER_ROLES if targets is None
+        else tuple(r for r in WORKER_ROLES if any(t in r for t in targets))
+    )
+    if not scope_worker_roles:
+        print(
+            f"[{ROLE}] --target={sorted(targets)} 不匹配任何工作角色 "
+            f"（{list(WORKER_ROLES)}），无可复盘。",
+            file=sys.stderr,
+        )
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
+        return 2
+    if targets is not None:
+        print(f"[{ROLE}] 🎯 target 过滤命中 {len(scope_worker_roles)} 个角色：{list(scope_worker_roles)}")
+
     # 输入：项目产出 + 工作角色笔记 + 角色 skill_refs 外迁内容 + 最近 N 份复盘记录
     project_docs = _gather_project_outputs(project, days)
-    role_notes = _gather_worker_role_notes()
-    skill_refs = _gather_worker_skill_refs()
+    role_notes = _gather_worker_role_notes(scope_worker_roles)
+    skill_refs = _gather_worker_skill_refs(scope_worker_roles)
     recent_reflections = _gather_recent_reflections(limit=5)
     inputs = project_docs + role_notes + skill_refs + recent_reflections
 
@@ -247,7 +280,7 @@ def main() -> int:
     role_paths_hint = "\n".join(
         f"  - `00-系统/角色基因/角色-{name}.md`"
         f"（仅在你识别出该角色有反复模式需要补丁时输出；最多 3 份）"
-        for name in WORKER_ROLES
+        for name in scope_worker_roles
     )
 
     user_prompt = (
@@ -325,13 +358,23 @@ def main() -> int:
         written = []
         patched_roles = []
         for rel_path, content in output_files.items():
-            # 安全防线：不允许复盘者修改自己
+            # 安全防线 1：不允许复盘者修改自己
             if rel_path.endswith("角色-复盘者.md"):
                 print(
                     f"[{ROLE}] ⚠️  拒绝复盘者修改自己的角色笔记：{rel_path}",
                     file=sys.stderr,
                 )
                 continue
+            # 安全防线 2：--target 过滤时拒写 scope 之外的角色补丁
+            if rel_path.startswith("00-系统/角色基因/角色-"):
+                role_in_path = rel_path.split("角色-", 1)[1].rsplit(".md", 1)[0]
+                if role_in_path not in scope_worker_roles:
+                    print(
+                        f"[{ROLE}] ⚠️  拒绝越界补丁：{role_in_path} 不在 "
+                        f"--target 范围 {list(scope_worker_roles)}",
+                        file=sys.stderr,
+                    )
+                    continue
             dest = resolve_path(rel_path, project or "default")
 
             # 硬护栏：写入角色笔记时，仅替换 DYNAMIC 区域，non-DYNAMIC 部分保留原文件字节
