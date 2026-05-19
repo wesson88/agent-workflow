@@ -31,12 +31,68 @@ from common import (
 from engine import (
     set_role_status, role_is_blocked,
     project_dir, rules_dir, resolve_path, PROJECT_ROOT,
+    VAULT_ROOT,
+    expand_wikilinks, invalidate_wikilink_cache,
 )
 
 ROLE = "前端工程师"
 
 
 _NO_FRONTEND_SIGNALS = ("无前端任务", "无前端 mvp", "不包含前端", "no frontend", "mvp 阶段无前端")
+
+# 前端 skill wikilink 识别：匹配 stem `F<N>-描述` 或完整路径末尾 `.../F<N>-...`
+import re as _re
+_FRONTEND_SKILL_RE = _re.compile(r"(?:^|/)F\d+-")
+
+
+def _load_task_skills(task_text: str) -> tuple[str, list[str], list[str]]:
+    """从 task 正文解析 frontend skill wikilink，按需展开为可注入 prompt 的文本块。
+
+    返回 (skill_block, loaded_targets, unresolved_targets)
+    设计与 dev_backend._load_task_skills 对称，前缀改为 F<N>-。
+    """
+    try:
+        result = expand_wikilinks(
+            task_text, VAULT_ROOT,
+            filter=lambda wl: bool(_FRONTEND_SKILL_RE.search(wl.target)),
+            max_chars_per_link=3000,
+            total_char_budget=12_000,
+            max_depth=0,
+            on_unresolved="warn",
+        )
+    except Exception as e:
+        print(
+            f"[{ROLE}] ⚠️ wikilink 展开失败（{type(e).__name__}: {e}），"
+            f"本 task 不注入 skill。",
+            file=sys.stderr,
+        )
+        return "", [], []
+
+    loaded: list[str] = []
+    parts: list[str] = []
+    for e in result.expansions:
+        if e.reason == "ok" and e.content:
+            loaded.append(e.wikilink.target)
+            parts.append(
+                f"=== Skill 引用: [[{e.wikilink.target}]] "
+                f"({e.path.name if e.path else '?'}) ===\n{e.content}"
+            )
+
+    skill_block = ""
+    if parts:
+        skill_block = (
+            "\n\n## 相关技能（按 task 正文 wikilink 加载）\n\n"
+            + "\n\n".join(parts)
+            + "\n"
+        )
+
+    return skill_block, loaded, result.unresolved
+
+
+def _task_marker(project: str, task_label: str) -> Path:
+    """单任务完成 marker：subprocess retry 时跳过已成功 task。"""
+    safe = task_label.replace("/", "_").replace("\\", "_")
+    return VAULT_ROOT / "00-系统" / ".runtime-state" / f"dev_frontend.{project}.{safe}.done"
 
 
 def _collect_task_files(proj_dir, role_prefix: str):
@@ -122,16 +178,56 @@ def main() -> int:
     system_prompt = build_system_prompt(ROLE, project=project)
     written_all: list[str] = []
 
+    # 批处理多 task 前刷新 wikilink stem 索引（vault 可能被 git pull 更新）
+    invalidate_wikilink_cache()
+
+    # API契约.md：后端产出，前端只读；文件不存在时跳过（不阻断）
+    api_contract = proj_dir / "API契约.md"
+
     for task_file in task_files:
         task_label = task_file.stem
         print(f"[{ROLE}] ▶ 执行任务：{task_label}")
 
-        # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
-        context = read_input_files([task_file, tech_stack])
+        # subprocess retry 跳过：已 marker 即认为本 task 之前已成功落盘
+        marker = _task_marker(project, task_label)
+        if marker.exists():
+            print(f"[{ROLE}] ⏩ {task_label} 已完成（marker 存在），跳过重跑")
+            continue
+
+        # 每个任务加载指令文件 + 技术栈 + API契约（若存在）
+        extra_inputs = [f for f in [api_contract] if f.exists()]
+        if extra_inputs:
+            print(f"[{ROLE}] 📄 注入 API契约.md（{api_contract.stat().st_size} bytes）")
+        context = read_input_files([task_file, tech_stack, *extra_inputs])
+
+        # 按 task 正文里的 wikilink 按需注入 frontend skill（仅 F<N>- 前缀）
+        task_text = task_file.read_text(encoding="utf-8")
+        skill_block, loaded_skills, unresolved = _load_task_skills(task_text)
+        if loaded_skills:
+            print(f"[{ROLE}] 📚 task 引用 skill: {', '.join(loaded_skills)}")
+        if unresolved:
+            print(
+                f"[{ROLE}] ⚠️ task 引用了 {len(unresolved)} 个未解析 wikilink: "
+                f"{', '.join(unresolved)}（已跳过，task 继续）",
+                file=sys.stderr,
+            )
+
+        # 注入已生成文件列表，防止后续任务重新发明架构
+        prior_files = [p for p in written_all if p.startswith("src/frontend/") or p.startswith("tests/")]
+        prior_context = ""
+        if prior_files:
+            prior_context = (
+                "\n**已生成文件（保持架构一致，禁止重新设计已有模块）**：\n"
+                + "\n".join(f"  - {p}" for p in prior_files)
+                + "\n"
+            )
 
         user_prompt = (
             f"项目名：`{project}`\n\n"
-            f"{context}\n\n---\n"
+            f"{context}"
+            f"{skill_block}\n\n"
+            f"{prior_context}"
+            "---\n"
             f"本轮任务：{task or f'实现 {task_label} 中的前端代码'}\n\n"
             "请按指令清单完整实现前端：\n"
             "  - 入口 HTML + 主 JS：`src/frontend/index.html`、`src/frontend/app.js`\n"
@@ -189,6 +285,24 @@ def main() -> int:
                 write_output_atomic(dest, content)
                 print(f"[{ROLE}] 写入: {dest}")
                 written_all.append(rel_path)
+
+        # task 成功（含降级写入）后写 marker
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(f"done at {utc_now()}\nlabel: {task_label}\n",
+                              encoding="utf-8")
+        except OSError as e:
+            print(f"[{ROLE}] ⚠️ 写 {marker.name} 失败（{e}），retry 时会重跑此 task",
+                  file=sys.stderr)
+
+    # 整轮成功，清理所有 task marker
+    for task_file in task_files:
+        m = _task_marker(project, task_file.stem)
+        if m.exists():
+            try:
+                m.unlink()
+            except OSError:
+                pass
 
     set_role_status(
         ROLE, status="success",
