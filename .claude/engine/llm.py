@@ -307,6 +307,7 @@ def _call_anthropic_sdk(
     for attempt in range(4):
         chunks: list[str] = []
         try:
+            t0 = time.monotonic()
             with client.messages.stream(
                 model=api_cfg["model"],
                 max_tokens=max_tokens,
@@ -318,6 +319,7 @@ def _call_anthropic_sdk(
                         print(text, end="", flush=True)
                     chunks.append(text)
                 usage = stream.get_final_message().usage
+            elapsed = time.monotonic() - t0
             if print_stream:
                 print()
             print(
@@ -326,6 +328,7 @@ def _call_anthropic_sdk(
                 f" cache_create={getattr(usage, 'cache_creation_input_tokens', 0)})"
                 f" output={usage.output_tokens}"
                 f" total={usage.input_tokens + usage.output_tokens}"
+                f" elapsed={elapsed:.1f}s"
             )
             return "".join(chunks)
         except _RETRYABLE as e:

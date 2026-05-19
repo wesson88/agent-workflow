@@ -60,9 +60,12 @@ def _read_doc_capped(path) -> str | None:
 def _gather_project_context(project: str) -> str:
     """读取 vault 10-项目/{project}/ 下的核心产出，组装成 markdown。
 
-    优先级文档：PRD.md / 系统设计.md / API契约.md
-    指令子目录：指令/*.md（给后端 / 给前端 / 给技术主管 等）
-    返回字符串可能为空（项目刚启动时）。
+    只读评审讨论真正需要的产物：PRD / 系统设计 / API契约。
+
+    **不读** `指令/*.md`：这是技术主管阶段（讨论之后）才会生成的派活清单，
+    架构评审讨论触发时只会扫到架构师写的「给技术主管.md」一个文件——它是
+    给 TL 看的任务切分指南，对架构师/前后端/批判者评审"架构是否合理"无价值，
+    塞进 prompt 会把讨论带偏到"评审任务切分"且每轮多吃 ~2K tokens。
     """
     pdir = project_dir(project)
     sections: list[str] = []
@@ -71,13 +74,6 @@ def _gather_project_context(project: str) -> str:
         content = _read_doc_capped(pdir / fname)
         if content:
             sections.append(f"### 📄 {fname}\n\n{content}")
-
-    instr_dir = pdir / "指令"
-    if instr_dir.is_dir():
-        for sub in sorted(instr_dir.glob("*.md")):
-            content = _read_doc_capped(sub)
-            if content:
-                sections.append(f"### 📄 指令/{sub.name}\n\n{content}")
 
     if not sections:
         return "（项目当前尚无核心产出文档；请基于议题与项目名讨论。）"
