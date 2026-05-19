@@ -85,6 +85,12 @@ _PATCH_HEADER_RE = re.compile(
 # 章节标题 regex（§1-§8）
 _SECTION_RE = re.compile(r"^##\s+(\d+)\.\s+", re.MULTILINE)
 
+# vault stem 唯一性扫描排除路径前缀（与 engine.wikilink.resolve_target 的索引对齐）
+# - 10-项目/<proj>/：项目产出 PRD/系统设计 等多项目同名是常态，命名规则豁免
+# - 99-临时/：临时区不参与 wikilink，按 vault命名规则.md §2.9 豁免
+# - .runtime-state/：运行时状态文件，不是 vault 笔记
+_STEM_SCAN_EXCLUDES = ("10-项目/", "99-临时/", ".runtime-state/")
+
 
 def _parse_frontmatter(text: str) -> tuple[dict, str, int]:
     """从 markdown 文件提取 frontmatter。
@@ -290,6 +296,62 @@ def _format_measurements(measures: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _scan_vault_stem_uniqueness() -> dict[str, list[Path]]:
+    """扫 vault 全 .md 文件，按 stem 分组返回重名项。
+
+    与 engine.wikilink.resolve_target 的索引逻辑对齐：排除 _STEM_SCAN_EXCLUDES
+    下的文件。命名规则要求"角色 / 工作流 / 规则 / skill / 项目记录等命名空间
+    stem 全 vault 唯一"，违反时 wikilink 解析会抛 DuplicateStemError。
+    本扫描在审计阶段提前暴露这类冲突，避免运行时崩溃。
+
+    返回 dict: stem → [path1, path2, ...]，只包含重名（len >= 2）的 stem。
+    无重名 → 空 dict。
+    """
+    from collections import defaultdict
+    groups: dict[str, list[Path]] = defaultdict(list)
+    for p in VAULT_ROOT.rglob("*.md"):
+        try:
+            rel = p.relative_to(VAULT_ROOT).as_posix()
+        except ValueError:
+            continue
+        if any(rel.startswith(prefix) for prefix in _STEM_SCAN_EXCLUDES):
+            continue
+        groups[p.stem].append(p)
+    return {stem: sorted(paths) for stem, paths in groups.items() if len(paths) >= 2}
+
+
+def _format_stem_uniqueness(dupes: dict[str, list[Path]]) -> str:
+    """把 stem 重名清单格式化为 markdown，注入到审计报告。"""
+    excludes = "、".join(_STEM_SCAN_EXCLUDES)
+    if not dupes:
+        return (
+            "# Vault stem 唯一性扫描\n\n"
+            f"✅ 未发现 stem 重名（已排除：{excludes}）"
+        )
+    lines = [
+        "# Vault stem 唯一性扫描",
+        "",
+        f"⚠️ 发现 {len(dupes)} 组 stem 重名（违反 vault命名规则.md，"
+        f"wikilink 命中会抛 DuplicateStemError）",
+        "",
+    ]
+    for stem in sorted(dupes):
+        paths = dupes[stem]
+        lines.append(f"## `{stem}.md`（{len(paths)} 处）")
+        for p in paths:
+            try:
+                rel = p.relative_to(VAULT_ROOT).as_posix()
+            except ValueError:
+                rel = str(p)
+            lines.append(f"- `{rel}`")
+        lines.append("")
+    lines.append(
+        "**修复方向**：重命名为唯一 stem，或在 wikilink 处用完整路径消歧"
+        "（如 `[[20-知识/角色技能/架构师/A1-代码量预算分账]]`）。"
+    )
+    return "\n".join(lines)
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="角色规范师：审计指定 / 全部角色基因文件")
     p.add_argument("--dry-run", action="store_true", help="只打印测量结果，不调 LLM、不写盘")
@@ -336,7 +398,13 @@ def main() -> int:
     measures = [_measure_role(f) for f in role_files]
     measurement_table = _format_measurements(measures)
 
+    # 2b) Vault stem 唯一性扫描（与角色审计正交：扫整个 vault，不受 --target 限制）
+    stem_dupes = _scan_vault_stem_uniqueness()
+    stem_table = _format_stem_uniqueness(stem_dupes)
+
     print(measurement_table)
+    print()
+    print(stem_table)
 
     if dry_run:
         print(f"[{ROLE}] --dry-run 模式，未调用 LLM、未写盘。")
@@ -367,6 +435,8 @@ def main() -> int:
         f"# 审计任务\n\n"
         f"对照 `{SPEC_REL}` 审计以下 {len(role_files)} 个角色基因文件：\n{role_list}\n\n"
         f"# 程序层预计算（已完成，供你参考）\n\n{measurement_table}\n\n"
+        f"---\n\n"
+        f"{stem_table}\n\n"
         f"---\n\n"
         f"# 输入文件全文（规范 + 各角色）\n\n{context}\n\n"
         f"---\n\n"
