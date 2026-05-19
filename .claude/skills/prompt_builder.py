@@ -162,6 +162,66 @@ def _extract_dynamic_patch(body: str) -> str:
     return "\n\n".join(keep_lines).strip()
 
 
+# ── 内部：upstream DYNAMIC 总量预算 ─────────────────────
+# 所有上游角色 DYNAMIC 补丁拼合后的字符上限。
+# 超出时按上游声明顺序保留靠前的，截断多余部分并打 stderr 警告。
+# 设为 6000 chars ≈ 1500 tokens，留出足够空间给 base prompt 和 skill 块。
+_DYNAMIC_TOTAL_BUDGET = 6_000
+
+
+def _build_dynamic_segment(role) -> str:
+    """遍历 role.upstream，收集各上游 DYNAMIC 有效补丁，应用总量截断后返回 dynamic 段。
+
+    总量超过 _DYNAMIC_TOTAL_BUDGET 时：
+    - 按上游声明顺序优先保留靠前的上游
+    - 最后一个上游若需截断则硬截断并附注 [截断] 提示
+    - stderr 打 warning，不 raise（不阻断执行）
+    """
+    dynamic_parts: list[str] = []
+    total_chars = 0
+
+    for upstream_name in role.upstream:
+        try:
+            up_role = load_role(upstream_name)
+        except RoleNotFound:
+            continue
+        patch = _strip_evidence_lines(_extract_dynamic_patch(up_role.body))
+        if not patch.strip():
+            continue
+
+        header = f"## 上游角色 [{up_role.name}] 动态补丁指令"
+        block = header + "\n" + patch
+        block_len = len(block)
+
+        remaining = _DYNAMIC_TOTAL_BUDGET - total_chars
+        if remaining <= 0:
+            print(
+                f"[prompt_builder] ⚠️ upstream DYNAMIC 总量已满 "
+                f"({_DYNAMIC_TOTAL_BUDGET} chars)，跳过上游 [{up_role.name}] 补丁",
+                file=sys.stderr,
+            )
+            break
+
+        if block_len > remaining:
+            block = block[:remaining] + (
+                f"\n…（[{up_role.name}] DYNAMIC 补丁超预算截断，"
+                f"原 {block_len} chars，预算剩余 {remaining} chars）"
+            )
+            print(
+                f"[prompt_builder] ⚠️ upstream [{up_role.name}] DYNAMIC 补丁 "
+                f"{block_len} chars 超预算，截断至 {remaining} chars",
+                file=sys.stderr,
+            )
+            dynamic_parts.append(block)
+            total_chars += len(block)
+            break
+
+        dynamic_parts.append(block)
+        total_chars += block_len
+
+    return "\n".join(dynamic_parts)
+
+
 # ── 内部：skill_refs 剥离辅助 ────────────────────────────
 _SKILL_BLOCK_RE = re.compile(
     r"\n\n## 引用技能（来自 skill_refs）\n\n.*",
@@ -204,18 +264,7 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     ]
     static = "\n".join(static_parts)
 
-    dynamic_parts: list[str] = []
-    for upstream_name in role.upstream:
-        try:
-            up_role = load_role(upstream_name)
-        except RoleNotFound:
-            continue
-        patch = _strip_evidence_lines(_extract_dynamic_patch(up_role.body))
-        if patch.strip():
-            dynamic_parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
-            dynamic_parts.append(patch)
-
-    dynamic = "\n".join(dynamic_parts)
+    dynamic = _build_dynamic_segment(role)
     return static, dynamic
 
 
@@ -255,18 +304,7 @@ def build_system_prompt_no_skills(
     ]
     static = "\n".join(static_parts)
 
-    dynamic_parts: list[str] = []
-    for upstream_name in role.upstream:
-        try:
-            up_role = load_role(upstream_name)
-        except RoleNotFound:
-            continue
-        patch = _strip_evidence_lines(_extract_dynamic_patch(up_role.body))
-        if patch.strip():
-            dynamic_parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
-            dynamic_parts.append(patch)
-
-    dynamic = "\n".join(dynamic_parts)
+    dynamic = _build_dynamic_segment(role)
     return static, dynamic
 
 
