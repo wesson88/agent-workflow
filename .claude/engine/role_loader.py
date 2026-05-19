@@ -57,6 +57,13 @@ class Role:
     # 外迁的技能引用（vault 相对路径），load_role 时已 inline 拼到 body 末尾
     skill_refs: tuple[str, ...]
 
+    # 规则章节按需引用（wikilink 字符串），形如 "[[架构分解规则#§3 分解步骤]]"。
+    # **不**拼进 body（避免膨胀 system_prompt 触发 audit 阈值）；调用方自己
+    # 用 engine.wikilink.expand_wikilinks 展开后注入到 user_prompt 的 context。
+    # 与 skill_refs 的差异：skill 全文进 system 用于稳定方法论；
+    # rule_refs 按章节进 user 用于任务相关的规则节选。
+    rule_refs: tuple[str, ...]
+
     # 笔记正文（含 DYNAMIC 区域 + 已 inline 的 skill 内容）
     body: str
 
@@ -124,6 +131,7 @@ def _build_role(note_path: Path) -> Role:
     skill_refs = _seq(fm.get("skill_refs"))
     skill_block = _resolve_skill_refs(skill_refs, VAULT_ROOT) if skill_refs else ""
     body_with_skills = body + ("\n\n" + skill_block if skill_block else "")
+    rule_refs = _seq(fm.get("rule_refs"))
     return Role(
         name=str(fm["role"]),
         aliases=_seq(fm.get("aliases")),
@@ -141,6 +149,7 @@ def _build_role(note_path: Path) -> Role:
         inputs=_seq(fm.get("inputs")),
         outputs=_seq(fm.get("outputs")),
         skill_refs=skill_refs,
+        rule_refs=rule_refs,
         body=body_with_skills,
         frontmatter=fm,
         budget_input_tokens=(int(fm["budget_input_tokens"])

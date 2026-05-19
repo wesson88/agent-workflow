@@ -30,8 +30,42 @@ from engine import (
     set_role_status, role_is_blocked,
     project_dir, rules_dir, resolve_path,
 )
+from engine.role_loader import load_role
+from engine.wikilink import expand_wikilinks
 
 ROLE = "架构师"
+
+
+def _load_rule_block(rule_refs: tuple[str, ...]) -> tuple[str, str]:
+    """按 rule_refs 展开规则章节，拼成可注入 context 的 markdown 块。
+
+    返回 (rule_block, source_hint)：
+    - rule_block 为 "=== 文件名（章节...） ===\\n<内容>" 形式
+    - source_hint 是给日志的一句描述（"按章节注入" / "rule_refs 空，全量回退"）
+    rule_refs 为空时返回 ("", "rule_refs 空")，调用方负责回退全量读。
+    """
+    if not rule_refs:
+        return "", "rule_refs 空"
+    refs_text = "\n".join(rule_refs)
+    result = expand_wikilinks(
+        refs_text,
+        filter=lambda wl: True,
+        max_chars_per_link=4000,
+        total_char_budget=20000,
+        on_unresolved="warn",
+    )
+    parts: list[str] = []
+    hit = 0
+    for e in result.expansions:
+        if e.reason == "ok" and e.content:
+            parts.append(f"=== {e.wikilink.raw} ===\n{e.content}")
+            hit += 1
+    if not parts:
+        return "", f"rule_refs 全部展开失败（unresolved={result.unresolved}）"
+    block = "\n\n".join(parts)
+    return block, (
+        f"按章节注入 {hit}/{len(rule_refs)} 段，共 {result.total_chars} char"
+    )
 
 
 def main() -> int:
@@ -49,6 +83,7 @@ def main() -> int:
     prd = proj_dir / "PRD.md"
     tech_stack = rules_dir() / "技术栈.md"
     decomp_rules = rules_dir() / "架构分解规则.md"
+    role_def = load_role(ROLE)
 
     if not prd.exists():
         print(
@@ -67,7 +102,16 @@ def main() -> int:
         return 2
 
     system_prompt = build_system_prompt(ROLE, project=project)
-    context = read_input_files([prd, tech_stack, decomp_rules])
+
+    # Token 治理 v0.2 day2：架构分解规则 12K 全量读 → rule_refs 按章节展开。
+    # 架构师在 frontmatter 自己声明依赖章节（§2/§3/§4/§5），剥离 §1/§6/§7/§8 水分。
+    # rule_refs 缺失或全部展开失败 → 回退全量读，保持向后兼容。
+    rule_block, source_hint = _load_rule_block(role_def.rule_refs)
+    print(f"[{ROLE}] 架构分解规则注入：{source_hint}")
+    if rule_block:
+        context = read_input_files([prd, tech_stack]) + "\n\n" + rule_block
+    else:
+        context = read_input_files([prd, tech_stack, decomp_rules])
 
     base_prompt = (
         f"项目名：`{project}`\n\n"
