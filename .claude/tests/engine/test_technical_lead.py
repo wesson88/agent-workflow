@@ -921,3 +921,191 @@ class TestDynamicSkillInjection:
         stems, side = received_args[0]
         assert side == "前端"
         assert "F3-状态管理" in stems
+
+
+# ══════════════════════════════════════════════════════
+# 方案 A（2026-05-21）— Plan 协议去 index_md_body + 模板渲染
+# ══════════════════════════════════════════════════════
+
+class TestNormalizeTask:
+    def test_minimal_valid(self):
+        assert tl_mod._normalize_task({"id": "T01", "title": "x"}) == {
+            "id": "T01", "title": "x", "summary": "", "estimate_hours": 0, "depends_on": [],
+        }
+
+    def test_depends_on_list(self):
+        out = tl_mod._normalize_task({"id": "T01", "title": "x", "depends_on": ["T01", "T02"]})
+        assert out["depends_on"] == ["T01", "T02"]
+
+    def test_depends_on_string_split(self):
+        out = tl_mod._normalize_task({"id": "T01", "title": "x", "depends_on": "T01, T02"})
+        assert out["depends_on"] == ["T01", "T02"]
+
+    def test_depends_on_unexpected_type_defaults_empty(self):
+        out = tl_mod._normalize_task({"id": "T01", "title": "x", "depends_on": 42})
+        assert out["depends_on"] == []
+
+    def test_missing_id_returns_none(self):
+        assert tl_mod._normalize_task({"title": "x"}) is None
+
+    def test_missing_title_returns_none(self):
+        assert tl_mod._normalize_task({"id": "T01"}) is None
+
+    def test_non_dict_returns_none(self):
+        assert tl_mod._normalize_task("not a dict") is None
+        assert tl_mod._normalize_task(None) is None
+
+
+class TestRenderIndexMd:
+    def test_empty_tasks_with_reason(self):
+        md = tl_mod._render_index_md("后端", "demo", [], skip_reason="纯前端项目")
+        assert "# 无后端任务" in md
+        assert "纯前端项目" in md
+        assert "status: skipped" in md
+
+    def test_empty_tasks_default_reason(self):
+        md = tl_mod._render_index_md("前端", "demo", [], skip_reason="")
+        assert "# 无前端任务" in md
+
+    def test_single_task_renders_table(self):
+        tasks = [
+            {"id": "T01", "title": "登录页", "summary": "", "estimate_hours": 3, "depends_on": []},
+        ]
+        md = tl_mod._render_index_md("前端", "demo", tasks)
+        assert "| T01 | 登录页 | 3 | — |" in md
+        assert "总工时：3 h" in md
+        assert "[[给前端-T01]]" in md
+        assert "status: ready" in md
+
+    def test_multiple_tasks_with_deps(self):
+        tasks = [
+            {"id": "T01", "title": "A", "summary": "", "estimate_hours": 2, "depends_on": []},
+            {"id": "T02", "title": "B", "summary": "", "estimate_hours": 3, "depends_on": ["T01"]},
+            {"id": "T03", "title": "C", "summary": "", "estimate_hours": 4, "depends_on": ["T01", "T02"]},
+        ]
+        md = tl_mod._render_index_md("后端", "demo", tasks)
+        assert "| T01 | A | 2 | — |" in md
+        assert "| T02 | B | 3 | T01 |" in md
+        assert "| T03 | C | 4 | T01, T02 |" in md
+        assert "总工时：9 h" in md
+
+    def test_more_than_5_tasks_truncates_wikilinks(self):
+        tasks = [
+            {"id": f"T0{i}", "title": f"任务{i}", "summary": "", "estimate_hours": 1, "depends_on": []}
+            for i in range(1, 8)
+        ]
+        md = tl_mod._render_index_md("后端", "demo", tasks)
+        # 表格全列，wikilink 列表截断到 5 + 省略号
+        assert "[[给后端-T01]]" in md
+        assert "[[给后端-T05]]" in md
+        assert "…" in md  # 省略号
+        # 但表格行全在
+        for i in range(1, 8):
+            assert f"| T0{i} |" in md
+
+
+class TestPlanPromptNoIndexMdBody:
+    """方案 A：Plan prompt 不再要求 LLM 输出 index_md_body 字段。"""
+
+    def test_plan_prompt_omits_index_md_body(self, tmp_path, monkeypatch):
+        captured: list[str] = []
+
+        def fake_llm(sp, prompt, model=None, max_tokens=None):
+            captured.append(prompt)
+            return json.dumps({"tasks": []})
+
+        monkeypatch.setattr(tl_mod, "call_llm", fake_llm)
+        monkeypatch.setattr(tl_mod, "_resolve_role_model", lambda: "mock-model")
+        monkeypatch.setattr(tl_mod, "VAULT_ROOT", tmp_path)
+        monkeypatch.setattr(engine_config, "VAULT_ROOT", tmp_path)
+
+        proj_dir = tmp_path / "10-项目" / "p"
+        proj_dir.mkdir(parents=True)
+        tl_mod._run_backend_pass_split(("s", "f"), "base\n", "p", proj_dir)
+
+        assert captured, "Plan call 未触发"
+        prompt = captured[0]
+        assert "index_md_body" not in prompt
+        # 但仍要求 depends_on 字段（新增）
+        assert "depends_on" in prompt
+
+    def test_index_rendered_from_template_when_llm_omits(self, tmp_path, monkeypatch):
+        """LLM 完全不返回 index 信息也能生成索引（模板兜底）。"""
+        def fake_llm(sp, prompt, model=None, max_tokens=None):
+            return json.dumps({
+                "tasks": [
+                    {"id": "T01", "title": "建表", "summary": "s", "estimate_hours": 2,
+                     "depends_on": []},
+                ],
+            })
+
+        # Detail call 也走同一 fake_llm，需要返回 FILE 块
+        call_count = {"n": 0}
+
+        def routed_llm(sp, prompt, model=None, max_tokens=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return fake_llm(sp, prompt)
+            return (
+                "<!-- FILE: 10-项目/tmpl/指令/给后端-T01.md -->\n"
+                "---\ntask_id: T01\nestimate_hours: 2\n---\n# T01 建表\n详情\n<!-- /FILE -->"
+            )
+
+        monkeypatch.setattr(tl_mod, "call_llm", routed_llm)
+        monkeypatch.setattr(tl_mod, "_resolve_role_model", lambda: "mock")
+        monkeypatch.setattr(tl_mod, "VAULT_ROOT", tmp_path)
+        monkeypatch.setattr(engine_config, "VAULT_ROOT", tmp_path)
+
+        proj_dir = tmp_path / "10-项目" / "tmpl"
+        proj_dir.mkdir(parents=True)
+
+        ok, written = tl_mod._run_pass_split(
+            "后端", ("s", "f"), "base\n", "tmpl", proj_dir,
+        )
+        assert ok
+        idx = proj_dir / "指令" / "给后端-索引.md"
+        assert idx.exists()
+        body = idx.read_text(encoding="utf-8")
+        assert "| T01 | 建表 | 2 | — |" in body
+        assert "status: ready" in body
+
+    def test_unparseable_index_in_llm_response_does_not_break_flow(self, tmp_path, monkeypatch):
+        """方案 A 的核心保护：LLM 即便给 markdown 字符串里夹 ASCII 双引号也不会崩。
+
+        旧实现：LLM 输出 index_md_body 含未转义 `"` → JSON.loads 失败 → fallback。
+        新实现：根本不要求 LLM 输出 markdown → 不存在转义风险。
+        """
+        call_count = {"n": 0}
+
+        def routed_llm(sp, prompt, model=None, max_tokens=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # LLM 多输出一个无关字段，且字段值含 ASCII 引号，但因为我们不再
+                # 把 markdown 塞进 JSON 字符串，引号在 JSON 字符串里只占两个字符。
+                return json.dumps({
+                    "tasks": [
+                        {"id": "T01", "title": '处理"边界"场景', "summary": "",
+                         "estimate_hours": 1, "depends_on": []},
+                    ],
+                    "noise_field": '可以含 "ASCII 引号" 也没事',
+                })
+            return (
+                "<!-- FILE: 10-项目/q/指令/给后端-T01.md -->\n"
+                "---\ntask_id: T01\nestimate_hours: 1\n---\n# x\n内容\n<!-- /FILE -->"
+            )
+
+        monkeypatch.setattr(tl_mod, "call_llm", routed_llm)
+        monkeypatch.setattr(tl_mod, "_resolve_role_model", lambda: "mock")
+        monkeypatch.setattr(tl_mod, "VAULT_ROOT", tmp_path)
+        monkeypatch.setattr(engine_config, "VAULT_ROOT", tmp_path)
+
+        proj_dir = tmp_path / "10-项目" / "q"
+        proj_dir.mkdir(parents=True)
+        ok, written = tl_mod._run_pass_split(
+            "后端", ("s", "f"), "base\n", "q", proj_dir,
+        )
+        assert ok
+        idx = proj_dir / "指令" / "给后端-索引.md"
+        assert idx.exists()
+        # 标题被原样保留，但因为是模板渲染，markdown 表格里 ASCII 引号也无害
+        assert '处理"边界"场景' in idx.read_text(encoding="utf-8")

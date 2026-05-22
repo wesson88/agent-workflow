@@ -314,6 +314,110 @@ def _parse_frontmatter_fields(content: str, fields: tuple[str, ...]) -> dict[str
     return result
 
 
+# ── Plan 任务规整 + 索引模板（2026-05-21 方案 A）────────────────────────
+# 背景：mini-ledger 实战中 LLM 在 index_md_body JSON 字符串里写未转义 ASCII `"`
+# 导致 Plan call JSON 解析失败 → 回退单 call 又被 max_tokens 截断丢任务。
+# 修法：Plan 只让 LLM 输出 tasks[]（含 depends_on），索引文件由编排引擎模板生成。
+
+def _normalize_task(task: object) -> dict | None:
+    """规整 Plan call 输出的单个任务条目；返回 None 表示该条目无效应被跳过。
+
+    容忍：depends_on 是字符串 "T01, T02" 时自动拆为 list；estimate_hours 是
+    字符串数字时自动转 int；任何字段类型不对都降级为合理默认值。
+    必填：id + title，缺一个则视为无效任务。
+    """
+    if not isinstance(task, dict):
+        return None
+    tid = str(task.get("id") or "").strip()
+    title = str(task.get("title") or "").strip()
+    if not tid or not title:
+        return None
+    summary = str(task.get("summary") or "").strip()
+    try:
+        hours = int(task.get("estimate_hours") or 0)
+    except (TypeError, ValueError):
+        hours = 0
+
+    raw_deps = task.get("depends_on")
+    if isinstance(raw_deps, list):
+        deps = [str(d).strip() for d in raw_deps if str(d).strip()]
+    elif isinstance(raw_deps, str):
+        # LLM 偶尔不遵守 schema 给 "T01, T02" 字符串，宽松拆分
+        deps = [s.strip() for s in raw_deps.split(",") if s.strip()]
+    else:
+        deps = []
+
+    return {
+        "id": tid,
+        "title": title,
+        "summary": summary,
+        "estimate_hours": hours,
+        "depends_on": deps,
+    }
+
+
+def _render_index_md(
+    side: str,
+    project: str,
+    tasks: list[dict],
+    skip_reason: str = "",
+) -> str:
+    """根据规整后的任务列表生成「给{side}-索引.md」正文。
+
+    tasks=[] 时输出 "# 无{side}任务" stub（含 LLM 给出的 skip_reason）。
+    决议速查表不在此渲染（决议归 `脑暴-*.md` / `系统设计.md`，索引保持薄）。
+    保持 `| id | 标题 | 工时(h) | depends_on |` 列格式以兼容 _split_oversized_detail 的索引 patch 正则。
+    """
+    role_name = "后端工程师" if side == "后端" else "前端工程师"
+    date_str = utc_now()[:10]  # YYYY-MM-DD
+
+    if not tasks:
+        reason = skip_reason or "（LLM 判定本项目无该侧业务，未给出具体理由）"
+        return (
+            f"---\n"
+            f"type: task-index\n"
+            f"project: {project}\n"
+            f"role: {role_name}\n"
+            f"status: skipped\n"
+            f"generated: {date_str}\n"
+            f"---\n\n"
+            f"# 无{side}任务\n\n"
+            f"**判定理由**：{reason}\n\n"
+            f"若判定有误，请改「给技术主管.md」frontmatter 中的 `project_type` 字段，"
+            f"或重跑 `--start-from 技术主管`。\n"
+        )
+
+    rows: list[str] = []
+    for t in tasks:
+        deps_text = ", ".join(t["depends_on"]) if t["depends_on"] else "—"
+        rows.append(f"| {t['id']} | {t['title']} | {t['estimate_hours']} | {deps_text} |")
+    rows_text = "\n".join(rows)
+    total_hours = sum(t["estimate_hours"] for t in tasks)
+    task_count = len(tasks)
+    detail_links = " / ".join(f"[[给{side}-{t['id']}]]" for t in tasks[:5])
+    if len(tasks) > 5:
+        detail_links += " / …"
+
+    return (
+        f"---\n"
+        f"type: task-index\n"
+        f"project: {project}\n"
+        f"role: {role_name}\n"
+        f"status: ready\n"
+        f"generated: {date_str}\n"
+        f"---\n\n"
+        f"# {project} {side}任务索引\n\n"
+        f"> 共 {task_count} 个任务，总工时 {total_hours} h。\n"
+        f"> 详细任务规格见：{detail_links}\n"
+        f"> 架构决议详见 [[系统设计]] 及 [[脑暴-架构评审]]，本索引不复述。\n\n"
+        f"## 任务清单\n\n"
+        f"| id | 标题 | 工时(h) | depends_on |\n"
+        f"|----|------|---------|------------|\n"
+        f"{rows_text}\n\n"
+        f"**总工时：{total_hours} h**\n"
+    )
+
+
 def _run_pass_split(
     side: str,
     system_prompt: tuple[str, str],
@@ -350,26 +454,30 @@ def _run_pass_split(
 
     plan = cached_plan
 
-    # ── Plan call：列任务大纲 + 索引正文 ────────────────────
+    # ── Plan call：只列任务大纲（索引正文由引擎模板生成）─────
+    # 方案 A（2026-05-21）：剥离 index_md_body 字段。让 LLM 在 JSON 字符串里
+    # 写整段 markdown 太脆弱（未转义 `"` 即崩），索引交给模板渲染更稳。
     plan_prompt = base_prompt + (
-        f"**本轮只列{side}任务大纲 + 索引正文，不写任务细节**。请输出**单个 JSON 块**：\n\n"
+        f"**本轮只列{side}任务大纲（不写任务细节、不写索引正文 — 索引由编排引擎模板生成）**。"
+        f"请输出**单个 JSON 块**：\n\n"
         "```json\n"
         "{\n"
         '  "tasks": [\n'
-        f'    {{"id": "T01", "title": "...", "summary": "1-3 句，含核心交付 + 关键依赖", "estimate_hours": 3}},\n'
-        f'    {{"id": "T02", "title": "...", "summary": "...", "estimate_hours": 2}}\n'
-        "  ],\n"
-        '  "index_md_body": "<索引 markdown 正文（含 frontmatter / 任务表 / 依赖图 / 决议速查）>"\n'
+        '    {"id": "T01", "title": "...", "summary": "1-3 句，含核心交付 + 关键依赖", '
+        '"estimate_hours": 3, "depends_on": []},\n'
+        '    {"id": "T02", "title": "...", "summary": "...", '
+        '"estimate_hours": 2, "depends_on": ["T01"]}\n'
+        "  ]\n"
         "}\n"
         "```\n\n"
-        f"**无{side}业务时的合法出口**：`{{\"tasks\": [], \"index_md_body\": "
-        f"\"# 无{side}任务\\\\n\\\\n判定理由：...\"}}`。\n"
+        f"**无{side}业务时的合法出口**：`{{\"tasks\": [], "
+        f"\"skip_reason\": \"<≤ 100 字的判定理由>\"}}`。\n"
         "约束：\n"
-        f"- 任务 id 形如 `T01`/`T02`/`T05a`/`T05b`，写入文件路径 `10-项目/{project}/指令/{prefix}-{{id}}.md`\n"
-        "- JSON 必须可被 `json.loads` 解析；index_md_body 不要嵌套 ``` 围栏\n"
-        f"- index_md_body 自身视为一个完整 markdown 文件正文（写入「{prefix}-索引.md」）\n"
-        "- index_md_body 任务表格格式：`| id | 标题 | 工时(h) | depends_on |`\n"
+        f"- 任务 id 形如 `T01`/`T02`/`T05a`/`T05b`，对应文件 `10-项目/{project}/指令/{prefix}-{{id}}.md`\n"
+        "- JSON 必须可被 `json.loads` 解析；**字符串值内不要嵌套 markdown 或 ``` 围栏**\n"
         "- estimate_hours 为整数（1-8），超过 4 小时的任务**必须**在 summary 中说明拆法\n"
+        "- depends_on 是任务 id 数组（如 `[\"T01\", \"T02\"]`），无依赖填 `[]`，**不要写成字符串**\n"
+        "- 不需要复述架构决议 / 依赖图 / 速查表（引擎模板会处理表头与统计行）\n"
     )
 
     if plan is None:
@@ -399,47 +507,47 @@ def _run_pass_split(
             print(f"[{ROLE}] ⚠️ {side} Plan 缓存写入失败（{e}），retry 时会重跑 Plan call",
                   file=sys.stderr)
 
-    tasks = plan.get("tasks")
-    index_body = (plan.get("index_md_body") or "").strip()
-    if not isinstance(tasks, list):
-        print(f"[{ROLE}] ⚠️ {side} Plan tasks 非 list（{type(tasks).__name__}），回退单 call",
+    tasks_raw = plan.get("tasks")
+    if not isinstance(tasks_raw, list):
+        print(f"[{ROLE}] ⚠️ {side} Plan tasks 非 list（{type(tasks_raw).__name__}），回退单 call",
               file=sys.stderr)
         return False, []
 
+    # 规整 + 过滤无效任务（缺 id/title 直接 skip，宽松接受 depends_on 字符串）
+    tasks_clean: list[dict] = []
+    for raw in tasks_raw:
+        norm = _normalize_task(raw)
+        if norm is None:
+            print(f"[{ROLE}] ⚠️ 跳过无效任务条目：{raw!r}", file=sys.stderr)
+            continue
+        tasks_clean.append(norm)
+
+    skip_reason = str(plan.get("skip_reason") or "").strip()
     written: list[str] = []
 
-    # ── 写索引文件 ──────────────────────────────────────────
-    if index_body:
-        index_dest = proj_dir / "指令" / f"{prefix}-索引.md"
-        index_body = enforce_output_limits(index_body, ROLE, index_dest.name, LIMIT_CHARS)
-        write_output_atomic(index_dest, index_body)
-        rel = f"10-项目/{project}/指令/{prefix}-索引.md"
-        written.append(rel)
-        print(f"[{ROLE}] ✅ {side}索引写入: {index_dest}")
-    else:
-        print(f"[{ROLE}] ⚠️ {side} Plan 未提供 index_md_body，跳过索引落盘", file=sys.stderr)
+    # ── 写索引文件（模板生成，不再读 LLM 的 index_md_body）─────
+    index_md = _render_index_md(side, project, tasks_clean, skip_reason)
+    index_dest = proj_dir / "指令" / f"{prefix}-索引.md"
+    index_md = enforce_output_limits(index_md, ROLE, index_dest.name, LIMIT_CHARS)
+    write_output_atomic(index_dest, index_md)
+    written.append(f"10-项目/{project}/指令/{prefix}-索引.md")
+    print(f"[{ROLE}] ✅ {side}索引写入（模板生成）: {index_dest}")
 
-    if not tasks:
+    if not tasks_clean:
         print(f"[{ROLE}] ℹ️ {side} Plan tasks 为空（无{side}业务），跳过 detail call")
         return True, written
 
     # ── Detail call × N：逐个任务细化 ──────────────────────
     task_summary_block = "\n".join(
-        f"- {t.get('id', '?')}: {t.get('title', '')} — {t.get('summary', '')}"
-        for t in tasks if isinstance(t, dict)
+        f"- {t['id']}: {t['title']} — {t['summary']}"
+        for t in tasks_clean
     )
 
-    for task in tasks:
-        if not isinstance(task, dict):
-            print(f"[{ROLE}] ⚠️ 跳过非 dict 任务条目：{task!r}", file=sys.stderr)
-            continue
-        tid = str(task.get("id") or "").strip()
-        title = str(task.get("title") or "").strip()
-        summary = str(task.get("summary") or "").strip()
-        estimate_hours = int(task.get("estimate_hours") or 0)
-        if not tid or not title:
-            print(f"[{ROLE}] ⚠️ 跳过缺 id/title 的任务：{task!r}", file=sys.stderr)
-            continue
+    for task in tasks_clean:
+        tid = task["id"]
+        title = task["title"]
+        summary = task["summary"]
+        estimate_hours = task["estimate_hours"]
 
         rel_target = f"10-项目/{project}/指令/{prefix}-{tid}.md"
         # subprocess retry 友好：已存在的 detail 直接跳过
