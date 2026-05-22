@@ -72,6 +72,141 @@ LIMITS = {
     "single_patch": 1200,
 }
 
+
+# PM 角色 PRD.md 越界 pattern（来源：[[PM越界-PRD写下游内容]]）
+# 命中表示 PM 越界写了应属架构师 / TL 的内容（schema / API 表 / 框架推荐 / 任务拆分）。
+# pattern 设计取舍：宁可短期误报（如「待确认项」里的「Vue 还是 React」），命中后人工
+# review；不放过实际越界。下个新项目实战后再精化。
+PM_OVERFLOW_PATTERNS: tuple[tuple[str, str, str], ...] = (
+    ("api_table_header",
+     r"\|\s*方法\s*\|\s*路径\s*\|",
+     "API endpoint 表头"),
+    ("api_method_row",
+     r"\|\s*(GET|POST|PUT|DELETE|PATCH)\s*\|\s*`?/[\w/{}:?=&_\-\.]+`?\s*\|",
+     "API 方法/路径表格行（method | path 两栏）"),
+    ("ddl_field",
+     r"(INTEGER\s+PK|TEXT\s+NOT\s+NULL\s+UNIQUE|TEXT\s+NOT\s+NULL|REAL\s+NOT\s+NULL|VARCHAR\(\d+\))",
+     "DDL 字段类型"),
+    ("schema_table_header",
+     r"\|\s*字段\s*\|\s*类型\s*\|",
+     "schema 字段表头"),
+    ("framework_choice",
+     r"(Flask\s*(vs|/|或)\s*FastAPI|FastAPI\s*(vs|/|或)\s*Flask|React\s*(vs|/|或)\s*Vue|Vue\s*(vs|/|或)\s*React|Chart\.js\s*(vs|/|或)\s*ECharts)",
+     "框架选型推荐"),
+    ("task_split_header",
+     r"\|\s*#?\s*\|\s*任务\s*\|\s*角色\s*\|",
+     "任务拆分表头（# / 任务 / 角色）"),
+    ("task_id_row",
+     r"^\|\s*T\d+[a-z]?\s*\|.+\|\s*(后端|前端|架构)[\w\s\-]*\|",
+     "T<n> 任务分派表格行"),
+)
+
+
+def _detect_pm_overflow(prd_path: Path) -> list[dict]:
+    """正则扫 PRD.md，返回命中越界 pattern 的 hit 列表。
+
+    每条 hit：{pattern_id, desc, line, snippet}。
+    无 PRD.md（PM 尚未跑）或读取失败 → 返回空列表，不视为错误。
+    """
+    if not prd_path.is_file():
+        return []
+    try:
+        content = prd_path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"[{ROLE}] ⚠️ 读 {prd_path.name} 失败：{e}", file=sys.stderr)
+        return []
+
+    hits: list[dict] = []
+    lines = content.splitlines()
+    for pattern_id, regex, desc in PM_OVERFLOW_PATTERNS:
+        pat = re.compile(regex, re.MULTILINE)
+        for m in pat.finditer(content):
+            # 算行号：从 match 起始位置反推
+            line_no = content[: m.start()].count("\n") + 1
+            snippet = lines[line_no - 1].strip() if line_no <= len(lines) else ""
+            hits.append({
+                "pattern_id": pattern_id,
+                "desc": desc,
+                "line": line_no,
+                "snippet": snippet[:200],
+            })
+    return hits
+
+
+def _run_pm_output_audit(*, dry_run: bool = False) -> int:
+    """扫 vault 下所有 10-项目/*/PRD.md，命中越界即写 audit.jsonl + 递增 PM consecutive_failures。
+
+    返回值（CLI 状态码）：
+      0 — 所有 PRD 合规，无命中
+      0 — 命中但非 dry_run，已记录（state 已递增）
+      0 — dry_run，仅打印不写盘
+      2 — 没有可审计的 PRD（vault 下 10-项目 为空）
+    """
+    projects_root = VAULT_ROOT / "10-项目"
+    if not projects_root.is_dir():
+        print(f"[{ROLE}] vault {projects_root} 不存在，跳过产物审计", file=sys.stderr)
+        return 2
+
+    prd_paths = sorted(projects_root.glob("*/PRD.md"))
+    if not prd_paths:
+        print(f"[{ROLE}] 未在 {projects_root} 下找到任何 PRD.md", file=sys.stderr)
+        return 2
+
+    overflow_count = 0
+    total_hits = 0
+    for prd in prd_paths:
+        project = prd.parent.name
+        hits = _detect_pm_overflow(prd)
+        if not hits:
+            print(f"[{ROLE}] ✅ {project}/PRD.md 合规（无越界 pattern 命中）")
+            continue
+
+        overflow_count += 1
+        total_hits += len(hits)
+        pattern_ids = sorted({h["pattern_id"] for h in hits})
+        print(
+            f"[{ROLE}] ⚠️ {project}/PRD.md 命中 {len(hits)} 个越界（{len(pattern_ids)} 类）：" + ", ".join(pattern_ids),
+            file=sys.stderr,
+        )
+        for h in hits[:5]:
+            print(f"    line {h['line']}  [{h['pattern_id']}]  {h['snippet']}", file=sys.stderr)
+        if len(hits) > 5:
+            print(f"    …（还有 {len(hits) - 5} 条，详见 audit.jsonl）", file=sys.stderr)
+
+        if dry_run:
+            continue
+
+        # 写 audit.jsonl
+        try:
+            rel = prd.relative_to(VAULT_ROOT).as_posix()
+        except ValueError:
+            rel = str(prd)
+        append_audit({
+            "timestamp": utc_now(),
+            "type": "pm_output_overflow",
+            "role": "产品经理",
+            "project": project,
+            "prd_path": rel,
+            "hit_count": len(hits),
+            "patterns": pattern_ids,
+            "hits": hits,
+            "audited_by": ROLE,
+        })
+
+        # 递增 PM consecutive_failures（一次跑一次性 +1，不按 pattern 数累加）
+        set_role_status(
+            "产品经理",
+            increment_consecutive_failures=True,
+            enforce_transition=False,
+        )
+
+    print(
+        f"[{ROLE}] 产物审计完成：扫 {len(prd_paths)} 个 PRD，"
+        f"{overflow_count} 个越界，共 {total_hits} 处命中"
+        + ("（dry_run，未写盘）" if dry_run else "")
+    )
+    return 0
+
 _DYNAMIC_RE = re.compile(
     r"<!-- DYNAMIC_START -->(.*?)<!-- DYNAMIC_END -->",
     re.DOTALL,
@@ -359,6 +494,10 @@ def _parse_args() -> argparse.Namespace:
         "--target", action="append", default=None,
         help="治理对象（可重复 / 逗号分隔 / 'all'）；缺省审计全部角色",
     )
+    p.add_argument(
+        "--audit-outputs", action="store_true",
+        help="切换到产物审计模式（扫 10-项目/*/PRD.md 越界 pattern），不跑角色基因审计",
+    )
     return p.parse_args()
 
 
@@ -368,6 +507,12 @@ def _today_stamp() -> str:
 
 def main() -> int:
     args = _parse_args()
+
+    # 产物审计模式：与角色基因审计正交，独立路径不动 ROLE 状态机
+    # （产物审计是治理 vault 产物的产物，不影响角色规范师自己的 busy/idle）
+    if getattr(args, "audit_outputs", False):
+        return _run_pm_output_audit(dry_run=bool(args.dry_run))
+
     dry_run = bool(args.dry_run)
     targets = parse_targets(args.target)   # None = 全部
     date_stamp = _today_stamp()
