@@ -6,14 +6,40 @@
 - 护栏 2：总量阈值
     - 无 input_budget → 走 context_window 比例
     - 有 input_budget → 走显式 token 数（RAISE = input_budget，WARN = 60% 该值）
+
+同时覆盖每个 WARN/RAISE 触发点 → audit.jsonl 写入（2026-05-22 P1 token 监控）。
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 
 from engine import llm as llm_mod
 from engine.llm import _audit_token_budget
+
+
+@pytest.fixture(autouse=True)
+def _isolate_audit_jsonl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """所有测试默认把 audit.jsonl 重定向到 tmp，避免污染真实 .claude/audit.jsonl。
+
+    autouse 让现有的 stderr-only 测试也自动隔离 I/O（即便它们不读 entries）。
+    """
+    p = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(llm_mod, "_AUDIT_JSONL_PATH", p)
+    return p
+
+
+def _read_audit_entries(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 @pytest.fixture
@@ -143,3 +169,122 @@ class TestExplicitBudget:
         err = capsys.readouterr().err
         # ratio 路径触发 WARN
         assert "input token 偏高" in err
+
+
+# ── audit.jsonl 写入 ────────────────────────────────────────
+class TestAuditJsonl:
+    """每个 WARN/RAISE 触发点都应写一条 audit.jsonl entry，schema 含 ts/type/level/reason/tokens。"""
+
+    def test_system_warn_writes_entry(
+        self, mock_tokens, _isolate_audit_jsonl: Path, capsys,
+    ):
+        mock_tokens(static=8500, dynamic=2000, user=1000)
+        _run()
+        capsys.readouterr()  # 排干 stderr
+        entries = _read_audit_entries(_isolate_audit_jsonl)
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["type"] == "token_audit"
+        assert e["level"] == "warn"
+        assert e["reason"] == "system_prompt_oversized"
+        assert e["sys_tokens"] == 10_500
+        assert e["threshold"] == llm_mod._SYSTEM_WARN_TOKENS
+        assert e["ts"].endswith("Z")
+        assert e["model"] == "claude-sonnet-4-6"
+
+    def test_system_raise_writes_entry_before_raising(
+        self, mock_tokens, _isolate_audit_jsonl: Path,
+    ):
+        mock_tokens(static=15000, dynamic=6000, user=1000)
+        with pytest.raises(RuntimeError):
+            _run()
+        entries = _read_audit_entries(_isolate_audit_jsonl)
+        assert len(entries) == 1
+        assert entries[0]["level"] == "raise"
+        assert entries[0]["reason"] == "system_prompt_oversized"
+        assert entries[0]["sys_tokens"] == 21_000
+
+    def test_budget_warn_writes_entry(
+        self, mock_tokens, _isolate_audit_jsonl: Path, capsys,
+    ):
+        # 50K，budget=80K → warn_at=48K，触发
+        mock_tokens(static=5000, dynamic=2000, user=43000, cw=200_000)
+        _run(input_budget=80_000)
+        capsys.readouterr()
+        entries = _read_audit_entries(_isolate_audit_jsonl)
+        assert len(entries) == 1
+        assert entries[0]["level"] == "warn"
+        assert entries[0]["reason"] == "budget_input_near"
+        assert entries[0]["budget_input_tokens"] == 80_000
+        assert entries[0]["total_tokens"] == 50_000
+
+    def test_budget_raise_writes_entry(
+        self, mock_tokens, _isolate_audit_jsonl: Path,
+    ):
+        mock_tokens(static=5000, dynamic=2000, user=78000, cw=200_000)
+        with pytest.raises(RuntimeError):
+            _run(input_budget=80_000)
+        entries = _read_audit_entries(_isolate_audit_jsonl)
+        assert len(entries) == 1
+        assert entries[0]["level"] == "raise"
+        assert entries[0]["reason"] == "budget_input_exceeded"
+
+    def test_ratio_warn_writes_entry(
+        self, mock_tokens, _isolate_audit_jsonl: Path, capsys,
+    ):
+        # 120K / 200K = 60% 触发 WARN_RATIO=0.50
+        mock_tokens(static=5000, dynamic=2000, user=113000, cw=200_000)
+        _run()
+        capsys.readouterr()
+        entries = _read_audit_entries(_isolate_audit_jsonl)
+        assert len(entries) == 1
+        assert entries[0]["level"] == "warn"
+        assert entries[0]["reason"] == "total_ratio_warn"
+        assert 0.50 <= entries[0]["ratio"] < 0.85
+
+    def test_ratio_raise_writes_entry(
+        self, mock_tokens, _isolate_audit_jsonl: Path,
+    ):
+        # 180K / 200K = 90% 触发 RAISE_RATIO=0.85
+        mock_tokens(static=5000, dynamic=2000, user=173000, cw=200_000)
+        with pytest.raises(RuntimeError):
+            _run()
+        entries = _read_audit_entries(_isolate_audit_jsonl)
+        assert len(entries) == 1
+        assert entries[0]["level"] == "raise"
+        assert entries[0]["reason"] == "total_ratio_exceeded"
+
+    def test_below_threshold_writes_no_entry(
+        self, mock_tokens, _isolate_audit_jsonl: Path,
+    ):
+        """所有阈值都未到时不该有 entry。"""
+        mock_tokens(static=3000, dynamic=2000, user=1000, cw=200_000)
+        _run()
+        assert _read_audit_entries(_isolate_audit_jsonl) == []
+
+    def test_token_counter_failure_writes_no_entry(
+        self, _isolate_audit_jsonl: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """token_counter 异常 → 静默降级，audit.jsonl 不写。"""
+        def boom(text, model):
+            raise RuntimeError("tiktoken not installed")
+
+        from engine import token_counter
+        monkeypatch.setattr(token_counter, "count_tokens", boom)
+        _audit_token_budget("claude-sonnet-4-6", "x", "y", "z")
+        assert _read_audit_entries(_isolate_audit_jsonl) == []
+
+    def test_entry_schema_required_fields(
+        self, mock_tokens, _isolate_audit_jsonl: Path, capsys,
+    ):
+        mock_tokens(static=8500, dynamic=2000, user=1000)
+        _run()
+        capsys.readouterr()
+        e = _read_audit_entries(_isolate_audit_jsonl)[0]
+        required = {
+            "ts", "type", "level", "reason",
+            "model", "sys_tokens", "static_tokens", "dynamic_tokens",
+            "user_tokens", "total_tokens", "context_window",
+            "budget_input_tokens",
+        }
+        assert required.issubset(e.keys())

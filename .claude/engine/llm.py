@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,34 @@ import yaml
 
 _PROVIDERS_FILE = Path(__file__).parent / "llm_providers.yaml"
 _providers_cache: dict[str, dict] | None = None
+
+# audit.jsonl 写入路径（与 skills/audit.py 对齐；engine 自己实现避免反向依赖）
+# 测试可 monkeypatch 此变量重定向到 tmp 路径。
+_AUDIT_JSONL_PATH = Path(__file__).resolve().parent.parent.parent / ".claude" / "audit.jsonl"
+
+
+def _append_token_audit(level: str, reason: str, ctx: dict) -> None:
+    """把 token 审计事件写到 .claude/audit.jsonl。
+
+    设计：engine 内部不引 skills.audit（反向依赖），自带最小实现。
+    级别 level=warn|raise；reason 区分触发原因（system_oversized / total_ratio / budget_*）。
+    ctx 至少含 model/sys_tokens/user_tokens/total_tokens；其他可选字段直接合并。
+    任何 I/O 失败静默吞掉 — 监控本身不能阻断主路径。
+    """
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "type": "token_audit",
+        "level": level,
+        "reason": reason,
+        **ctx,
+    }
+    try:
+        _AUDIT_JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_AUDIT_JSONL_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        # 不阻断主路径；仅在 stderr 留一行
+        print(f"[audit] ⚠️ audit.jsonl 写入失败（{type(e).__name__}: {e}）", file=sys.stderr)
 
 # Windows 命令行总长度上限 32767；预留出余量给其它参数。
 # 超过此阈值的 system_prompt 自动改走 stdin inline。
@@ -221,8 +250,22 @@ def _audit_token_budget(
     sys_tok = static_tok + dynamic_tok
     total_tok = sys_tok + user_tok
 
+    base_ctx = {
+        "model": model,
+        "sys_tokens": sys_tok,
+        "static_tokens": static_tok,
+        "dynamic_tokens": dynamic_tok,
+        "user_tokens": user_tok,
+        "total_tokens": total_tok,
+        "context_window": cw,
+        "budget_input_tokens": input_budget,
+    }
+
     # 护栏 1：system prompt 单独阈值
     if sys_tok > _SYSTEM_RAISE_TOKENS:
+        _append_token_audit("raise", "system_prompt_oversized", {
+            **base_ctx, "threshold": _SYSTEM_RAISE_TOKENS,
+        })
         raise RuntimeError(
             f"[audit] system prompt 过大（{sys_tok} tokens > {_SYSTEM_RAISE_TOKENS} "
             f"阈值）— static={static_tok}, dynamic={dynamic_tok}。"
@@ -231,6 +274,9 @@ def _audit_token_budget(
             f" (3) 上游 role.upstream 链是否过长。"
         )
     if sys_tok > _SYSTEM_WARN_TOKENS:
+        _append_token_audit("warn", "system_prompt_oversized", {
+            **base_ctx, "threshold": _SYSTEM_WARN_TOKENS,
+        })
         print(
             f"[audit] ⚠️ system prompt 偏大（{sys_tok} tokens > "
             f"{_SYSTEM_WARN_TOKENS} 告警线）— static={static_tok}, "
@@ -243,8 +289,10 @@ def _audit_token_budget(
     if input_budget is not None and input_budget > 0:
         raise_at = input_budget
         warn_at = int(input_budget * _BUDGET_WARN_RATIO_OF_OVERRIDE)
-        budget_desc = f"角色预算 {input_budget}"
         if total_tok >= raise_at:
+            _append_token_audit("raise", "budget_input_exceeded", {
+                **base_ctx, "raise_at": raise_at, "warn_at": warn_at,
+            })
             raise RuntimeError(
                 f"[audit] input token 超角色预算（{total_tok} ≥ {raise_at}）— "
                 f"system={sys_tok}, user={user_tok}, model={model}。"
@@ -252,6 +300,9 @@ def _audit_token_budget(
                 f"或角色 frontmatter 调高 budget_input_tokens。"
             )
         if total_tok >= warn_at:
+            _append_token_audit("warn", "budget_input_near", {
+                **base_ctx, "raise_at": raise_at, "warn_at": warn_at,
+            })
             print(
                 f"[audit] ⚠️ input token 接近角色预算（{total_tok} ≥ {warn_at}, "
                 f"上限 {raise_at}）— system={sys_tok}, user={user_tok}, model={model}。",
@@ -262,6 +313,9 @@ def _audit_token_budget(
     # 未声明 input_budget：走 context_window 百分比
     ratio = total_tok / cw if cw else 0.0
     if ratio >= _TOTAL_RAISE_RATIO:
+        _append_token_audit("raise", "total_ratio_exceeded", {
+            **base_ctx, "ratio": ratio, "threshold_ratio": _TOTAL_RAISE_RATIO,
+        })
         raise RuntimeError(
             f"[audit] input token 总量触顶（{total_tok}/{cw} = {ratio:.1%} ≥ "
             f"{_TOTAL_RAISE_RATIO:.0%}）— system={sys_tok}, user={user_tok}, "
@@ -269,6 +323,9 @@ def _audit_token_budget(
             f"budget_input_tokens 显式声明；继续调用预计将被 SDK 拒绝。"
         )
     if ratio >= _TOTAL_WARN_RATIO:
+        _append_token_audit("warn", "total_ratio_warn", {
+            **base_ctx, "ratio": ratio, "threshold_ratio": _TOTAL_WARN_RATIO,
+        })
         print(
             f"[audit] ⚠️ input token 偏高（{total_tok}/{cw} = {ratio:.1%} ≥ "
             f"{_TOTAL_WARN_RATIO:.0%}）— system={sys_tok}, user={user_tok}, "
