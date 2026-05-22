@@ -124,3 +124,102 @@ def test_duplicate_stem_does_not_crash_task(tmp_vault: Path, capsys):
     assert loaded == []
     captured = capsys.readouterr()
     assert "wikilink 展开失败" in captured.err
+
+
+# ── keyword 触发器扩展测试（2026-05-22 P0 落地）──────────────────
+
+
+def _skill_with_trigger(*, trigger: dict, body: str = "## 核心约束\n约束内容。\n") -> str:
+    """构造带 trigger frontmatter 的 skill 文件内容。"""
+    lines = ["type: skill", "role: 后端工程师", "trigger:"]
+    for k, v in trigger.items():
+        if isinstance(v, list):
+            lines.append(f"  {k}:")
+            for item in v:
+                lines.append(f"    - {item!r}")
+        else:
+            lines.append(f"  {k}: {v}")
+    return "---\n" + "\n".join(lines) + "\n---\n\n" + body
+
+
+def test_keyword_trigger_loads_when_task_has_keyword(tmp_vault: Path):
+    """task_text 含 keyword 时 skill 自动触发（无需 task 写 wikilink）。"""
+    _write(
+        tmp_vault / "20-知识/角色技能/后端工程师/B6-静态资源路径锚定.md",
+        _skill_with_trigger(
+            trigger={"keywords": ["StaticFiles"]},
+            body="## 核心约束\n用 resolve_path 锚定静态目录。\n",
+        ),
+    )
+    block, loaded, unresolved = dev_backend_main._load_task_skills(
+        "本任务实现 FastAPI app 挂载 StaticFiles 到 /static 路径"
+    )
+    assert "B6-静态资源路径锚定" in loaded
+    assert "用 resolve_path 锚定" in block
+    assert "auto-trigger:keyword:StaticFiles" in block
+
+
+def test_keyword_trigger_always_true_loads_for_any_task(tmp_vault: Path):
+    """always=true 的 skill（如 B5 空集守卫）对任意 task 都注入。"""
+    _write(
+        tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md",
+        _skill_with_trigger(
+            trigger={"always": True},
+            body="## 核心约束\nfetchone 必须先判 None。\n",
+        ),
+    )
+    block, loaded, _ = dev_backend_main._load_task_skills(
+        "实现无关的健康检查接口"
+    )
+    assert "B5-空集守卫" in loaded
+    assert "fetchone 必须先判 None" in block
+    assert "auto-trigger:always" in block
+
+
+def test_wikilink_and_keyword_dedup(tmp_vault: Path):
+    """wikilink 显式 + keyword 隐式命中同一 skill 时只注入一次。"""
+    _write(
+        tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md",
+        _skill_with_trigger(
+            trigger={"always": True},
+            body="## 核心约束\nfetchone 必须先判 None。\n",
+        ),
+    )
+    block, loaded, _ = dev_backend_main._load_task_skills(
+        "处理空集时遵循 [[B5-空集守卫]]"
+    )
+    # wikilink 加载一次 + keyword 路径去重不再注入 → loaded 只含一份
+    assert loaded.count("B5-空集守卫") == 1
+    # 内容只出现一次（避免双倍 token 浪费）
+    assert block.count("fetchone 必须先判 None") == 1
+
+
+def test_skill_without_trigger_not_auto_loaded(tmp_vault: Path):
+    """trigger 字段缺失的 skill 不会被 keyword 路径自动加载（fail-closed）。"""
+    _write(
+        tmp_vault / "20-知识/角色技能/后端工程师/B_legacy.md",
+        "---\ntype: skill\nrole: 后端工程师\n---\n\n## 核心约束\n旧 skill 无 trigger\n",
+    )
+    block, loaded, _ = dev_backend_main._load_task_skills(
+        "任意 task 文本"
+    )
+    # fail-closed：trigger 缺失 → 不触发
+    assert loaded == []
+    assert block == ""
+
+
+def test_keyword_trigger_with_upstream_text(tmp_vault: Path):
+    """keyword 也匹配 upstream_text（如已读的技术栈 / PRD 内容）。"""
+    _write(
+        tmp_vault / "20-知识/角色技能/后端工程师/B7-FastAPI共享资源async.md",
+        _skill_with_trigger(
+            trigger={"keywords": ["FastAPI"]},
+            body="## 核心约束\nasync def 中禁止裸 import requests。\n",
+        ),
+    )
+    block, loaded, _ = dev_backend_main._load_task_skills(
+        task_text="实现用户注册",
+        upstream_text="技术栈：FastAPI 0.115 + SQLAlchemy",
+    )
+    assert "B7-FastAPI共享资源async" in loaded
+    assert "async def 中禁止" in block

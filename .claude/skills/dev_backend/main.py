@@ -34,7 +34,9 @@ from engine import (
     project_dir, rules_dir, resolve_path, PROJECT_ROOT,
     VAULT_ROOT,
     expand_wikilinks, invalidate_wikilink_cache,
+    discover_role_skills, render_triggered_block,
 )
+from engine.config import project_code_root as _project_code_root
 
 ROLE = "后端工程师"
 
@@ -46,20 +48,26 @@ _NO_BACKEND_SIGNALS = ("无后端任务", "no backend", "纯前端", "frontend-o
 _BACKEND_SKILL_RE = re.compile(r"(?:^|/)B\d+-")
 
 
-def _load_task_skills(task_text: str) -> tuple[str, list[str], list[str]]:
-    """从 task 正文解析 backend skill wikilink，按需展开为可注入 prompt 的文本块。
+def _load_task_skills(
+    task_text: str,
+    upstream_text: str = "",
+    project: str = "",
+) -> tuple[str, list[str], list[str]]:
+    """组合 wikilink 显式 ∪ keyword 触发器隐式两条路径，按需注入 backend skill。
 
     返回 (skill_block, loaded_targets, unresolved_targets)
-      skill_block: 待注入 user_prompt 的文本（无引用时为空串）
-      loaded_targets: 成功展开的 wikilink target 列表（用于日志）
-      unresolved_targets: 写了 wikilink 但找不到对应文件的 target 列表（warn 不 fail）
+      skill_block: 待注入 user_prompt 的文本（双路径都空时为空串）
+      loaded_targets: 成功加载的 skill 标识列表（wikilink target + keyword stem）
+      unresolved_targets: wikilink 路径里写错找不到的 target（warn 不 fail）
 
     设计要点：
-    - filter 只匹配 backend skill 命名规约（`B<N>-...`），其他 wikilink 跳过
-    - 预算双层：单 skill ≤ 3000 char，总 ≤ 12000 char
-    - max_depth=0：skill 文件内的 wikilink 不再递归展开
-    - on_unresolved="warn"：task 写错 wikilink 不阻断 task，只打告警
+    - wikilink 路径：filter 按 `B<N>-` 命名规约（保持向后兼容）
+    - keyword 路径：扫 vault `20-知识/角色技能/后端工程师/` 下声明了
+      frontmatter.trigger 的 skill；trigger 缺失 = fail-closed 不加载
+    - 去重：wikilink 已加载的 stem 不再 keyword 重复注入
+    - upstream_text + project 用于扩大 keyword 匹配上下文与 file_patterns 扫码
     """
+    # ── 1. wikilink 显式路径（保留原逻辑）─────────────────────
     try:
         result = expand_wikilinks(
             task_text, VAULT_ROOT,
@@ -78,25 +86,49 @@ def _load_task_skills(task_text: str) -> tuple[str, list[str], list[str]]:
         )
         return "", [], []
 
-    loaded: list[str] = []
-    parts: list[str] = []
+    wikilink_loaded: list[str] = []
+    wikilink_parts: list[str] = []
     for e in result.expansions:
         if e.reason == "ok" and e.content:
-            loaded.append(e.wikilink.target)
-            parts.append(
+            wikilink_loaded.append(e.wikilink.target)
+            wikilink_parts.append(
                 f"=== Skill 引用: [[{e.wikilink.target}]] "
                 f"({e.path.name if e.path else '?'}) ===\n{e.content}"
             )
 
-    skill_block = ""
-    if parts:
-        skill_block = (
+    wikilink_block = ""
+    if wikilink_parts:
+        wikilink_block = (
             "\n\n## 相关技能（按 task 正文 wikilink 加载）\n\n"
-            + "\n\n".join(parts)
+            + "\n\n".join(wikilink_parts)
             + "\n"
         )
 
-    return skill_block, loaded, result.unresolved
+    # ── 2. keyword 触发器路径 ────────────────────────────────
+    role_dir = VAULT_ROOT / "20-知识" / "角色技能" / "后端工程师"
+    code_root: Path | None = None
+    if project:
+        try:
+            code_root = _project_code_root(project)
+        except Exception:
+            code_root = None  # PROJECT_CODE_ROOT 未配置或不可达 → 跳过 file_patterns
+    hits = discover_role_skills(role_dir, task_text, upstream_text, code_root)
+
+    # 去重：wikilink 已加载的 stem 不再 keyword 重复注入
+    wikilink_stems = {
+        t.rsplit("/", 1)[-1].removesuffix(".md") for t in wikilink_loaded
+    }
+    dedup_hits = [(p, r) for p, r in hits if p.stem not in wikilink_stems]
+    keyword_block, keyword_loaded = render_triggered_block(dedup_hits)
+
+    # ── 3. 合并 + 日志 ──────────────────────────────────────
+    skill_block = wikilink_block + keyword_block
+    print(
+        f"[{ROLE}] skill 触发：wikilink={len(wikilink_loaded)} "
+        f"keyword={len(keyword_loaded)} union={len(wikilink_loaded) + len(keyword_loaded)}"
+    )
+
+    return skill_block, wikilink_loaded + keyword_loaded, result.unresolved
 
 
 def _task_marker(project: str, task_label: str):
@@ -212,10 +244,12 @@ def main() -> int:
         # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
         context = read_input_files([task_file, tech_stack])
 
-        # 按 task 正文里的 wikilink 按需注入 skill（仅 backend skill `B<N>-...`）
-        # 未引用任何 skill 时 skill_block="" —— 完全省 token，不主动注入兜底集
+        # 按 task 正文里的 wikilink + skill frontmatter trigger 关键词双路径注入 skill
+        # （仅 backend skill `B<N>-...`）。双路径都空时 skill_block="" 不注入兜底集。
         task_text = task_file.read_text(encoding="utf-8")
-        skill_block, loaded_skills, unresolved = _load_task_skills(task_text)
+        skill_block, loaded_skills, unresolved = _load_task_skills(
+            task_text, upstream_text=context, project=project,
+        )
         if loaded_skills:
             print(f"[{ROLE}] 📚 task 引用 skill: {', '.join(loaded_skills)}")
         if unresolved:
