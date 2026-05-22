@@ -145,14 +145,21 @@ def render_triggered_block(
     hits: Iterable[tuple[Path, str]],
     *,
     max_chars_per_skill: int = 3000,
+    total_char_budget: int = 12_000,
 ) -> tuple[str, list[str]]:
     """把 discover_role_skills 的命中结果渲染成 user_prompt 段。
 
-    返回 (skill_block, loaded_stems)。skill_block 默认抽 `## 核心约束` 段；
-    超长截断。loaded_stems 用于日志可观测性 + 调用方 union 去重。
+    返回 (skill_block, loaded_stems)。skill_block 默认抽 `## 核心约束` 段。
+    双层预算（与 wikilink resolver 对齐）：
+    - max_chars_per_skill：单个 skill 截断上限（防单点失控）
+    - total_char_budget：所有 skill 总和上限（防 always=true 风暴撑爆 prompt）
+    超 total_char_budget 后剩余 skill 跳过 + stderr 警告（治理可见）。
     """
     parts: list[str] = []
     loaded_stems: list[str] = []
+    used_chars = 0
+    skipped: list[str] = []
+
     for skill_path, reason in hits:
         try:
             raw = skill_path.read_text(encoding="utf-8")
@@ -165,10 +172,24 @@ def render_triggered_block(
             core = core[:max_chars_per_skill] + (
                 f"\n\n…（截断：原文 {len(core)} 字符，本次取前 {max_chars_per_skill}）"
             )
+
+        # total_char_budget 兜底：累计超预算则跳过本条 + 后续（保前面已加载的稳定性）
+        if used_chars + len(core) > total_char_budget:
+            skipped.append(skill_path.stem)
+            continue
+
         parts.append(
             f"=== Skill (auto-trigger:{reason}): [[{skill_path.stem}]] ===\n{core}"
         )
         loaded_stems.append(skill_path.stem)
+        used_chars += len(core)
+
+    if skipped:
+        print(
+            f"[skill_trigger] ⚠️ total_char_budget={total_char_budget} 用满，"
+            f"跳过 {len(skipped)} 个 skill：{', '.join(skipped)}",
+            file=sys.stderr,
+        )
 
     if not parts:
         return "", []
