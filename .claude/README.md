@@ -89,6 +89,6 @@ python .claude/engine/_smoke_test.py
 
 - **Phase 1-3a：完成** — vault + engine + 工作流模板系统
 - **Phase 4：完成** — LangGraph 编排（含讨论循环 / 上下文注入）+ 自愈机制完整闭环（复盘 agent 4d / 生命周期标记 4d.5 / 闭环验证 4e / 晋升者 4f / 知识沉淀者 4g / 跨项目实战 4h）
-- **Phase 5a：完成** — Obsidian Canvas 同位导出（5a-2）+ 实时增量（5a-3）+ 用户介入回流（5a-4）
-- **Phase 5b：完成** — meeting-chat 退役（被 Canvas 完整替代）
+- **Phase 5a：已退役**（2026-05-23）— Obsidian Canvas 介入闭环 4 个真实项目零用户介入（UX 失败 + spec 天花板锁死）；canvas_export.py + 介入回流逻辑共 ~600 行已删；运行时可视化改用 Obsidian 实时刷新脑暴-*.md。详见 vault [[讨论循环-canvas-ROI与md介入替代]]
+- **Phase 5b：完成** — meeting-chat 退役
 - **后续**：跨领域角色（自媒体/生活）+ 跨域工作流模板；自愈机制内卷优化（4i-4l 待办）

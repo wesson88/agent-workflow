@@ -10,31 +10,23 @@ graph/discussion.py — 多角色讨论 subgraph（Phase 4b）
 Phase 4b 限制：
 - 主持人只做 round-robin（无智能裁决）
 - 无共识检测（跑满 max_rounds 退出）
-- 无用户介入（推迟到 Phase 5a Canvas）
+- 无用户介入
 
 Phase 4c 升级方向：LLM 主持人 + 共识检测 + 决议 YAML 自动生成。
 """
 
 from __future__ import annotations
 
-import json
-import re
 from datetime import datetime, timezone
 from operator import add
-from pathlib import Path
 from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
-from ..canvas_export import build_canvas_from_state, write_canvas_atomic
-from ..config import VAULT_ROOT, project_dir
+from ..config import project_dir
 from ..llm import call_llm
 from ..obsidian_io import write_note
 from ..role_loader import load_role
-
-
-# Phase 5a-4：识别 LangGraph 自己写的节点 vs 用户在 Canvas 加的节点
-_LANGGRAPH_NODE_ID_RE = re.compile(r"^(topic|header_\d+|msg_\d+_\d+)$")
 
 
 # 单文件最多注入字符数（防爆 prompt；超出截尾并附省略提示）
@@ -96,9 +88,6 @@ class DiscussionState(TypedDict, total=False):
     next_speaker: str | None
     finished: bool
 
-    # Phase 5a-4：用户在 Canvas 上加的节点 ID（已处理的，避免重复 inject）
-    processed_injections: Annotated[list[str], add]
-
 
 # ── 节点 ─────────────────────────────────────────────────
 def _node_init(state: DiscussionState) -> dict:
@@ -114,48 +103,7 @@ def _node_init(state: DiscussionState) -> dict:
     return {"current_round": 0, "next_speaker": first, "finished": False}
 
 
-def _canvas_path(state: DiscussionState) -> Path:
-    """讨论 canvas 同位路径。"""
-    return VAULT_ROOT / "10-项目" / state["project"] / f"脑暴-{state['discussion_name']}.canvas"
-
-
-def _read_existing_canvas(state: DiscussionState) -> dict | None:
-    """读 vault 内已有的 canvas 文件。无文件 / 解析失败时返回 None。"""
-    p = _canvas_path(state)
-    if not p.is_file():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _extract_user_nodes(canvas: dict | None) -> list[dict]:
-    """从 canvas 提取**用户加的节点**（ID 不在 LangGraph 命名空间）。"""
-    if not canvas:
-        return []
-    return [
-        n for n in canvas.get("nodes", [])
-        if n.get("type") == "text"
-        and not _LANGGRAPH_NODE_ID_RE.match(n.get("id", ""))
-        and (n.get("text", "") or "").strip()
-    ]
-
-
-def _scan_user_injections(state: DiscussionState) -> list[dict]:
-    """返回**未处理**的用户介入节点（每轮调用，inject 到下一发言者 prompt）。"""
-    user_nodes = _extract_user_nodes(_read_existing_canvas(state))
-    if not user_nodes:
-        return []
-    processed = set(state.get("processed_injections", []) or [])
-    return [n for n in user_nodes if n.get("id") not in processed]
-
-
-def _build_speaker_prompt(
-    state: DiscussionState,
-    speaker: str,
-    injections: list[dict] | None = None,
-) -> tuple[str, str]:
+def _build_speaker_prompt(state: DiscussionState, speaker: str) -> tuple[str, str]:
     """构造某角色当前轮的 (system_prompt, user_prompt)。"""
     role = load_role(speaker)
 
@@ -187,15 +135,6 @@ def _build_speaker_prompt(
         )
     history_block = "\n\n".join(history_lines) if history_lines else "（你是第一个发言）"
 
-    # Phase 5a-4：用户实时介入块（如有未处理的 Canvas 节点）
-    injection_block = ""
-    if injections:
-        lines = ["# 用户实时介入（**必须正面回应**）", ""]
-        for inj in injections:
-            lines.append(f"> {inj['text'].strip()}")
-            lines.append("")
-        injection_block = "\n".join(lines) + "\n"
-
     user_prompt = (
         f"# 议题\n{state['topic']}\n\n"
         f"# 项目背景\n项目名：{state['project']}\n任务：{state['task']}\n\n"
@@ -204,7 +143,6 @@ def _build_speaker_prompt(
         f"请直接基于这些内容给出具体观点，不要询问『是否能查看』。**\n\n"
         f"{project_context}\n\n"
         f"# 已有讨论历史\n{history_block}\n\n"
-        f"{injection_block}"
         f"---\n"
         f"现在轮到你（**{speaker}**）发言。请直接输出你的一段发言："
     )
@@ -218,16 +156,8 @@ def _node_speak(state: DiscussionState) -> dict:
 
     print(f"\n【第 {next_round} 轮 · {speaker}】", flush=True)
 
-    # Phase 5a-4：扫 canvas 看用户有没有加新节点（"实时介入"）
-    new_injections = _scan_user_injections(state)
-    if new_injections:
-        print(
-            f"  💡 发现 {len(new_injections)} 条用户实时介入，"
-            f"已注入 {speaker} 的 prompt"
-        )
-
     role = load_role(speaker)
-    system_prompt, user_prompt = _build_speaker_prompt(state, speaker, injections=new_injections)
+    system_prompt, user_prompt = _build_speaker_prompt(state, speaker)
     text = call_llm(
         system_prompt, user_prompt,
         model=role.model,
@@ -242,28 +172,9 @@ def _node_speak(state: DiscussionState) -> dict:
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
 
-    # Phase 5a-3：每轮发言后**增量覆写** canvas，让 Obsidian 实时刷新
-    # Phase 5a-4：覆写时**保留**用户加的节点（含已处理 + 本轮新介入），不让 5a-3 误清
-    try:
-        live_state = {
-            **state,
-            "messages": list(state.get("messages", []) or []) + [msg],
-            "current_round": next_round,
-        }
-        canvas = build_canvas_from_state(live_state, layout="grid", draw_edges=True)
-        # 把已有 canvas 里的用户节点附加回新 canvas
-        existing_user_nodes = _extract_user_nodes(_read_existing_canvas(state))
-        if existing_user_nodes:
-            canvas["nodes"].extend(existing_user_nodes)
-        write_canvas_atomic(canvas, _canvas_path(state))
-    except Exception as e:
-        # 增量 canvas 失败不阻塞讨论流程；最终版还会再写一次
-        print(f"⚠️  增量 canvas 写入失败（忽略，继续讨论）：{e}")
-
     return {
         "messages": [msg],
         "current_round": next_round,
-        "processed_injections": [n["id"] for n in new_injections],
     }
 
 
@@ -329,24 +240,6 @@ def _node_write_log(state: DiscussionState) -> dict:
 
     write_note(rel_path, "\n".join(lines))
     print(f"\n💬 讨论结束（{state['current_round']} 轮），笔记已写入：{rel_path}")
-
-    # Phase 5a-2：同位写一份 Obsidian Canvas 视图（grid 默认布局）
-    # Phase 5a-4：保留用户介入节点
-    try:
-        canvas = build_canvas_from_state(state, layout="grid", draw_edges=True)
-        existing_user_nodes = _extract_user_nodes(_read_existing_canvas(state))
-        if existing_user_nodes:
-            canvas["nodes"].extend(existing_user_nodes)
-        canvas_rel = f"10-项目/{project}/脑暴-{name}.canvas"
-        write_canvas_atomic(canvas, VAULT_ROOT / canvas_rel)
-        print(
-            f"💬 Canvas 视图已写入：{canvas_rel}"
-            f"（{len(canvas['nodes'])} 节点 / {len(canvas['edges'])} 边"
-            f"{f'，含 {len(existing_user_nodes)} 条用户介入' if existing_user_nodes else ''}）"
-        )
-    except Exception as e:
-        # Canvas 是 nice-to-have，失败不影响主流程
-        print(f"⚠️  Canvas 写入失败（不影响讨论结果）：{e}")
 
     return {"finished": True}
 
