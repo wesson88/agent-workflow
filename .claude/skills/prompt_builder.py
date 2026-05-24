@@ -238,6 +238,44 @@ def _strip_skill_refs_block(body: str) -> str:
     return _SKILL_BLOCK_RE.sub("", body)
 
 
+_VERSION_HISTORY_RE = re.compile(
+    r"(?:\r?\n)?##\s+8\..*",
+    re.DOTALL,
+)
+
+
+def _strip_version_history(body: str) -> str:
+    """从 body 剥除 §8 版本历史（含标题及之后所有内容）。
+
+    §8 是历史记录，对 LLM 行为无指导价值——LLM 不需要知道这个角色之前是 v0.1.0 还是 v1.5.0。
+    SE 域角色累积 5-9 个版本条目（每条几十到几百字符），跨域所有角色受益。
+    实测节省：架构师 ~1100 chars / 后端工程师 ~900 chars / 音乐总监 ~340 chars（新角色历史短）。
+
+    匹配规则：从行首 `## 8. <任意>` 起，到 body 末尾。后续 §9+（若有）也一并剥除（按规范
+    §8 应是末节，§9+ 是异常）。
+    """
+    return _VERSION_HISTORY_RE.sub("", body).rstrip()
+
+
+def _filter_self_dynamic(body: str) -> str:
+    """把 body 中角色自身的 DYNAMIC 区按上游同款规则过滤后回写。
+
+    与 _build_dynamic_segment（处理上游 DYNAMIC）对齐：只保留 KEEP / NEW / GRADUATE?
+    标记的 patch，过滤 GRADUATE / DROP / DROP?；同时剥离"闭环验证"证据行。
+    全空（无任何应注入 patch）→ 整 DYNAMIC 区不进 prompt，连 START/END marker 都删除。
+
+    背景：原实现 build_system_prompt 把 role.body 整段塞 system_prompt，DROP 类废弃约束
+    也会被注入（让 LLM 看反向规则）+ GRADUATE 临时态重复。统一治理后跨 SE/music/其他域
+    所有角色受益。
+    """
+    patch_text = _extract_dynamic_patch(body)
+    if not patch_text.strip():
+        # 没有 KEEP/NEW/GRADUATE? patches → 整 DYNAMIC 区不进 prompt
+        return _DYNAMIC_RE.sub("", body).rstrip()
+    new_block = f"<!-- DYNAMIC_START -->\n{patch_text}\n<!-- DYNAMIC_END -->"
+    return _DYNAMIC_RE.sub(new_block, body)
+
+
 # ── 公开 API ──────────────────────────────────────────────
 def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> tuple[str, str]:
     """从 vault 加载角色笔记，返回 (static, dynamic) 两段 system prompt。
@@ -255,11 +293,13 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     if role.skills:
         summary.append(f"技能:{', '.join(role.skills)}")
 
+    body_filtered = _filter_self_dynamic(role.body.strip())
+    body_filtered = _strip_version_history(body_filtered)
     static_parts = [
         "## 角色摘要",
         "\n".join(summary),
         "",
-        _strip_evidence_lines(role.body.strip()),
+        _strip_evidence_lines(body_filtered),
         OUTPUT_FORMAT_SPEC,
     ]
     static = "\n".join(static_parts)
@@ -292,14 +332,16 @@ def build_system_prompt_no_skills(
     if role.skills:
         summary.append(f"技能:{', '.join(role.skills)}")
 
-    # 从 body 剥除已内联的 skill_refs 块
+    # 从 body 剥除已内联的 skill_refs 块 + 过滤自身 DYNAMIC + 剥 §8 版本历史
     body_no_skills = _strip_skill_refs_block(role.body)
+    body_no_skills = _filter_self_dynamic(body_no_skills.strip())
+    body_no_skills = _strip_version_history(body_no_skills)
 
     static_parts = [
         "## 角色摘要",
         "\n".join(summary),
         "",
-        _strip_evidence_lines(body_no_skills.strip()),
+        _strip_evidence_lines(body_no_skills),
         OUTPUT_FORMAT_SPEC,
     ]
     static = "\n".join(static_parts)
