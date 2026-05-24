@@ -143,3 +143,140 @@ class TestBuildDynamicSegment:
         role = _make_role("技术主管", [])
         result = _build_dynamic_segment(role)
         assert result == ""
+
+
+# ══════════════════════════════════════════════════════════
+# _filter_self_dynamic 自身 DYNAMIC 区过滤
+# ══════════════════════════════════════════════════════════
+
+from prompt_builder import _filter_self_dynamic
+
+
+class TestFilterSelfDynamic:
+    """body 中角色自身 DYNAMIC 区按 KEEP/NEW/GRADUATE? 过滤；其余删除。"""
+
+    def test_keep_patch_preserved(self):
+        body = _make_dynamic_body("- KEEP 约束内容", "KEEP")
+        result = _filter_self_dynamic(body)
+        assert "<!-- DYNAMIC_START -->" in result
+        assert "[KEEP]" in result
+        assert "KEEP 约束内容" in result
+
+    def test_new_patch_preserved(self):
+        body = _make_dynamic_body("- NEW 候选约束", "NEW")
+        result = _filter_self_dynamic(body)
+        assert "[NEW]" in result
+        assert "NEW 候选约束" in result
+
+    def test_graduate_question_preserved(self):
+        body = _make_dynamic_body("- 推荐合入", "GRADUATE?")
+        result = _filter_self_dynamic(body)
+        assert "[GRADUATE?]" in result
+
+    def test_drop_question_filtered(self):
+        body = _make_dynamic_body("- 推荐删除约束", "DROP?")
+        result = _filter_self_dynamic(body)
+        # DROP? 是唯一 patch → 整 DYNAMIC 区删除
+        assert "<!-- DYNAMIC_START -->" not in result
+        assert "DROP?" not in result
+
+    def test_drop_filtered(self):
+        body = _make_dynamic_body("- 已确认删除", "DROP")
+        result = _filter_self_dynamic(body)
+        assert "<!-- DYNAMIC_START -->" not in result
+
+    def test_graduate_filtered(self):
+        body = _make_dynamic_body("- 临时态待 graduator", "GRADUATE")
+        result = _filter_self_dynamic(body)
+        assert "<!-- DYNAMIC_START -->" not in result
+
+    def test_mixed_keep_and_drop_only_keep_remains(self):
+        body = (
+            "# 角色正文\n\n<!-- DYNAMIC_START -->\n"
+            "# Patch [2026-01-01] [KEEP] 保留\n"
+            "- KEEP 约束\n"
+            "# Patch [2026-01-02] [DROP?] 应删\n"
+            "- DROP 约束\n"
+            "<!-- DYNAMIC_END -->\n"
+        )
+        result = _filter_self_dynamic(body)
+        assert "[KEEP]" in result
+        assert "KEEP 约束" in result
+        assert "[DROP?]" not in result
+        assert "DROP 约束" not in result
+
+    def test_no_dynamic_region_unchanged(self):
+        body = "# 角色正文\n\n## 1. 使命\n内容\n## 2. 边界\n内容"
+        result = _filter_self_dynamic(body)
+        assert result.strip() == body.strip()
+
+    def test_empty_dynamic_region_removed(self):
+        body = (
+            "# 角色正文\n\n<!-- DYNAMIC_START -->\n"
+            "# 此区由复盘 agent 自动维护\n"
+            "<!-- DYNAMIC_END -->\n"
+        )
+        result = _filter_self_dynamic(body)
+        # 全是注释行 → 没有有效 patch → 整段删除
+        assert "<!-- DYNAMIC_START -->" not in result
+
+
+# ══════════════════════════════════════════════════════════
+# _strip_version_history §8 版本历史剥除
+# ══════════════════════════════════════════════════════════
+
+from prompt_builder import _strip_version_history
+
+
+class TestStripVersionHistory:
+    """§8 版本历史是 vault 内 review 用，对 LLM 行为无指导，统一剥除省 token。"""
+
+    def test_basic_strip(self):
+        body = (
+            "## 1. 使命\n内容\n\n"
+            "## 7. 运行时补丁\n<!-- DYNAMIC_START --><!-- DYNAMIC_END -->\n\n"
+            "## 8. 版本历史\n\n"
+            "- v1.5.0 (2026-05-24): some change\n"
+            "- v1.4.0 (2026-05-11): earlier change\n"
+        )
+        result = _strip_version_history(body)
+        assert "## 8. 版本历史" not in result
+        assert "v1.5.0" not in result
+        assert "## 1. 使命" in result
+        assert "## 7. 运行时补丁" in result
+
+    def test_no_section_8_unchanged(self):
+        body = "## 1. 使命\n内容\n\n## 2. 范围\n内容"
+        result = _strip_version_history(body)
+        assert result.strip() == body.strip()
+
+    def test_section_8_at_very_end(self):
+        body = "## 1. 使命\n内容\n\n## 8. 历史\n- v0.1.0"
+        result = _strip_version_history(body)
+        assert "## 8." not in result
+        assert "v0.1.0" not in result
+
+    def test_section_8_with_section_9_below(self):
+        """§9+ 异常区也一并剥除（按规范 §8 应是末节）。"""
+        body = (
+            "## 1. 使命\n内容\n\n"
+            "## 8. 版本历史\n- v1.0\n\n"
+            "## 9. 附录\n额外内容\n"
+        )
+        result = _strip_version_history(body)
+        assert "## 8." not in result
+        assert "## 9." not in result
+        assert "额外内容" not in result
+
+    def test_section_8_variant_title(self):
+        body = "## 1. 使命\n内容\n\n## 8. Version History\n- v1.0"
+        result = _strip_version_history(body)
+        assert "## 8." not in result
+
+    def test_does_not_match_section_8_inline(self):
+        """正文里出现 "§8" 或 "8." 字面字符串不应被误判（必须是行首 `## 8.`）。"""
+        body = "## 1. 使命\n参考 §8 的版本号\n8. 是个数字\n\n## 2. 范围\n内容"
+        result = _strip_version_history(body)
+        assert "## 1. 使命" in result
+        assert "## 2. 范围" in result
+        assert "参考 §8 的版本号" in result
