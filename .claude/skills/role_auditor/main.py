@@ -523,9 +523,9 @@ def main() -> int:
 
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
-    # 1) 收集角色文件
+    # 1) 收集角色文件（rglob：支持 music/ 等域子目录；2026-05-24 D-9 全子目录方案）
     rgd = role_genes_dir()
-    all_role_files = sorted(rgd.glob("角色-*.md"))
+    all_role_files = sorted(rgd.rglob("角色-*.md"))
     role_files = [
         f for f in all_role_files
         if f.name != SELF_FILENAME
