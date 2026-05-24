@@ -165,7 +165,7 @@ def _index() -> dict[str, Path]:
     单进程内缓存；如笔记被外部修改后想刷新，调用 invalidate_cache()。
     """
     idx: dict[str, Path] = {}
-    for note in role_genes_dir().glob("角色-*.md"):
+    for note in role_genes_dir().rglob("角色-*.md"):
         try:
             content = read_note(note)
             fm, _ = split_frontmatter(content)
@@ -202,7 +202,7 @@ def list_roles() -> list[Role]:
     """加载 vault 中所有角色笔记，按角色名排序。"""
     seen: set[Path] = set()
     roles: list[Role] = []
-    for note in role_genes_dir().glob("角色-*.md"):
+    for note in role_genes_dir().rglob("角色-*.md"):
         if note in seen:
             continue
         seen.add(note)
