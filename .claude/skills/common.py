@@ -258,6 +258,43 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     return static, dynamic
 
 
+# ── rule_refs 章节级展开（W3 P0c+ 音乐域 + SE 架构师共用） ────────────────────
+def load_rule_block(rule_refs: tuple[str, ...] | list[str]) -> tuple[str, str]:
+    """按角色 frontmatter `rule_refs` 展开规则章节，拼成可注入 context 的 markdown 块。
+
+    返回 (rule_block, source_hint)：
+    - rule_block 形如 ``=== [[产物schema#7. ...]] ===\\n<内容>\\n\\n=== ... ===\\n<内容>``
+    - source_hint 给日志用一句话描述（"按章节注入 N/M 段，共 K char" / "rule_refs 空"）
+    rule_refs 为空 / 全展开失败时 rule_block 为空字符串，调用方负责回退（如全文件读）。
+
+    实现参考自 chief_architect/main.py::_load_rule_block；抽到 common 让音乐域 8 个 skill
+    与未来需要 rule_refs 注入的新角色共用，避免每个 skill 重复实现。
+    架构师仍维持其本地 _load_rule_block（已实战 5+ 项目，保稳定不切换）。
+    """
+    from engine.wikilink import expand_wikilinks
+    refs = tuple(rule_refs or ())
+    if not refs:
+        return "", "rule_refs 空"
+    refs_text = "\n".join(refs)
+    result = expand_wikilinks(
+        refs_text,
+        filter=lambda wl: True,
+        max_chars_per_link=4000,
+        total_char_budget=20000,
+        on_unresolved="warn",
+    )
+    parts: list[str] = []
+    hit = 0
+    for e in result.expansions:
+        if e.reason == "ok" and e.content:
+            parts.append(f"=== {e.wikilink.raw} ===\n{e.content}")
+            hit += 1
+    if not parts:
+        return "", f"rule_refs 全部展开失败（unresolved={result.unresolved}）"
+    block = "\n\n".join(parts)
+    return block, f"按章节注入 {hit}/{len(refs)} 段，共 {result.total_chars} char"
+
+
 # ── 输入文件批量读取 ──────────────────────────────────────────────────────────────
 def _extract_sections(content: str, sections: list[str]) -> str:
     """从 Markdown 文档中只提取指定章节（## 标题匹配）。
