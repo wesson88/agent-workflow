@@ -27,7 +27,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
-    load_rule_block,
+    load_rule_block, load_genre_skill_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -89,6 +89,11 @@ def main() -> int:
     print(f"[{ROLE}] rule_refs 注入：{source_hint}")
     if rule_block:
         context = context + "\n\n" + rule_block
+
+    skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
+    print(f"[{ROLE}] skill_trigger：{skill_hint}")
+    if skill_block:
+        context = context + "\n\n" + skill_block
 
     user_prompt = (
         f"项目名：`{project}`（写文件时把路径里的 `{{project}}` 占位符替换为本值）\n\n"

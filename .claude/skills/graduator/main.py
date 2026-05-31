@@ -41,7 +41,51 @@ from engine import (
 )
 
 ROLE = "晋升者"
-WORKER_ROLES = ("产品经理", "架构师", "技术主管", "后端工程师", "前端工程师")
+
+# 跨域配置（v1.1.0）：晋升者跨域差异**完全在路径**，治理逻辑（GRADUATE/DROP marker 处理）
+# 跨域同款。SE 域 = 角色基因无 domain 子目录；music 域 = 角色基因含 music/ 子目录
+DOMAIN_CONFIGS: dict[str, dict] = {
+    "se": {
+        "worker_roles": ("产品经理", "架构师", "技术主管", "后端工程师", "前端工程师"),
+        "role_gene_dir_segment": "",
+    },
+    "music": {
+        "worker_roles": (
+            "音乐总监", "制作人", "作词", "作曲",
+            "编曲", "和声编写", "混音师", "母带工程师",
+        ),
+        "role_gene_dir_segment": "music",
+    },
+}
+
+
+def _resolve_domain(args) -> str:
+    """domain 解析：① --domain 显式 ② --target 命中某 domain worker_roles 推导 ③ fallback se。"""
+    explicit = (getattr(args, "domain", None) or "").strip()
+    if explicit:
+        return explicit
+    # --target 推导：若 target 命中某 domain 的 worker_roles，用该 domain
+    raw_targets = getattr(args, "target", None) or []
+    if raw_targets:
+        flat = ",".join(raw_targets).replace(" ", "")
+        tokens = [t for t in flat.split(",") if t and t != "all"]
+        for d, cfg in DOMAIN_CONFIGS.items():
+            if any(t in r for r in cfg["worker_roles"] for t in tokens):
+                return d
+    return "se"
+
+
+def _role_gene_path(rgd: Path, domain: str, role: str) -> Path:
+    cfg = DOMAIN_CONFIGS.get(domain, DOMAIN_CONFIGS["se"])
+    seg = cfg.get("role_gene_dir_segment", "")
+    return (rgd / seg / f"角色-{role}.md") if seg else (rgd / f"角色-{role}.md")
+
+
+def _role_gene_rel(domain: str, role: str) -> str:
+    """角色基因相对路径（写入 FILE 块 / target 匹配用）。"""
+    cfg = DOMAIN_CONFIGS.get(domain, DOMAIN_CONFIGS["se"])
+    seg = cfg.get("role_gene_dir_segment", "")
+    return f"00-系统/角色基因/{seg}/角色-{role}.md" if seg else f"00-系统/角色基因/角色-{role}.md"
 
 
 # ── 标记解析 ─────────────────────────────────────────────
@@ -85,11 +129,15 @@ def _scan_pending_patches(role_text: str) -> list[dict]:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="晋升者：把用户已确认的 GRADUATE/DROP 补丁固化到主体")
+    p = argparse.ArgumentParser(description="晋升者：把用户已确认的 GRADUATE/DROP 补丁固化到主体（跨域 v1.1.0）")
     p.add_argument("--task", required=True, help="本次晋升说明（写入 audit）")
     p.add_argument(
+        "--domain", default=None,
+        help=f"域（{'/'.join(DOMAIN_CONFIGS.keys())}）；缺省按 --target 推导 / fallback se",
+    )
+    p.add_argument(
         "--target", action="append", default=None,
-        help="治理对象（可重复 / 逗号分隔 / 'all'）；缺省扫 5 个工作角色",
+        help="治理对象（可重复 / 逗号分隔 / 'all'）；缺省扫 domain 的全部工作角色",
     )
     p.add_argument("--dry-run", action="store_true", help="只列待执行标记，不调 LLM、不写盘")
     return p.parse_args()
@@ -107,6 +155,13 @@ def main() -> int:
     dry_run = bool(args.dry_run)
     targets = parse_targets(args.target)   # None = 全部 WORKER_ROLES
 
+    # domain 解析（v1.1.0 跨域）
+    domain = _resolve_domain(args)
+    if domain not in DOMAIN_CONFIGS:
+        print(f"[{ROLE}] 未知 domain={domain}，已知：{list(DOMAIN_CONFIGS.keys())}", file=sys.stderr)
+        return 2
+    WORKER_ROLES_DOMAIN = DOMAIN_CONFIGS[domain]["worker_roles"]
+
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
         return 1
@@ -115,12 +170,12 @@ def main() -> int:
 
     # 1) 按 target 过滤要扫的工作角色
     scope_roles = (
-        WORKER_ROLES if targets is None
-        else tuple(r for r in WORKER_ROLES if any(t in r for t in targets))
+        WORKER_ROLES_DOMAIN if targets is None
+        else tuple(r for r in WORKER_ROLES_DOMAIN if any(t in r for t in targets))
     )
     if not scope_roles:
         print(
-            f"[{ROLE}] --target={sorted(targets)} 不匹配任何工作角色（{list(WORKER_ROLES)}），"
+            f"[{ROLE}] --target={sorted(targets)} 不匹配任何工作角色（{list(WORKER_ROLES_DOMAIN)}），"
             f"无可处理。", file=sys.stderr,
         )
         set_role_status(ROLE, status="success", reset_counters=True)
@@ -128,12 +183,13 @@ def main() -> int:
         return 0
     if targets is not None:
         print(f"[{ROLE}] 🎯 target 过滤命中 {len(scope_roles)} 个角色：{list(scope_roles)}")
+    print(f"[{ROLE}] domain={domain} / worker_roles 全集={list(WORKER_ROLES_DOMAIN)}")
 
-    # 2) 扫描 scope 内的工作角色，找待执行标记
+    # 2) 扫描 scope 内的工作角色（按 domain 路径），找待执行标记
     rgd = role_genes_dir()
     workplans: list[tuple[str, Path, str, list[dict]]] = []  # (role, path, text, patches)
     for role_name in scope_roles:
-        path = rgd / f"角色-{role_name}.md"
+        path = _role_gene_path(rgd, domain, role_name)
         if not path.exists():
             continue
         text = path.read_text(encoding="utf-8")
@@ -150,16 +206,17 @@ def main() -> int:
         append_audit({
             "timestamp": utc_now(), "role": ROLE, "project": "*",
             "task": task, "result": "noop", "reason": "no_confirmed_markers",
+            "domain": domain,
         })
         return 0
 
-    print(f"[{ROLE}] 待执行计划：")
+    print(f"[{ROLE}] 待执行计划（domain={domain}）：")
     total = 0
     for role_name, _path, _text, patches in workplans:
         graduates = [p for p in patches if p["label"] == "GRADUATE"]
         drops = [p for p in patches if p["label"] == "DROP"]
         total += len(patches)
-        print(f"  - 角色-{role_name}.md：{len(graduates)} 条 GRADUATE / {len(drops)} 条 DROP")
+        print(f"  - {_role_gene_rel(domain, role_name)}：{len(graduates)} 条 GRADUATE / {len(drops)} 条 DROP")
         for p in graduates:
             print(f"      [GRADUATE] [{p['timestamp']}] {p['title']}")
         for p in drops:
@@ -173,6 +230,7 @@ def main() -> int:
         append_audit({
             "timestamp": utc_now(), "role": ROLE, "project": "*",
             "task": task, "result": "dry_run", "patch_count": total,
+            "domain": domain,
         })
         return 0
 
@@ -193,10 +251,11 @@ def main() -> int:
             for p in drops
         ) or "（无）"
 
+        role_gene_rel = _role_gene_rel(domain, role_name)
         user_prompt = (
-            f"# 工作目标\n本次晋升说明：{task}\n\n"
+            f"# 工作目标\n本次晋升说明（domain={domain}）：{task}\n\n"
             f"角色：**{role_name}**\n"
-            f"路径：`00-系统/角色基因/角色-{role_name}.md`\n"
+            f"路径：`{role_gene_rel}`\n"
             f"待执行 GRADUATE 标记（{len(graduates)} 条）：\n{graduate_summary}\n\n"
             f"待执行 DROP 标记（{len(drops)} 条）：\n{drop_summary}\n\n"
             f"---\n\n"
@@ -213,7 +272,7 @@ def main() -> int:
             f"   - frontmatter `skill_refs` 列表新增对应路径\n"
             f"   - 新建 skill 文件输出为额外 FILE 块（路径 `20-知识/角色技能/{role_name}/<patch_id>-<短标题>.md`），含 type: skill / role / patch_id 的 frontmatter + 核心约束 + 详细规则 + grep gate + 跨项目证据\n"
             f"6. 输出 FILE 块（角色笔记必填 + 可选多份 skill 文件）：\n\n"
-            f"<!-- FILE: 00-系统/角色基因/角色-{role_name}.md -->\n"
+            f"<!-- FILE: {role_gene_rel} -->\n"
             f"（整份重写后内容；超限时主体已收窄 + frontmatter `skill_refs` 已添加新路径）\n"
             f"<!-- /FILE -->\n\n"
             f"<!-- FILE: 20-知识/角色技能/{role_name}/<patch_id>-<短标题>.md -->\n"
@@ -236,7 +295,7 @@ def main() -> int:
             continue
 
         files = parse_claude_output_to_files(raw)
-        target = f"00-系统/角色基因/角色-{role_name}.md"
+        target = role_gene_rel
         if target not in files:
             # 兜底：尝试模糊匹配
             cand = [k for k in files if k.endswith(f"角色-{role_name}.md")]
@@ -305,6 +364,7 @@ def main() -> int:
     append_audit({
         "timestamp": utc_now(), "role": ROLE, "project": "*",
         "task": task, "result": "success" if written else "all_skipped",
+        "domain": domain,
         "outputs": written, "skipped": skipped,
         "patch_count": total,
     })

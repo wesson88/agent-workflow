@@ -62,7 +62,7 @@ def _load_task_skills(
 
     设计要点：
     - wikilink 路径：filter 按 `B<N>-` 命名规约（保持向后兼容）
-    - keyword 路径：扫 vault `20-知识/角色技能/后端工程师/` 下声明了
+    - keyword 路径：扫 vault `20-知识/角色技能/se/后端工程师/` 下声明了
       frontmatter.trigger 的 skill；trigger 缺失 = fail-closed 不加载
     - 去重：wikilink 已加载的 stem 不再 keyword 重复注入
     - upstream_text + project 用于扩大 keyword 匹配上下文与 file_patterns 扫码
@@ -105,7 +105,7 @@ def _load_task_skills(
         )
 
     # ── 2. keyword 触发器路径 ────────────────────────────────
-    role_dir = VAULT_ROOT / "20-知识" / "角色技能" / "后端工程师"
+    role_dir = VAULT_ROOT / "20-知识" / "角色技能" / "se" / "后端工程师"
     code_root: Path | None = None
     if project:
         try:

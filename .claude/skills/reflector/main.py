@@ -77,14 +77,66 @@ def _splice_dynamic(existing: str, new_full: str) -> tuple[str, str]:
 
 ROLE = "复盘者"
 
-# 工作角色：复盘者只补丁这些（不补丁自己）
-WORKER_ROLES = ("产品经理", "架构师", "技术主管", "后端工程师", "前端工程师")
+# 跨域配置（v2.0.0）：按 domain 提供工作角色清单 / 产物扫描清单 / 角色基因子目录段
+# adapter 文档作为 LLM 文本注入（C 方案），main.py 用此 dict 做代码层路径解析
+DOMAIN_CONFIGS: dict[str, dict] = {
+    "se": {
+        "worker_roles": ("产品经理", "架构师", "技术主管", "后端工程师", "前端工程师"),
+        "project_outputs_targets": ("PRD.md", "系统设计.md", "API契约.md"),
+        "project_outputs_glob": ("脑暴-*.md",),
+        "project_subdir": "指令",                # 扫 10-项目/{project}/指令/*.md
+        "project_root_subdir": "",               # 10-项目/{project}/，无 domain 中间层
+        "role_gene_dir_segment": "",             # 00-系统/角色基因/角色-{name}.md（无子目录，兼容历史）
+    },
+    "music": {
+        "worker_roles": (
+            "音乐总监", "制作人", "作词", "作曲",
+            "编曲", "和声编写", "混音师", "母带工程师",
+        ),
+        # 14 章节产物 schema + final/反馈分诊（修法 A）
+        "project_outputs_targets": (
+            "创作 vision.md", "制作计划.md", "词作.md", "曲作.md",
+            "Suno-prompt.md", "编曲方案.md", "编曲-Suno补丁.md",
+            "和声谱.md", "和声-Suno补丁.md",
+            "混音评估.md", "混音-Suno-retry补丁.md",
+            "母带规格.md", "母带-Suno-retry补丁.md",
+            "final-Suno-prompt.md", "反馈分诊.md",
+            "Suno-执行记录.md", "听众反馈.md",
+        ),
+        "project_outputs_glob": (),
+        "project_subdir": "指令",                # 扫 10-项目/music/{project}/指令/*.md
+        "project_root_subdir": "music",          # 10-项目/music/{project}/，含 domain 中间层
+        "role_gene_dir_segment": "music",        # 00-系统/角色基因/music/角色-{name}.md
+    },
+}
+
+
+def _resolve_domain(args, project: str | None) -> str:
+    """domain 解析：① --domain 显式指定 ② --project 路径推导（看 10-项目/{domain}/{project}/ 是否存在）③ fallback se。"""
+    explicit = (getattr(args, "domain", None) or "").strip()
+    if explicit:
+        return explicit
+    if project:
+        for d, cfg in DOMAIN_CONFIGS.items():
+            sub = cfg.get("project_root_subdir", "")
+            if sub and (VAULT_ROOT / "10-项目" / sub / project).is_dir():
+                return d
+    return "se"
+
+
+def _adapter_path(domain: str) -> Path:
+    """domain adapter 路径。复盘者主体 §6 工作流注入。"""
+    return VAULT_ROOT / "00-系统" / "规则" / domain / f"{ROLE}-视角.md"
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="复盘者：跨多次运行识别模式 + 下发角色补丁")
+    p = argparse.ArgumentParser(description="复盘者：跨多次运行识别模式 + 下发角色补丁（跨域 v2.0.0）")
     p.add_argument("--task", required=True, help="复盘焦点（必填）")
     p.add_argument("--project", default=None, help="仅复盘单个项目（缺省全部）")
+    p.add_argument(
+        "--domain", default=None,
+        help=f"域（{'/'.join(DOMAIN_CONFIGS.keys())}）；缺省按 --project 路径推导 / fallback se",
+    )
     p.add_argument(
         "--target", action="append", default=None,
         help="过滤复盘 + 下补丁的工作角色（可重复 / 逗号分隔 / 'all'）；与 --project 正交",
@@ -104,10 +156,23 @@ def _resolve_project(args) -> str | None:
     return val or None
 
 
-def _gather_project_outputs(project: str | None, days: int) -> list[Path]:
-    """按 mtime 过滤，收集项目产出的 markdown 文件。"""
+def _project_dir_for_domain(domain: str, project: str) -> Path:
+    """按 domain 算项目根目录路径。SE 域 = 10-项目/{project}/；music 域 = 10-项目/music/{project}/。"""
+    cfg = DOMAIN_CONFIGS.get(domain, DOMAIN_CONFIGS["se"])
+    sub = cfg.get("project_root_subdir", "")
+    if sub:
+        return VAULT_ROOT / "10-项目" / sub / project
+    return VAULT_ROOT / "10-项目" / project
+
+
+def _gather_project_outputs(project: str | None, days: int, domain: str) -> list[Path]:
+    """按 mtime 过滤，收集项目产出的 markdown 文件（按 domain 切扫描清单）。"""
+    cfg = DOMAIN_CONFIGS.get(domain, DOMAIN_CONFIGS["se"])
     cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
-    proj_root = VAULT_ROOT / "10-项目"
+
+    # 项目候选 — 按 domain root subdir 切
+    sub = cfg.get("project_root_subdir", "")
+    proj_root = VAULT_ROOT / "10-项目" / sub if sub else VAULT_ROOT / "10-项目"
     if not proj_root.is_dir():
         return []
 
@@ -117,7 +182,10 @@ def _gather_project_outputs(project: str | None, days: int) -> list[Path]:
         candidates = sorted(p for p in proj_root.iterdir() if p.is_dir())
 
     docs: list[Path] = []
-    targets = ("PRD.md", "系统设计.md", "API契约.md")
+    targets = cfg["project_outputs_targets"]
+    globs = cfg.get("project_outputs_glob", ())
+    subdir_name = cfg.get("project_subdir", "")
+
     for proj_dir in candidates:
         if not proj_dir.is_dir():
             continue
@@ -125,44 +193,46 @@ def _gather_project_outputs(project: str | None, days: int) -> list[Path]:
             f = proj_dir / fname
             if f.exists() and f.stat().st_mtime >= cutoff:
                 docs.append(f)
-        instr = proj_dir / "指令"
-        if instr.is_dir():
-            for f in sorted(instr.glob("*.md")):
+        if subdir_name:
+            instr = proj_dir / subdir_name
+            if instr.is_dir():
+                for f in sorted(instr.glob("*.md")):
+                    if f.stat().st_mtime >= cutoff:
+                        docs.append(f)
+        for pat in globs:
+            for f in sorted(proj_dir.glob(pat)):
                 if f.stat().st_mtime >= cutoff:
                     docs.append(f)
-        for f in sorted(proj_dir.glob("脑暴-*.md")):
-            if f.stat().st_mtime >= cutoff:
-                docs.append(f)
     return docs
 
 
-def _gather_worker_role_notes(scope_roles: tuple[str, ...] = WORKER_ROLES) -> list[Path]:
-    """工作角色当前 .md 全文（用于复盘者了解 DYNAMIC 当前内容）。
+def _role_gene_path(rgd: Path, domain: str, role: str) -> Path:
+    """按 domain 计算角色基因文件路径。SE 域无子目录；music 域含 music/ 子目录。"""
+    cfg = DOMAIN_CONFIGS.get(domain, DOMAIN_CONFIGS["se"])
+    seg = cfg.get("role_gene_dir_segment", "")
+    if seg:
+        return rgd / seg / f"角色-{role}.md"
+    return rgd / f"角色-{role}.md"
 
-    scope_roles 默认全 5 个；--target 过滤时由调用方传入子集。
-    """
+
+def _gather_worker_role_notes(scope_roles: tuple[str, ...], domain: str) -> list[Path]:
+    """工作角色当前 .md 全文（按 domain 路径解析）。"""
     rgd = role_genes_dir()
     out: list[Path] = []
     for role in scope_roles:
-        f = rgd / f"角色-{role}.md"
+        f = _role_gene_path(rgd, domain, role)
         if f.exists():
             out.append(f)
     return out
 
 
-def _gather_worker_skill_refs(scope_roles: tuple[str, ...] = WORKER_ROLES) -> list[Path]:
-    """工作角色 frontmatter 中 skill_refs 引用的 skill 文件（去重）。
-
-    复盘者闭环验证时需要看到主体外迁的完整规则——否则只读角色基因主体会
-    误以为某条 grep gate 已消失（实际是迁到 skill 文件了）。
-
-    scope_roles 默认全 5 个；--target 过滤时由调用方传入子集。
-    """
+def _gather_worker_skill_refs(scope_roles: tuple[str, ...], domain: str) -> list[Path]:
+    """工作角色 frontmatter 中 skill_refs 引用的 skill 文件（去重）。按 domain 路径解析。"""
     rgd = role_genes_dir()
     seen: set[Path] = set()
     out: list[Path] = []
     for role in scope_roles:
-        role_file = rgd / f"角色-{role}.md"
+        role_file = _role_gene_path(rgd, domain, role)
         if not role_file.exists():
             continue
         try:
@@ -208,8 +278,20 @@ def main() -> int:
     task = (args.task or "").strip()
     project = _resolve_project(args)
     days = max(1, int(args.days))
-    targets = parse_targets(args.target)   # None = 全 5 个 WORKER_ROLES
+    targets = parse_targets(args.target)
     date_stamp = _today_stamp()
+
+    # domain 解析 + adapter 加载（v2.0.0 跨域）
+    domain = _resolve_domain(args, project)
+    if domain not in DOMAIN_CONFIGS:
+        print(
+            f"[{ROLE}] 未知 domain={domain}，已知：{list(DOMAIN_CONFIGS.keys())}",
+            file=sys.stderr,
+        )
+        return 2
+    domain_cfg = DOMAIN_CONFIGS[domain]
+    WORKER_ROLES_DOMAIN = domain_cfg["worker_roles"]
+    adapter_path = _adapter_path(domain)
 
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
@@ -219,13 +301,13 @@ def main() -> int:
 
     # --target 过滤：缩小复盘 + 下补丁的角色范围；--project 仍独立控制素材项目
     scope_worker_roles = (
-        WORKER_ROLES if targets is None
-        else tuple(r for r in WORKER_ROLES if any(t in r for t in targets))
+        WORKER_ROLES_DOMAIN if targets is None
+        else tuple(r for r in WORKER_ROLES_DOMAIN if any(t in r for t in targets))
     )
     if not scope_worker_roles:
         print(
             f"[{ROLE}] --target={sorted(targets)} 不匹配任何工作角色 "
-            f"（{list(WORKER_ROLES)}），无可复盘。",
+            f"（{list(WORKER_ROLES_DOMAIN)}），无可复盘。",
             file=sys.stderr,
         )
         set_role_status(
@@ -236,13 +318,15 @@ def main() -> int:
         return 2
     if targets is not None:
         print(f"[{ROLE}] 🎯 target 过滤命中 {len(scope_worker_roles)} 个角色：{list(scope_worker_roles)}")
+    print(f"[{ROLE}] domain={domain} / worker_roles 全集={list(WORKER_ROLES_DOMAIN)}")
 
-    # 输入：项目产出 + 工作角色笔记 + 角色 skill_refs 外迁内容 + 最近 N 份复盘记录
-    project_docs = _gather_project_outputs(project, days)
-    role_notes = _gather_worker_role_notes(scope_worker_roles)
-    skill_refs = _gather_worker_skill_refs(scope_worker_roles)
+    # 输入：adapter + 项目产出 + 工作角色笔记 + 角色 skill_refs 外迁内容 + 最近 N 份复盘记录
+    adapter_inputs = [adapter_path] if adapter_path.exists() else []
+    project_docs = _gather_project_outputs(project, days, domain)
+    role_notes = _gather_worker_role_notes(scope_worker_roles, domain)
+    skill_refs = _gather_worker_skill_refs(scope_worker_roles, domain)
     recent_reflections = _gather_recent_reflections(limit=5)
-    inputs = project_docs + role_notes + skill_refs + recent_reflections
+    inputs = adapter_inputs + project_docs + role_notes + skill_refs + recent_reflections
 
     if not project_docs:
         scope = f"项目 {project}" if project else "所有项目"
@@ -263,22 +347,30 @@ def main() -> int:
         return 2
 
     print(
-        f"[{ROLE}] 复盘范围：{'单项目=' + project if project else '所有项目'} / "
-        f"窗口={days}d / 项目文档={len(project_docs)} 份 / 角色笔记={len(role_notes)} 份 / "
+        f"[{ROLE}] 复盘范围：domain={domain} / "
+        f"{'单项目=' + project if project else '所有项目'} / "
+        f"窗口={days}d / adapter={'✅' if adapter_inputs else '❌ fallback 主体骨架'} / "
+        f"项目文档={len(project_docs)} 份 / 角色笔记={len(role_notes)} 份 / "
         f"skill_refs={len(skill_refs)} 份 / 历史复盘={len(recent_reflections)} 份",
         flush=True,
     )
 
-    # system prompt：复盘者角色基因（含 DYNAMIC 注入机制，但复盘者自身 DYNAMIC 为空）
+    # system prompt：复盘者角色基因
     system_prompt = build_system_prompt(ROLE, project=project)
 
     # user prompt
     context = read_input_files(inputs)
 
-    # 必须产出的文件清单（用于约束模型）
+    # 必须产出的文件清单：按 domain 计算角色基因子目录段
     reflection_path = f"00-系统/复盘记录/{date_stamp}.md"
+    role_dir_seg = domain_cfg.get("role_gene_dir_segment", "")
+    role_dir_prefix = (
+        f"00-系统/角色基因/{role_dir_seg}/角色-"
+        if role_dir_seg
+        else "00-系统/角色基因/角色-"
+    )
     role_paths_hint = "\n".join(
-        f"  - `00-系统/角色基因/角色-{name}.md`"
+        f"  - `{role_dir_prefix}{name}.md`"
         f"（仅在你识别出该角色有反复模式需要补丁时输出；最多 3 份）"
         for name in scope_worker_roles
     )
@@ -286,43 +378,50 @@ def main() -> int:
     user_prompt = (
         f"# 复盘焦点（来自 --task）\n{task}\n\n"
         f"# 复盘范围\n"
+        f"- **域（domain）**：{domain}（按 [[复盘者-视角]] adapter 行为；若 adapter 缺失则 fallback 主体骨架）\n"
         f"- 项目：{project or '所有项目'}\n"
         f"- 时间窗口：最近 {days} 天\n"
-        f"- 共扫描 {len(project_docs)} 份项目产出 + {len(role_notes)} 份角色笔记 "
-        f"+ {len(skill_refs)} 份 skill_refs 外迁文件 + {len(recent_reflections)} 份历史复盘记录\n\n"
+        f"- 共扫描 {len(adapter_inputs)} 份 adapter + {len(project_docs)} 份项目产出 + "
+        f"{len(role_notes)} 份角色笔记 + {len(skill_refs)} 份 skill_refs 外迁文件 + "
+        f"{len(recent_reflections)} 份历史复盘记录\n\n"
+        f"# 关于 domain adapter\n"
+        f"输入第 1 份（若存在）是 `00-系统/规则/{domain}/复盘者-视角.md` adapter，"
+        f"它定义了**本域的**：① 工作角色清单 + 补丁数量上限 ② 项目产出扫描清单 + 路径 ③ 输出角色基因路径模板 "
+        f"④ 补丁命名前缀（如 SE 用 B/F，music 用 D/P/L/C/A/H/M/MS）⑤ 域专属示例。"
+        f"**所有补丁必须遵循 adapter §4 命名前缀**，证据引用必须用 adapter §2 的产物清单（不要引用其他域的产物名）。\n\n"
         f"# 关于 skill_refs 外迁文件\n"
         f"工作角色 frontmatter 中 `skill_refs` 引用的文件位于 `20-知识/角色技能/{{角色}}/` 子树。"
-        f"它们是角色基因主体外迁的详细规则（grep gate / 反例 / 跨项目证据）。**判断补丁是否再现 / 是否已被主体覆盖时，"
-        f"必须同时查阅角色基因 + 对应的 skill_refs 内容**——否则会误以为某条 grep gate 已消失（实际是迁到 skill 文件了）。\n\n"
+        f"它们是角色基因主体外迁的详细规则。**判断补丁是否再现 / 是否已被主体覆盖时，"
+        f"必须同时查阅角色基因 + 对应的 skill_refs 内容**。\n\n"
         f"# 输入文件全文\n\n{context}\n\n---\n\n"
         f"# 你的任务（必须严格按以下顺序）\n\n"
         f"## Step 1：闭环验证（先做，不可跳过）\n\n"
-        f"按角色基因 §3.2 工作流，对每个工作角色当前 DYNAMIC 区域里**已存在**的补丁"
-        f"（即输入里 `角色-*.md` 的 `<!-- DYNAMIC_START -->` 到 `<!-- DYNAMIC_END -->` 之间的内容）"
-        f"做命中分析：\n\n"
+        f"按角色基因 §3.3 工作流，对每个工作角色当前 DYNAMIC 区域里**已存在**的补丁做命中分析：\n\n"
         f"- 解析每条补丁的目标失败模式\n"
-        f"- 在本轮项目产出（PRD / 系统设计 / 指令 / 脑暴 / 已生成代码若有）里搜证：是否再现？\n"
+        f"- 在本轮项目产出里搜证（产物清单见 adapter §2）：是否再现？\n"
         f"- 决定生命周期调整：保留原标记 / 升 `[GRADUATE?]` / 降 `[DROP?]`\n"
         f"- **每次调整都要在补丁尾加证据行** `- 闭环验证 [<本轮日期>]: <命中证据 / 跨项目验证情况>`\n"
         f"- 判定保守：拿不准就 `[KEEP]`；`[GRADUATE?]` 必须满足跨 ≥ 2 个项目验证 + 主体未含等价规则\n\n"
         f"在主报告 `## 2.5 闭环验证：上轮补丁命中分析` 章节逐条记录证据。\n\n"
         f"## Step 2：识别本轮新模式\n\n"
         f"基于本轮项目产出 + 历史复盘记录，识别**多次出现**的失败模式或成功套路，"
-        f"为每个新模式准备一条 `[NEW]` 补丁。\n\n"
+        f"为每个新模式准备一条 `[NEW]` 补丁。补丁命名遵循 adapter §4 域专属前缀。\n\n"
         f"## Step 3：产出文件\n\n"
-        f"按角色基因 §4 产出 `{reflection_path}`。**最多**对 3 个工作角色的笔记下发补丁。"
-        f"角色笔记必须**整份重写**（完整 frontmatter + 1-7 节正文 + DYNAMIC 区域），"
+        f"按角色基因 §4 产出 `{reflection_path}`（frontmatter 含 `domain: {domain}`）。"
+        f"**最多**对 3 个工作角色的笔记下发补丁。"
+        f"角色笔记必须**整份重写**（完整 frontmatter + 正文 1-N 节 + DYNAMIC 区域），"
         f"**只**修改 `<!-- DYNAMIC_START -->` 到 `<!-- DYNAMIC_END -->` 之间的内容。\n\n"
         f"DYNAMIC 区域 = Step 1 调整后的旧补丁（带新证据行）+ Step 2 新增 `[NEW]` 补丁。\n\n"
-        f"5 个可补丁的工作角色：\n{role_paths_hint}\n\n"
-        f"复盘者本身（`角色-复盘者.md`）**禁止**修改（元角色避免反身循环）。\n\n"
+        f"本域 {len(scope_worker_roles)} 个可补丁的工作角色：\n{role_paths_hint}\n\n"
+        f"复盘者本身（`角色-复盘者.md`）**禁止**修改（元角色避免反身循环）。"
+        f"**不跨域下补丁** —— 当前 domain={domain}，禁止写其他域角色的路径。\n\n"
         f"---\n\n"
         f"**输出格式（强制）**\n\n"
         f"必须输出 1 个 FILE 块（复盘记录主报告）+ 0-3 个 FILE 块（角色补丁）：\n\n"
         f"<!-- FILE: {reflection_path} -->\n"
         f"（复盘记录正文，含 §2.5 闭环验证）\n"
         f"<!-- /FILE -->\n\n"
-        f"<!-- FILE: 00-系统/角色基因/角色-<某角色>.md -->\n"
+        f"<!-- FILE: {role_dir_prefix}<某角色>.md -->\n"
         f"（整份角色笔记，DYNAMIC 区域填入新补丁）\n"
         f"<!-- /FILE -->\n\n"
         f"如果当前没有任何重复模式值得下补丁，不要勉强：只输出复盘记录即可。"
@@ -357,6 +456,20 @@ def main() -> int:
     else:
         written = []
         patched_roles = []
+        # 跨域路径前缀（v2.0.0）：SE = "00-系统/角色基因/角色-"，music = "00-系统/角色基因/music/角色-"
+        role_patch_prefixes = tuple(
+            (f"00-系统/角色基因/{cfg['role_gene_dir_segment']}/角色-"
+             if cfg.get("role_gene_dir_segment")
+             else "00-系统/角色基因/角色-")
+            for cfg in DOMAIN_CONFIGS.values()
+        )
+
+        def _is_role_patch(p: str) -> bool:
+            return any(p.startswith(pfx) for pfx in role_patch_prefixes)
+
+        def _extract_role_name(p: str) -> str:
+            return p.split("角色-", 1)[1].rsplit(".md", 1)[0]
+
         for rel_path, content in output_files.items():
             # 安全防线 1：不允许复盘者修改自己
             if rel_path.endswith("角色-复盘者.md"):
@@ -365,9 +478,17 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
-            # 安全防线 2：--target 过滤时拒写 scope 之外的角色补丁
-            if rel_path.startswith("00-系统/角色基因/角色-"):
-                role_in_path = rel_path.split("角色-", 1)[1].rsplit(".md", 1)[0]
+            # 安全防线 2：--target 过滤时拒写 scope 之外 + 不跨域下补丁
+            if _is_role_patch(rel_path):
+                role_in_path = _extract_role_name(rel_path)
+                # 必须匹配当前 domain 的路径前缀（不跨域）
+                if not rel_path.startswith(role_dir_prefix):
+                    print(
+                        f"[{ROLE}] ⚠️  拒绝跨域补丁：{rel_path} 不在 domain={domain} "
+                        f"路径前缀 `{role_dir_prefix}` 下",
+                        file=sys.stderr,
+                    )
+                    continue
                 if role_in_path not in scope_worker_roles:
                     print(
                         f"[{ROLE}] ⚠️  拒绝越界补丁：{role_in_path} 不在 "
@@ -378,7 +499,7 @@ def main() -> int:
             dest = resolve_path(rel_path, project or "default")
 
             # 硬护栏：写入角色笔记时，仅替换 DYNAMIC 区域，non-DYNAMIC 部分保留原文件字节
-            is_role_patch = rel_path.startswith("00-系统/角色基因/角色-")
+            is_role_patch = _is_role_patch(rel_path)
             if is_role_patch and dest.exists():
                 existing = dest.read_text(encoding="utf-8")
                 spliced, splice_note = _splice_dynamic(existing, content)
@@ -389,7 +510,7 @@ def main() -> int:
             print(f"[{ROLE}] 写入: {dest}")
             written.append(rel_path)
             if is_role_patch:
-                role_name = rel_path.split("角色-", 1)[1].rsplit(".md", 1)[0]
+                role_name = _extract_role_name(rel_path)
                 patched_roles.append(role_name)
 
     set_role_status(ROLE, status="success", reset_counters=True)
@@ -397,6 +518,8 @@ def main() -> int:
     append_audit({
         "timestamp": utc_now(), "role": ROLE, "project": project or "*",
         "task": task, "result": "success",
+        "domain": domain,
+        "adapter_loaded": bool(adapter_inputs),
         "outputs": written,
         "patched_roles": patched_roles,
         "days_window": days,

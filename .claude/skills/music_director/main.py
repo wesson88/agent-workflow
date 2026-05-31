@@ -36,7 +36,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
-    load_rule_block,
+    load_rule_block, load_genre_skill_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -132,6 +132,11 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
     if rule_block:
         context = context + "\n\n" + rule_block
 
+    skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
+    print(f"[{ROLE}] skill_trigger：{skill_hint}")
+    if skill_block:
+        context = context + "\n\n" + skill_block
+
     user_prompt = (
         f"项目名：`{project}`（写文件时把路径里的 `{{project}}` 占位符替换为本值）\n\n"
         f"{context}\n\n---\n"
@@ -140,7 +145,12 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
         "1. `创作 vision.md` — 流派统一意图 / 情感主轴 / 风格锚域 / 跨角色契约要点\n"
         "2. `指令/给制作人.md` — 总监对制作人的明确交底（项目统筹边界 / 流派配比 / "
         "质量节点 / probational 角色 promote 或 dormant 决策）\n\n"
-        "两份产物均按角色基因 §10 输出契约 + 产物schema §1/§2 章节要求落盘。"
+        "两份产物均按角色基因 §10 输出契约 + 产物schema §1/§2 章节要求落盘。\n\n"
+        "**Skill wikilink 显式约束（B1 按需加载机制）**：在 `创作 vision.md` 和 `指令/给制作人.md` "
+        "里，若你需要某 skill 文档传达统一意图（例如 `[[D1-R&B-三条工程铁律与鉴别法]]`、"
+        "`[[Ar6-R&B-Fusion配比]]`），请显式写出 wikilink（格式 `[[X<编号>-<流派>-<标题>]]`）。"
+        "下游制作人扇出指令时会进一步在 `给{下游}.md` 里挑选对应该下游目录的 skill wikilink。"
+        "未写时退化到流派 keyword 触发整套 skill 兜底。可参考 [[F-{流派}]] §8 的 skill 索引按需挑选。"
         f"{render_required_outputs(output_rels)}"
     )
 
@@ -173,6 +183,11 @@ def _run_aggregation(
     print(f"[{ROLE}] rule_refs 注入（汇编模式）：{source_hint}")
     if rule_block:
         context = context + "\n\n" + rule_block
+
+    skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
+    print(f"[{ROLE}] skill_trigger（汇编模式）：{skill_hint}")
+    if skill_block:
+        context = context + "\n\n" + skill_block
 
     fb_section = ""
     if has_feedback:

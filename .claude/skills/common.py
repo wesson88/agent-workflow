@@ -295,6 +295,137 @@ def load_rule_block(rule_refs: tuple[str, ...] | list[str]) -> tuple[str, str]:
     return block, f"按章节注入 {hit}/{len(refs)} 段，共 {result.total_chars} char"
 
 
+# ── 流派 skill 双路径加载（wikilink 显式 ∪ keyword 触发；music 域 8 角色共用）─
+# music skill 命名格式：`{前缀}-{流派}-{标题}`，前缀 R/M/Ma/V/Ar/C/L/Pr/D 之一，
+# 流派只识别 R&B / 民谣 / 雷鬼。filter 在 wl.target 上匹配，target 已剥离 [[]] 和
+# #section / |alias，target 含目录前缀时 `/` 也要匹配。
+import re as _re
+_MUSIC_SKILL_RE = _re.compile(
+    r"(?:^|/)(R|M|Ma|V|Ar|C|L|Pr|D)\d+-(?:R&B|R%26B|民谣|雷鬼)-",
+)
+
+
+def load_genre_skill_block(
+    role_name: str,
+    task_text: str,
+    upstream_text: str = "",
+    domain: str = "music",
+) -> tuple[str, str]:
+    """双路径加载：wikilink 显式 ∪ keyword 触发，按 stem 去重 union。
+
+    vault 路径：`20-知识/角色技能/{domain}/{role_name}/`
+    （music 域常见 role_name：编曲 / 混音师 / 母带工程师 / 制作人 / 音乐总监 /
+     和声编写 / 作曲 / 作词 / 录音师）
+
+    路径 1（wikilink 显式）：扫 task_text + upstream_text 里所有形如
+    `[[Ar3-R&B-16分切分与Laid-back]]` 的 music skill wikilink，按命名正则过滤后
+    用 engine.expand_wikilinks 加载全文（截 `## 核心约束` 段）。**只保留 path 在
+    role_dir 下的命中**——跨角色目录的 skill 不在本角色加载。
+
+    路径 2（keyword 兜底）：discover_role_skills 按 frontmatter.trigger 命中。
+
+    去重：路径 1 已加载的 stem 不再 keyword 重复注入。
+
+    返回 (skill_block, source_hint)：
+    - skill_block 形如 `## 引用 / 自动触发技能 ...`，可直接拼到 user_prompt context
+    - source_hint 日志一句话，含 wikilink / keyword 各自命中数
+
+    目录不存在 / 双路径均空 → ("", 原因)，调用方负责跳过。
+    """
+    from engine import (
+        VAULT_ROOT, discover_role_skills, render_triggered_block,
+        expand_wikilinks, extract_core_section,
+    )
+    from engine.obsidian_io import split_frontmatter
+
+    role_dir = VAULT_ROOT / "20-知识" / "角色技能" / domain / role_name
+    if not role_dir.is_dir():
+        return "", f"skill 目录不存在：{role_dir}"
+
+    # ── 1. wikilink 显式路径 ──────────────────────────────────────────────
+    wikilink_parts: list[str] = []
+    wikilink_loaded: list[str] = []
+    wikilink_unresolved: list[str] = []
+    haystack = (task_text or "") + "\n" + (upstream_text or "")
+    if haystack.strip():
+        try:
+            result = expand_wikilinks(
+                haystack,
+                filter=lambda wl: bool(_MUSIC_SKILL_RE.search(wl.target)),
+                max_chars_per_link=3000,
+                total_char_budget=12_000,
+                max_depth=0,
+                on_unresolved="warn",
+            )
+            for e in result.expansions:
+                if e.reason != "ok" or not e.content or not e.path:
+                    continue
+                # 只保留当前角色目录下的 skill（跨目录拒载）
+                try:
+                    if e.path.parent != role_dir:
+                        continue
+                except Exception:
+                    continue
+                # 取核心约束段；e.content 是全文，需要二次抽取
+                raw = e.path.read_text(encoding="utf-8")
+                _, body = split_frontmatter(raw)
+                core = extract_core_section(body).strip()
+                if len(core) > 3000:
+                    core = core[:3000] + (
+                        f"\n\n…（截断：原文 {len(core)} 字符，本次取前 3000）"
+                    )
+                wikilink_parts.append(
+                    f"=== Skill (wikilink:[[{e.wikilink.target}]]) ===\n{core}"
+                )
+                wikilink_loaded.append(e.path.stem)
+            wikilink_unresolved = list(result.unresolved)
+        except Exception as exc:
+            print(
+                f"[load_genre_skill_block:{role_name}] ⚠️ wikilink 展开失败 "
+                f"（{type(exc).__name__}: {exc}），仅走 keyword 路径。",
+                file=sys.stderr,
+            )
+
+    # ── 2. keyword 触发路径（兜底）────────────────────────────────────────
+    hits = discover_role_skills(role_dir, task_text, upstream_text)
+    dedup_hits = [(p, r) for p, r in hits if p.stem not in set(wikilink_loaded)]
+    keyword_block, keyword_loaded = render_triggered_block(dedup_hits)
+    # 去掉 keyword_block 的顶部小标题（待合并下重写）
+    keyword_body = ""
+    if keyword_block:
+        # render_triggered_block 输出形如 "\n\n## 自动触发技能...\n\n<parts>\n"
+        # 截到第一个 "==" 开头之前丢掉小标题
+        idx = keyword_block.find("=== Skill")
+        keyword_body = keyword_block[idx:].rstrip() if idx >= 0 else keyword_block.strip()
+
+    # ── 3. 合并 ──────────────────────────────────────────────────────────
+    if not wikilink_parts and not keyword_body:
+        hint = "双路径均空"
+        if wikilink_unresolved:
+            hint += f"（wikilink unresolved={wikilink_unresolved}）"
+        return "", hint
+
+    sections: list[str] = []
+    if wikilink_parts:
+        sections.append("\n\n".join(wikilink_parts))
+    if keyword_body:
+        sections.append(keyword_body)
+
+    block = (
+        "\n\n## 引用 / 自动触发技能（wikilink ∪ keyword）\n\n"
+        + "\n\n".join(sections)
+        + "\n"
+    )
+    hint_parts = [
+        f"wikilink={len(wikilink_loaded)}",
+        f"keyword={len(keyword_loaded)}",
+        f"union={len(wikilink_loaded) + len(keyword_loaded)}",
+    ]
+    if wikilink_unresolved:
+        hint_parts.append(f"unresolved={len(wikilink_unresolved)}")
+    return block, " / ".join(hint_parts)
+
+
 # ── 输入文件批量读取 ──────────────────────────────────────────────────────────────
 def _extract_sections(content: str, sections: list[str]) -> str:
     """从 Markdown 文档中只提取指定章节（## 标题匹配）。

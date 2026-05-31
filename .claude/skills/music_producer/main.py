@@ -25,7 +25,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
-    load_rule_block,
+    load_rule_block, load_genre_skill_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -92,6 +92,11 @@ def main() -> int:
     if rule_block:
         context = context + "\n\n" + rule_block
 
+    skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
+    print(f"[{ROLE}] skill_trigger：{skill_hint}")
+    if skill_block:
+        context = context + "\n\n" + skill_block
+
     fanout_list = "\n".join(f"  - 给 {r}" for r in downstream)
     user_prompt = (
         f"项目名：`{project}`（写文件时把路径里的 `{{project}}` 占位符替换为本值）\n\n"
@@ -103,7 +108,14 @@ def main() -> int:
         f"2. **扇出 {len(downstream)} 份指令** — 每个下游一份独立 FILE 块（缺一不可）：\n"
         f"{fanout_list}\n\n"
         "**重要**：每份指令的具体内容要按对应下游角色的职责定制化，不要复制粘贴。"
-        "如某个 probational 角色本项目 dormant，仍要产出一份 dormant 说明，不留空。"
+        "如某个 probational 角色本项目 dormant，仍要产出一份 dormant 说明，不留空。\n\n"
+        "**Skill wikilink 显式约束（B1 按需加载机制）**：每份 `指令/给{角色}.md` 里，"
+        "若你判断本任务需要该下游参考特定 skill（例如 R&B 作曲必读 [[C2-R&B-三全音代换]]"
+        " + [[C3-R&B-经典进行2-5-1-4]]），请在该指令文档里**显式写出对应 skill 的 wikilink**"
+        "（格式 `[[X<编号>-<流派>-<标题>]]`，必须落在该下游角色目录下，不可跨角色目录引用）。"
+        "下游 main.py 会自动展开 wikilink 加载全文到 prompt context；未写时退化到流派"
+        " keyword 触发整套 skill 兜底。给指令文档里写明的 skill 越精准，下游 LLM input token"
+        "越省、知识越聚焦。可参考 [[F-{流派}]] §8 的 skill 索引按需挑选。"
         f"{render_required_outputs(output_rels)}"
     )
 
