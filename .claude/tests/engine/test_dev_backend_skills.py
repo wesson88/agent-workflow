@@ -47,7 +47,7 @@ def test_no_wikilink_returns_empty(tmp_vault: Path):
 
 def test_single_backend_skill_stem(tmp_vault: Path):
     _write(
-        tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md",
+        tmp_vault / "20-知识/角色技能/se/后端工程师/B5-空集守卫.md",
         "# B5 空集守卫\n查询无结果时返回空数组而非 None。",
     )
     block, loaded, unresolved = dev_backend_main._load_task_skills(
@@ -60,8 +60,8 @@ def test_single_backend_skill_stem(tmp_vault: Path):
 
 
 def test_multiple_backend_skills(tmp_vault: Path):
-    _write(tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md", "B5 内容")
-    _write(tmp_vault / "20-知识/角色技能/后端工程师/B7-FastAPI共享资源async.md", "B7 内容")
+    _write(tmp_vault / "20-知识/角色技能/se/后端工程师/B5-空集守卫.md", "B5 内容")
+    _write(tmp_vault / "20-知识/角色技能/se/后端工程师/B7-FastAPI共享资源async.md", "B7 内容")
     block, loaded, _ = dev_backend_main._load_task_skills(
         "本任务用到 [[B5-空集守卫]] 和 [[B7-FastAPI共享资源async]]。"
     )
@@ -72,22 +72,22 @@ def test_multiple_backend_skills(tmp_vault: Path):
 
 def test_full_path_wikilink(tmp_vault: Path):
     _write(
-        tmp_vault / "20-知识/角色技能/后端工程师/B6-静态资源路径锚定.md",
+        tmp_vault / "20-知识/角色技能/se/后端工程师/B6-静态资源路径锚定.md",
         "B6 内容",
     )
     block, loaded, _ = dev_backend_main._load_task_skills(
-        "见 [[20-知识/角色技能/后端工程师/B6-静态资源路径锚定]]。"
+        "见 [[20-知识/角色技能/se/后端工程师/B6-静态资源路径锚定]]。"
     )
-    assert loaded == ["20-知识/角色技能/后端工程师/B6-静态资源路径锚定"]
+    assert loaded == ["20-知识/角色技能/se/后端工程师/B6-静态资源路径锚定"]
     assert "B6 内容" in block
 
 
 def test_other_role_skills_filter_skipped(tmp_vault: Path):
     """A?-/F?-/TL?- 不应被 backend 展开。"""
-    _write(tmp_vault / "20-知识/角色技能/架构师/A2-失败模式.md", "A2 内容")
-    _write(tmp_vault / "20-知识/角色技能/前端工程师/F1-fetch响应检查.md", "F1 内容")
-    _write(tmp_vault / "20-知识/角色技能/技术主管/TL1-任务完整性.md", "TL1 内容")
-    _write(tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md", "B5 内容")
+    _write(tmp_vault / "20-知识/角色技能/se/架构师/A2-失败模式.md", "A2 内容")
+    _write(tmp_vault / "20-知识/角色技能/se/前端工程师/F1-fetch响应检查.md", "F1 内容")
+    _write(tmp_vault / "20-知识/角色技能/se/技术主管/TL1-任务完整性.md", "TL1 内容")
+    _write(tmp_vault / "20-知识/角色技能/se/后端工程师/B5-空集守卫.md", "B5 内容")
 
     block, loaded, _ = dev_backend_main._load_task_skills(
         "用 [[B5-空集守卫]] 和 [[A2-失败模式]] 和 [[F1-fetch响应检查]] 和 [[TL1-任务完整性]]"
@@ -113,7 +113,7 @@ def test_unresolved_backend_skill_warns_not_raises(tmp_vault: Path, capsys):
 
 def test_duplicate_stem_does_not_crash_task(tmp_vault: Path, capsys):
     """命名规则被破坏（重名）时不应阻断 task，应打 warn 后返回空块。"""
-    _write(tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md", "原版")
+    _write(tmp_vault / "20-知识/角色技能/se/后端工程师/B5-空集守卫.md", "原版")
     _write(tmp_vault / "99-备份/B5-空集守卫.md", "重名备份")  # 99-临时 不被排除，但 99-备份 在 stem 索引内 → 重名
     # 实际：99-备份/ 没在排除列表，会进 stem 索引
     block, loaded, unresolved = dev_backend_main._load_task_skills(
@@ -145,7 +145,7 @@ def _skill_with_trigger(*, trigger: dict, body: str = "## 核心约束\n约束�
 def test_keyword_trigger_loads_when_task_has_keyword(tmp_vault: Path):
     """task_text 含 keyword 时 skill 自动触发（无需 task 写 wikilink）。"""
     _write(
-        tmp_vault / "20-知识/角色技能/后端工程师/B6-静态资源路径锚定.md",
+        tmp_vault / "20-知识/角色技能/se/后端工程师/B6-静态资源路径锚定.md",
         _skill_with_trigger(
             trigger={"keywords": ["StaticFiles"]},
             body="## 核心约束\n用 resolve_path 锚定静态目录。\n",
@@ -162,7 +162,7 @@ def test_keyword_trigger_loads_when_task_has_keyword(tmp_vault: Path):
 def test_keyword_trigger_always_true_loads_for_any_task(tmp_vault: Path):
     """always=true 的 skill（如 B5 空集守卫）对任意 task 都注入。"""
     _write(
-        tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md",
+        tmp_vault / "20-知识/角色技能/se/后端工程师/B5-空集守卫.md",
         _skill_with_trigger(
             trigger={"always": True},
             body="## 核心约束\nfetchone 必须先判 None。\n",
@@ -179,7 +179,7 @@ def test_keyword_trigger_always_true_loads_for_any_task(tmp_vault: Path):
 def test_wikilink_and_keyword_dedup(tmp_vault: Path):
     """wikilink 显式 + keyword 隐式命中同一 skill 时只注入一次。"""
     _write(
-        tmp_vault / "20-知识/角色技能/后端工程师/B5-空集守卫.md",
+        tmp_vault / "20-知识/角色技能/se/后端工程师/B5-空集守卫.md",
         _skill_with_trigger(
             trigger={"always": True},
             body="## 核心约束\nfetchone 必须先判 None。\n",
@@ -197,7 +197,7 @@ def test_wikilink_and_keyword_dedup(tmp_vault: Path):
 def test_skill_without_trigger_not_auto_loaded(tmp_vault: Path):
     """trigger 字段缺失的 skill 不会被 keyword 路径自动加载（fail-closed）。"""
     _write(
-        tmp_vault / "20-知识/角色技能/后端工程师/B_legacy.md",
+        tmp_vault / "20-知识/角色技能/se/后端工程师/B_legacy.md",
         "---\ntype: skill\nrole: 后端工程师\n---\n\n## 核心约束\n旧 skill 无 trigger\n",
     )
     block, loaded, _ = dev_backend_main._load_task_skills(
@@ -211,7 +211,7 @@ def test_skill_without_trigger_not_auto_loaded(tmp_vault: Path):
 def test_keyword_trigger_with_upstream_text(tmp_vault: Path):
     """keyword 也匹配 upstream_text（如已读的技术栈 / PRD 内容）。"""
     _write(
-        tmp_vault / "20-知识/角色技能/后端工程师/B7-FastAPI共享资源async.md",
+        tmp_vault / "20-知识/角色技能/se/后端工程师/B7-FastAPI共享资源async.md",
         _skill_with_trigger(
             trigger={"keywords": ["FastAPI"]},
             body="## 核心约束\nasync def 中禁止裸 import requests。\n",
