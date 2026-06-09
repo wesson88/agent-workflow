@@ -28,6 +28,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
+    load_rule_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -35,6 +36,7 @@ from engine import (
     VAULT_ROOT,
     expand_wikilinks, invalidate_wikilink_cache,
     discover_role_skills, render_triggered_block,
+    load_role,
 )
 from engine.config import project_code_root as _project_code_root
 
@@ -230,6 +232,13 @@ def main() -> int:
     # 批处理多 task 前刷新 wikilink stem 索引（vault 可能被 git pull 更新）
     invalidate_wikilink_cache()
 
+    # §3.1 rule_refs 章节级注入：F-后端#6 工程参考 skill 索引（一次性加载，跨 task 复用）。
+    # frontmatter 声明了 rule_refs 但 main.py 不消费 = "声明已写、实施未补" 反模式。
+    # 音乐域 commit 77d1244 已修同类问题；SE 域本次补齐 TL/后端/前端。
+    role_def = load_role(ROLE)
+    rule_block, source_hint = load_rule_block(role_def.rule_refs)
+    print(f"[{ROLE}] rule_refs 注入：{source_hint}")
+
     for task_file in task_files:
         task_label = task_file.stem  # 如 "给后端-T02"
 
@@ -243,6 +252,8 @@ def main() -> int:
 
         # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
         context = read_input_files([task_file, tech_stack])
+        if rule_block:
+            context = context + "\n\n" + rule_block
 
         # 按 task 正文里的 wikilink + skill frontmatter trigger 关键词双路径注入 skill
         # （仅 backend skill `B<N>-...`）。双路径都空时 skill_block="" 不注入兜底集。

@@ -27,7 +27,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
-    enforce_output_limits,
+    enforce_output_limits, load_rule_block,
 )
 from prompt_builder import build_system_prompt_no_skills, build_task_skill_block
 from engine import (
@@ -48,6 +48,20 @@ _ROUND_HEADING_RE = re.compile(r"^### 第\s*(\d+)\s*轮\b", re.MULTILINE)
 
 # 末轮决议合计上限（多份脑暴拼接后的总体积，防止极端情况打爆 prompt）
 _DISCUSSION_LAST_ROUND_MAX_CHARS = 30 * 1024
+
+# §3.2 章节级输入：TL 派活只需系统设计中「模块结构 / 接口契约 / 错误处理 / 任务约束 / 技术映射」。
+# 跨项目章节命名差异大（3 样本观测：pain-radar / mini-ledger / _quiz-game + 2026-06-09 重跑），
+# 用关键词 any-match 兜底；全部未命中时 _extract_sections 回退全文 + warning，兼容历史项目。
+# 单文件均值 ~14-18KB → 章节裁剪后 ~5-9KB，单次省 ~3-5K input tokens。
+_SYS_DESIGN_SECTIONS_FOR_TL = [
+    "模块划分", "服务边界", "业务域", "业务领域",     # 模块结构（业务域 / 领域驱动两种说法）
+    "前后端模块", "模块依赖", "目录布局",            # 模块边界 / 目录约定
+    "数据流", "数据模型",                            # 数据契约
+    "API 契约", "API契约", "接口", "外部依赖",       # 接口契约（含外部依赖与契约）
+    "错误处理", "韧性", "失败模式", "降级",          # 错误处理（多命名变体）
+    "任务粒度", "交付下游", "关键约束",              # 任务约束
+    "技术栈映射", "技术栈",                          # 技术约束
+]
 
 
 def _extract_last_round_text(content: str) -> str | None:
@@ -716,8 +730,20 @@ def main() -> int:
     # Phase 4c-3 + 2026-05-16 token 优化：脑暴笔记只读末轮裁决段，
     # 前几轮 critic/PM/前端发言对 TL 派活无价值，剥除节约 ~5K tokens。
     discussion_logs = sorted((proj_dir).glob("脑暴-*.md")) if proj_dir.is_dir() else []
-    inputs = [to_lead, sys_design, tech_stack]
+    # §3.2 章节级输入：系统设计走 sections 裁剪（关键词清单见 _SYS_DESIGN_SECTIONS_FOR_TL）。
+    # to_lead 是架构师专门写给 TL 的精简版、tech_stack 是全局规则，不做章节裁剪。
+    sys_design_entry = {"path": sys_design, "sections": _SYS_DESIGN_SECTIONS_FOR_TL}
+    inputs = [to_lead, sys_design_entry, tech_stack]
     context = read_input_files(inputs)
+
+    # §3.1 rule_refs 章节级注入：frontmatter rule_refs 声明的 F-* 索引段（TL 派活
+    # 需看到下游后端/前端可用 skill 清单）。音乐域 commit 77d1244 同思路；架构师
+    # 仍用本地 _load_rule_block（实战 5+ 项目，保稳定不切换）。
+    role_def = load_role(ROLE)
+    rule_block, source_hint = load_rule_block(role_def.rule_refs)
+    print(f"[{ROLE}] rule_refs 注入：{source_hint}")
+    if rule_block:
+        context = context + "\n\n" + rule_block
 
     discussion_hint = ""
     discussion_parts: list[str] = []

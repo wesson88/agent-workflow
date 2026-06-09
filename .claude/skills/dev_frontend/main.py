@@ -27,12 +27,14 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
+    load_rule_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
     project_dir, rules_dir, resolve_path, PROJECT_ROOT,
     VAULT_ROOT,
     expand_wikilinks, invalidate_wikilink_cache,
+    load_role,
 )
 
 ROLE = "前端工程师"
@@ -184,6 +186,12 @@ def main() -> int:
     # API契约.md：后端产出，前端只读；文件不存在时跳过（不阻断）
     api_contract = proj_dir / "API契约.md"
 
+    # §3.1 rule_refs 章节级注入：F-前端#6 工程参考 skill 索引（跨 task 复用）。
+    # 与 dev_backend 同范式（音乐域 commit 77d1244 同思路）。
+    role_def = load_role(ROLE)
+    rule_block, source_hint = load_rule_block(role_def.rule_refs)
+    print(f"[{ROLE}] rule_refs 注入：{source_hint}")
+
     for task_file in task_files:
         task_label = task_file.stem
         print(f"[{ROLE}] ▶ 执行任务：{task_label}")
@@ -199,6 +207,8 @@ def main() -> int:
         if extra_inputs:
             print(f"[{ROLE}] 📄 注入 API契约.md（{api_contract.stat().st_size} bytes）")
         context = read_input_files([task_file, tech_stack, *extra_inputs])
+        if rule_block:
+            context = context + "\n\n" + rule_block
 
         # 按 task 正文里的 wikilink 按需注入 frontend skill（仅 F<N>- 前缀）
         task_text = task_file.read_text(encoding="utf-8")
