@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.config import PROJECT_NAME
 from engine.git_sync import sync_after_run
+from engine.human_gate import list_gates as list_human_gates
 from engine.workflow import load_workflow, list_workflows
 from engine.graph import build_graph
 
@@ -104,6 +105,24 @@ def main() -> int:
         or PROJECT_NAME
         or "default"
     ).strip()
+
+    # T1.2 (2026-06-10)：主流程入口扫 pending human_gates。
+    # Phase B bridge 之前的折中实现：文件落盘 + 轮询；命中 pending 立即退出，
+    # 提示用户用 CLI 解决后再 run_chain。
+    # Phase B 之后切 LangGraph interrupt（schema 向后兼容，CLI 共存）。
+    pending = list_human_gates(project, status="pending")
+    if pending:
+        print(f"❌ 项目 '{project}' 有 {len(pending)} 个 pending human_gate，"
+              f"必须先解决后再 run_chain：")
+        for g in pending:
+            tail = f"  [gate={g.gate}]" if g.gate else ""
+            print(f"  - [{g.id}] {g.reason}{tail}")
+        print()
+        print(f"用以下命令解决：")
+        print(f"  python .claude/engine/cli_human_gate.py --project {project} list")
+        print(f"  python .claude/engine/cli_human_gate.py --project {project} show --id <gate-id>")
+        print(f"  python .claude/engine/cli_human_gate.py --project {project} approve --id <gate-id>")
+        raise SystemExit(2)
 
     # 加载工作流模板
     try:

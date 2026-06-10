@@ -1,5 +1,5 @@
 """
-role_auditor/main.py — 角色规范师执行入口
+role_auditor/main.py — 角色审计器执行入口
 
 作用：
   对照 vault `00-系统/规则/角色基因规范.md` 审计所有 `角色-*.md` 文件，
@@ -8,6 +8,9 @@ role_auditor/main.py — 角色规范师执行入口
   程序层先做可量化测量（字符长度 / frontmatter 字段 / DYNAMIC regex），
   把测量结果连同规范 + 所有角色全文传给 LLM，LLM 负责语义判断（反模式 / 豁免）
   并产出最终报告。
+
+  历史称呼：2026-06-10 前称"角色规范师"，对齐 engine `role_auditor` 改名为
+  "角色审计器"；vault 角色基因 frontmatter aliases 保留旧名兼容历史复盘文档。
 
 CLI：
   python .claude/skills/role_auditor/main.py [--dry-run] [--target X [--target Y]]
@@ -39,10 +42,10 @@ from engine import (
     VAULT_ROOT, role_genes_dir, resolve_path,
 )
 
-ROLE = "角色规范师"
+ROLE = "角色审计器"
 
 # 不审计自身
-SELF_FILENAME = "角色-角色规范师.md"
+SELF_FILENAME = "角色-角色审计器.md"
 
 # 规范文档路径（vault 相对）
 SPEC_REL = "00-系统/规则/角色基因规范.md"
@@ -488,7 +491,7 @@ def _format_stem_uniqueness(dupes: dict[str, list[Path]]) -> str:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="角色规范师：审计指定 / 全部角色基因文件")
+    p = argparse.ArgumentParser(description="角色审计器：审计指定 / 全部角色基因文件")
     p.add_argument("--dry-run", action="store_true", help="只打印测量结果，不调 LLM、不写盘")
     p.add_argument(
         "--target", action="append", default=None,
@@ -509,7 +512,7 @@ def main() -> int:
     args = _parse_args()
 
     # 产物审计模式：与角色基因审计正交，独立路径不动 ROLE 状态机
-    # （产物审计是治理 vault 产物的产物，不影响角色规范师自己的 busy/idle）
+    # （产物审计是治理 vault 产物的产物，不影响角色审计器自己的 busy/idle）
     if getattr(args, "audit_outputs", False):
         return _run_pm_output_audit(dry_run=bool(args.dry_run))
 
@@ -566,7 +569,7 @@ def main() -> int:
     inputs = [spec_path] + role_files
     context = read_input_files(inputs)
 
-    # 4) system prompt（角色规范师基因）
+    # 4) system prompt（角色审计器基因）
     system_prompt = build_system_prompt(ROLE, project=None)
 
     # 5) 报告路径

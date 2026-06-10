@@ -678,7 +678,7 @@ def call_llm_for_role(system_prompt: tuple[str, str] | str, user_prompt: str, ro
 
     `budget_input_tokens`（可选，来自角色 frontmatter）会覆盖 engine.llm 入口护栏
     的默认 ratio 计算，按显式 token 数做 RAISE / WARN（适合"注定吃大上下文"的
-    角色显式声明上限，如复盘者 / 角色规范师 / 讨论场参与者）。
+    角色显式声明上限，如复盘者 / 角色审计器 / 讨论场参与者）。
     """
     input_budget: int | None = None
     try:
