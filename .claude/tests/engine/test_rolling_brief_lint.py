@@ -251,3 +251,32 @@ class TestEmptySection:
         )
         errs = validate_rolling_brief(text)
         assert errs == [], f"Empty §6 should pass, got: {errs}"
+
+
+class TestSectionTitleNormalize:
+    """H2 标题归一化：'§1 xxx' / '1、xxx' 等价于 '1. xxx'（容忍 prompt 简写漂移）。
+
+    实战暴露：LLM 受 prompt 里 §N 简写影响产出 '## §1 用户已确认事实'，
+    lint 应将其与 schema §2 定义的 '## 1. 用户已确认事实' 视为同节。
+    """
+
+    def test_section_paragraph_marker_passes(self):
+        """全 9 节用 '## §N xxx' 形式（vault-walker R1 实战形态）应通过。"""
+        text = _valid_brief()
+        for n in range(1, 10):
+            text = text.replace(f"## {n}.", f"## §{n}", 1)
+        errs = validate_rolling_brief(text)
+        assert errs == [], f"§N H2 form should pass, got: {errs}"
+
+    def test_section_chinese_dun_passes(self):
+        """中文顿号 '## 1、xxx' 也应通过（同样是常见 LLM 偏差）。"""
+        text = _valid_brief().replace("## 1. 用户已确认事实", "## 1、用户已确认事实")
+        errs = validate_rolling_brief(text)
+        assert errs == [], f"Chinese dun form should pass, got: {errs}"
+
+    def test_mixed_form_passes(self):
+        """部分节用 §1、部分用 1. 混合形式也应通过。"""
+        text = _valid_brief().replace("## 1. 用户已确认事实", "## §1 用户已确认事实")
+        text = text.replace("## 5. 已否决方向", "## §5 已否决方向")
+        errs = validate_rolling_brief(text)
+        assert errs == [], f"Mixed form should pass, got: {errs}"

@@ -57,8 +57,28 @@ SOURCE_PATTERN = re.compile(
 )
 
 
+_SECTION_TITLE_NORMALIZE = re.compile(r"^(?:§(\d+)|(\d+)[.、])\s*(.+?)\s*$")
+
+
+def _normalize_section_title(raw_title: str) -> str:
+    """H2 标题归一化：'§1 用户已确认事实' / '1、用户已确认事实' → '1. 用户已确认事实'。
+
+    LLM 受 prompt 里 §N 简写影响常用 '## §1 xxx' 形式产出（schema §2 定义是 '## 1. xxx'）。
+    lint 容忍这两种 + 中文顿号 '1、'，统一归一化后再做 REQUIRED_SECTIONS 匹配。
+    """
+    m = _SECTION_TITLE_NORMALIZE.match(raw_title)
+    if not m:
+        return raw_title
+    num = m.group(1) or m.group(2)
+    body = m.group(3)
+    return f"{num}. {body}"
+
+
 def _iter_sections(text: str) -> Iterator[tuple[str, list[str]]]:
-    """拆 markdown 按 H2 (## 起首) 切节。yield (section_title, lines)。"""
+    """拆 markdown 按 H2 (## 起首) 切节。yield (section_title, lines)。
+
+    section_title 归一化（§N / N、 → N.），便于按 REQUIRED_SECTIONS 字面匹配。
+    """
     current_title: str | None = None
     current_lines: list[str] = []
     for raw in text.splitlines():
@@ -66,7 +86,7 @@ def _iter_sections(text: str) -> Iterator[tuple[str, list[str]]]:
         if m:
             if current_title is not None:
                 yield current_title, current_lines
-            current_title = m.group(1).strip()
+            current_title = _normalize_section_title(m.group(1).strip())
             current_lines = []
         else:
             if current_title is not None:
