@@ -1,5 +1,5 @@
 """
-brainstorm_scribe/main.py — 创意记录员执行入口（T2.3 完整 rolling_brief 保真 + R3/R6 审计）
+brainstorm_scribe/main.py — 创意记录员执行入口（T2.4 ask_user → human_gate 接入）
 
 输入：
   - 10-项目/{project}/inputs/idea.md（必须；脑暴起点）
@@ -7,6 +7,7 @@ brainstorm_scribe/main.py — 创意记录员执行入口（T2.3 完整 rolling_
   - 10-项目/{project}/脑暴/创意质询-R{round}.md（必须；B 方本轮产出）
   - 10-项目/{project}/产品创意原型.md（可选；轮 ≥ 2）
   - 10-项目/{project}/脑暴/rolling_brief.md（可选；轮 ≥ 2）
+  - 10-项目/{project}/.workflow/human_gates/*.json（已 resolved 的 brainstorm_* gate；轮 ≥ 2 自动注入）
 
 输出（单 LLM call 3 FILE 块；R3/R6 额外 1 个 audit 块）：
   - 10-项目/{project}/产品创意原型.md（覆盖式）
@@ -14,11 +15,17 @@ brainstorm_scribe/main.py — 创意记录员执行入口（T2.3 完整 rolling_
   - 10-项目/{project}/脑暴/rolling_brief.md（覆盖式；schema v0.1.0 + source/confidence）
   - 10-项目/{project}/脑暴/rolling_brief_audit-R{round}.md（仅 round ∈ {3, 6}）
 
+副产物（readiness.decision == "ask_user" 时）：
+  - 10-项目/{project}/.workflow/human_gates/gate-{date}-{nnn}.json（passive human_gate；T1.2 schema）
+
 CLI：
   python .claude/skills/brainstorm_scribe/main.py --task "..." --project myproj --round 2
 
-T2.3 落地 [[rolling-brief.schema]] v0.1.0 + R3/R6 一致性审计。
-T2.4 接 ask_user → human_gate（§13.7 高影响决策卡点）。
+T2.4 落地：
+- 跑前 has_pending() → 阻塞（避免覆盖未解决的卡点）
+- readiness.decision=ask_user 时 emit_gate(gate=brainstorm_readiness, mode=passive)
+- R≥2 自动注入历史 resolved brainstorm gate 的 user_response 到 context，提示 LLM
+  在 rolling_brief §1 用 source=user_answer-R{N}
 """
 
 from __future__ import annotations
@@ -43,10 +50,16 @@ from engine import (
 from engine.brainstorm_lint import validate_readiness_json
 from engine.rolling_brief_lint import validate_rolling_brief
 from engine.role_loader import load_role
+from engine.human_gate import (
+    HumanGate, emit_gate, has_pending, list_gates,
+)
 
 ROLE = "创意记录员"
 
 AUDIT_ROUNDS = (3, 6)
+
+# T2.4：本 skill 所写 / 消费的 gate 名（与 [[元角色与人工介入机制]] §8.1 brainstorm_readiness 对齐）
+BRAINSTORM_GATE = "brainstorm_readiness"
 
 
 def _apply_round(path: str, round_num: int) -> str:
@@ -65,6 +78,70 @@ def _collect_audit_history(project: str, round_num: int) -> str:
     return "\n".join(parts)
 
 
+def _collect_resolved_brainstorm_gates(project: str) -> list[HumanGate]:
+    """扫已 resolved 的 brainstorm_* gate，按 created_at 排序。
+
+    供 R≥2 时把历史 user_response 拼进 context。
+    """
+    resolved = list_gates(project, status="resolved")
+    return [g for g in resolved if (g.gate or "").startswith("brainstorm_")]
+
+
+def _format_resolved_gates_for_context(gates: list[HumanGate]) -> str:
+    """把 resolved gate 渲染成 markdown 注入 LLM context。"""
+    if not gates:
+        return ""
+    lines = ["## 历史用户答复（已 resolved 的 brainstorm gate）", ""]
+    for i, g in enumerate(gates, start=1):
+        lines.append(f"### 答复 #{i}（gate {g.id}，resolved at {g.resolved_at or '未知'}）")
+        lines.append(f"- 节点（node）: {g.node or '未标注'}")
+        lines.append(f"- 提问 reason: {g.reason}")
+        if g.user_response:
+            lines.append(f"- 用户回答: {g.user_response}")
+        if g.resolution:
+            lines.append(f"- resolution: {g.resolution}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _emit_ask_user_gate(
+    *,
+    project: str,
+    round_num: int,
+    readiness_data: dict,
+    is_audit_round: bool,
+    output_rels: list[str],
+) -> HumanGate:
+    """readiness.decision == ask_user 时 emit 一条 passive human_gate。
+
+    R3/R6 审计模式下的 §5 高影响决策也走本路径（LLM 已把决策塞进 questions_for_user）。
+    """
+    questions = readiness_data.get("questions_for_user") or []
+    blocking_gaps = readiness_data.get("blocking_gaps") or []
+    decision_kind = "R3/R6 审计高影响决策" if is_audit_round else "readiness 追问"
+    reason_parts = [f"[brainstorm R{round_num}] {decision_kind}，需用户拍板继续："]
+    for q in questions:
+        reason_parts.append(f"- {q}")
+    if blocking_gaps:
+        reason_parts.append("当前 blocking_gaps：")
+        for g in blocking_gaps:
+            reason_parts.append(f"  · {g}")
+    suggested = [
+        f"resolve 后用 --round {round_num + 1} 跑下一轮 brainstorm",
+        "abort（终止脑暴，回到 idea 阶段）",
+    ]
+    return emit_gate(
+        project=project,
+        type="human_gate",
+        mode="passive",
+        gate=BRAINSTORM_GATE,
+        node=f"brainstorm_R{round_num}",
+        reason="\n".join(reason_parts),
+        context_refs=output_rels,
+        suggested_actions=suggested,
+    )
+
+
 def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
@@ -75,6 +152,22 @@ def main() -> int:
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
         return 1
+
+    # T2.4 阻塞：若项目有未解决的 human_gate（无论 brainstorm 还是其他），先暂停
+    if has_pending(project):
+        print(
+            f"[{ROLE}] 项目 '{project}' 有未解决的 human_gate，跳过本轮。\n"
+            f"  列出：python .claude/engine/cli_human_gate.py --project {project} list\n"
+            f"  解决：python .claude/engine/cli_human_gate.py --project {project} resolve "
+            f"--id <gate-id> --action approve --response \"...\"",
+            file=sys.stderr,
+        )
+        append_audit({
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "skipped", "reason": "pending_human_gate",
+            "round": round_num,
+        })
+        return 3
 
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
@@ -131,6 +224,16 @@ def main() -> int:
     print(f"[{ROLE}] rule_refs 注入：{source_hint}")
     if rule_block:
         context = context + "\n\n" + rule_block
+
+    # T2.4：R≥2 注入历史 resolved brainstorm gate 的 user_response 到 context
+    resolved_gates = _collect_resolved_brainstorm_gates(project)
+    if resolved_gates:
+        gate_block = _format_resolved_gates_for_context(resolved_gates)
+        context = context + "\n\n" + gate_block
+        print(
+            f"[{ROLE}] 注入历史 user_answer：{len(resolved_gates)} 条 resolved gate",
+            flush=True,
+        )
 
     # R3/R6 审计：追加全历史 A/B 原文（仅审计轮）
     if is_audit_round:
@@ -209,6 +312,18 @@ def main() -> int:
         f"**{'4 份产物（含 R3/R6 审计）' if is_audit_round else '3 份产物'}"
         f"在同一次 LLM 输出里产出独立 FILE 块。**"
     )
+
+    # T2.4：有历史 resolved gate 时，强约束 LLM 把 user_response 落到 §1 + source=user_answer
+    if resolved_gates:
+        user_prompt += (
+            f"\n\n**T2.4 注入**：上文 context 含 {len(resolved_gates)} 条 "
+            f"已 resolved 的 brainstorm gate 用户答复，必须按以下规则消费：\n"
+            "  - 每条用户答复 **必须** 写入 rolling_brief §1 用户已确认事实\n"
+            "  - source 锚点：`user_answer-R{N}`（N = 答复对应的脑暴轮次，从 gate.node 字段 "
+            "`brainstorm_R{N}` 推断）\n"
+            "  - confidence 强制 `high`\n"
+            "  - 已被用户**否决**的方向同步进 §5 已否决方向，reason 含「用户 R{N} 答复明确否决」\n"
+        )
 
     if is_audit_round:
         audit_rel = f"10-项目/{project}/脑暴/rolling_brief_audit-R{round_num}.md"
@@ -331,6 +446,34 @@ def main() -> int:
         else:
             print(f"[{ROLE}] ✅ rolling_brief lint 通过")
 
+    # T2.4：readiness.decision == ask_user 时 emit passive human_gate
+    emitted_gate_id: str | None = None
+    if (
+        readiness_rel
+        and readiness_decision == "ask_user"
+        and not readiness_errors
+    ):
+        try:
+            with resolve_path(readiness_rel, project).open(encoding="utf-8") as f:
+                readiness_data = json.load(f)
+            gate = _emit_ask_user_gate(
+                project=project,
+                round_num=round_num,
+                readiness_data=readiness_data,
+                is_audit_round=is_audit_round,
+                output_rels=written,
+            )
+            emitted_gate_id = gate.id
+            print(
+                f"[{ROLE}] ⏸️  decision=ask_user，已 emit human_gate {gate.id}\n"
+                f"  resolve: python .claude/engine/cli_human_gate.py --project {project}"
+                f" resolve --id {gate.id} --action approve --response \"...\"\n"
+                f"  resolve 后用 --round {round_num + 1} 跑下一轮 brainstorm",
+                file=sys.stderr,
+            )
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[{ROLE}] ⚠️ emit_gate 失败：{e}", file=sys.stderr)
+
     set_role_status(ROLE, status="success", reset_counters=True)
     set_role_status(ROLE, status="idle")
     append_audit({
@@ -342,6 +485,8 @@ def main() -> int:
         "readiness_lint_errors": readiness_errors,
         "readiness_decision": readiness_decision,
         "rolling_brief_lint_errors": brief_errors,
+        "human_gate_id": emitted_gate_id,
+        "resolved_gates_injected": [g.id for g in resolved_gates],
     })
     print(f"[{ROLE}] R{round_num} 完成，输出：{written}")
     return 0
