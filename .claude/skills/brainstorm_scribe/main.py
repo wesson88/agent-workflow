@@ -1,29 +1,30 @@
 """
-brainstorm_scribe/main.py — 创意记录员执行入口（T2.2 完整 readiness schema）
+brainstorm_scribe/main.py — 创意记录员执行入口（T2.3 完整 rolling_brief 保真 + R3/R6 审计）
 
-输入（vault，来源：角色 frontmatter `inputs` 字段）：
+输入：
   - 10-项目/{project}/inputs/idea.md（必须；脑暴起点）
-  - 10-项目/{project}/脑暴/创意发散-R1.md（必须；A 方本轮产出）
-  - 10-项目/{project}/脑暴/创意质询-R1.md（必须；B 方本轮产出）
+  - 10-项目/{project}/脑暴/创意发散-R{round}.md（必须；A 方本轮产出）
+  - 10-项目/{project}/脑暴/创意质询-R{round}.md（必须；B 方本轮产出）
   - 10-项目/{project}/产品创意原型.md（可选；轮 ≥ 2）
   - 10-项目/{project}/脑暴/rolling_brief.md（可选；轮 ≥ 2）
 
-输出（vault，来源：角色 frontmatter `outputs` 字段，单 LLM call 3 FILE 块）：
+输出（单 LLM call 3 FILE 块；R3/R6 额外 1 个 audit 块）：
   - 10-项目/{project}/产品创意原型.md（覆盖式）
-  - 10-项目/{project}/brainstorm_readiness.json（覆盖式；完整 schema v0.1.0）
-  - 10-项目/{project}/脑暴/rolling_brief.md（覆盖式；T2.1 占位 8 节模板）
+  - 10-项目/{project}/brainstorm_readiness.json（覆盖式；schema v0.1.0）
+  - 10-项目/{project}/脑暴/rolling_brief.md（覆盖式；schema v0.1.0 + source/confidence）
+  - 10-项目/{project}/脑暴/rolling_brief_audit-R{round}.md（仅 round ∈ {3, 6}）
 
 CLI：
-  python .claude/skills/brainstorm_scribe/main.py --task "..." --project myproj
+  python .claude/skills/brainstorm_scribe/main.py --task "..." --project myproj --round 2
 
-T2.2 落地 brainstorm-readiness.schema v0.1.0：硬门槛 10 项 + 评分 10 项 + decision 4 值 +
-产物落盘后 engine/brainstorm_lint 静态校验，结果落到 audit.jsonl。
-T2.3 接 rolling_brief 保真机制 + 多轮循环。T2.4 接 ask_user → human_gate。
+T2.3 落地 [[rolling-brief.schema]] v0.1.0 + R3/R6 一致性审计。
+T2.4 接 ask_user → human_gate（§13.7 高影响决策卡点）。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -40,15 +41,36 @@ from engine import (
     resolve_path,
 )
 from engine.brainstorm_lint import validate_readiness_json
+from engine.rolling_brief_lint import validate_rolling_brief
 from engine.role_loader import load_role
 
 ROLE = "创意记录员"
+
+AUDIT_ROUNDS = (3, 6)
+
+
+def _apply_round(path: str, round_num: int) -> str:
+    """把 frontmatter 里 hardcoded '-R1' 替换为 '-R{round_num}'。"""
+    return re.sub(r"-R1(?=\.md|$|\W)", f"-R{round_num}", path)
+
+
+def _collect_audit_history(project: str, round_num: int) -> str:
+    """R3/R6 审计模式：读 R1~R{round} 全部 A/B 原文，拼成 context。"""
+    parts: list[str] = []
+    for r in range(1, round_num + 1):
+        for kind in ("创意发散", "创意质询"):
+            p = resolve_path(f"10-项目/{{project}}/脑暴/{kind}-R{r}.md", project)
+            if p.exists():
+                parts.append(f"\n--- {kind}-R{r}.md ---\n{p.read_text(encoding='utf-8')}")
+    return "\n".join(parts)
 
 
 def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
     project = resolve_project(args)
+    round_num = max(1, int(getattr(args, "round_num", 1) or 1))
+    is_audit_round = round_num in AUDIT_ROUNDS
 
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
@@ -57,8 +79,11 @@ def main() -> int:
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
     role_def = load_role(ROLE)
-    input_paths = [resolve_path(p, project) for p in role_def.inputs]
-    output_rels = [p.replace("{project}", project) for p in role_def.outputs]
+    input_paths = [resolve_path(_apply_round(p, round_num), project) for p in role_def.inputs]
+    output_rels = [
+        _apply_round(p, round_num).replace("{project}", project)
+        for p in role_def.outputs
+    ]
 
     # 上游硬约束：A 方发散 + B 方质询必须都存在
     diverge_path = next(
@@ -71,9 +96,9 @@ def main() -> int:
     )
     missing = []
     if diverge_path is None or not diverge_path.exists():
-        missing.append("脑暴/创意发散-R1.md")
+        missing.append(f"脑暴/创意发散-R{round_num}.md")
     if challenge_path is None or not challenge_path.exists():
-        missing.append("脑暴/创意质询-R1.md")
+        missing.append(f"脑暴/创意质询-R{round_num}.md")
     if missing:
         print(
             f"[{ROLE}] 上游缺失：{missing}。请先跑完 brainstorm_diverger + brainstorm_challenger。",
@@ -92,10 +117,10 @@ def main() -> int:
         return 2
 
     existing_inputs = [p for p in input_paths if p.exists()]
-    round_num = 1  # T2.1 MVP 硬编码 R1
     print(
         f"[{ROLE}] R{round_num} 上游 {len(existing_inputs)}/{len(input_paths)} 就位："
-        f"{[p.name for p in existing_inputs]}",
+        f"{[p.name for p in existing_inputs]}"
+        f"{'（R3/R6 审计模式）' if is_audit_round else ''}",
         flush=True,
     )
 
@@ -106,6 +131,15 @@ def main() -> int:
     print(f"[{ROLE}] rule_refs 注入：{source_hint}")
     if rule_block:
         context = context + "\n\n" + rule_block
+
+    # R3/R6 审计：追加全历史 A/B 原文（仅审计轮）
+    if is_audit_round:
+        history = _collect_audit_history(project, round_num)
+        if history:
+            context = context + (
+                "\n\n--- 全历史原文（R3/R6 审计模式，对照 rolling_brief 保真）---\n"
+                + history
+            )
 
     user_prompt = (
         f"项目名：`{project}`（写文件时把路径里的 `{{project}}` 占位符替换为本值）\n\n"
@@ -151,17 +185,50 @@ def main() -> int:
         "    - `ask_user`：有需用户拍板的取舍（questions_for_user 必非空）\n"
         "    - `stop_low_value`：多轮无收敛或核心问题不成立\n"
         "  - 保守原则：拿不准时优先 `continue_discussion`，不轻易给 `ready_for_prd` / `stop_low_value`。\n\n"
-        "**3. `脑暴/rolling_brief.md`** — T2.1 占位 8 节模板（T2.3 接保真机制）：\n"
-        "```markdown\n"
-        f"# Rolling Brief — R{round_num}\n\n"
-        "## 1. 用户已确认事实\n## 2. 当前产品判断\n## 3. 已保留方向\n## 4. 已否决方向\n"
-        "## 5. 关键争议\n## 6. 已回答问题\n## 7. 未回答问题\n## 8. 下一轮焦点\n"
-        "```\n"
-        "  - 每节 50-200 字\n"
-        "  - 本轮否决的方向必须进 §4 已否决方向（防下一轮反复提同一方向）\n\n"
-        "**3 份产物在同一次 LLM 输出里产出 3 个独立 FILE 块。**"
-        f"{render_required_outputs(output_rels)}"
+        "**3. `脑暴/rolling_brief.md`** — 严格按 [[rolling-brief.schema]] v0.1.0：\n"
+        "  - 9 节 H2 顺序固定：\n"
+        "    §1 用户已确认事实 / §2 LLM 推断 / §3 已做决策 / §4 已保留方向 / "
+        "§5 已否决方向 / §6 关键争议 / §7 已回答问题 / §8 未回答问题 / §9 下一轮焦点\n"
+        "  - **每个 list item 必须带 `source:` + `confidence:` 子字段**（2 空格缩进）\n"
+        "  - source 前缀必须 ∈ {`idea.md`, `user_answer-R{N}`, `创意发散-R{N}.md[#章节]`, "
+        "`创意质询-R{N}.md[#章节]`, `创意记录员-R{N}[#章节]`, `brainstorm_readiness-R{N}[#字段]`, "
+        "`产品创意原型-R{N}[#章节]`}；多 source 用 `, ` 或 ` vs ` 分隔\n"
+        "  - confidence ∈ {`high`, `medium`, `low`}\n"
+        "  - **强制规则**：\n"
+        "    - §1 用户已确认事实 / §7 已回答问题 下每条 confidence 必须 `high`\n"
+        "    - §5 已否决方向下每条**必须有 `reason:` 子字段**（说明为何砍）\n"
+        "    - 用户事实 vs LLM 推断**物理隔离**：用户没明确说过 → 进 §2 而不是 §1\n"
+        "    - 本轮否决的方向必须进 §5（防下一轮 A 重新提）\n"
+        "  - 示例条目：\n"
+        "    ```markdown\n"
+        "    - 通勤路线异常提醒\n"
+        f"      source: 创意质询-R{round_num}.md#值得保留的方向\n"
+        "      confidence: medium\n"
+        "    ```\n"
+        f"  - 文件 H1 = `# Rolling Brief — R{round_num}`\n\n"
+        f"**{'4 份产物（含 R3/R6 审计）' if is_audit_round else '3 份产物'}"
+        f"在同一次 LLM 输出里产出独立 FILE 块。**"
     )
+
+    if is_audit_round:
+        audit_rel = f"10-项目/{project}/脑暴/rolling_brief_audit-R{round_num}.md"
+        output_rels.append(audit_rel)
+        user_prompt += (
+            f"\n\n**4. `脑暴/rolling_brief_audit-R{round_num}.md`** — R{round_num} 一致性审计"
+            "（[[rolling-brief.schema]] §8）：\n"
+            f"  - 审计范围：R1 ~ R{round_num} 全部 A/B 原文（已在上文 context）vs 当前 "
+            "rolling_brief.md（本轮**即将覆盖**前的版本）\n"
+            "  - 6 节固定结构：\n"
+            "    §1 漏掉的用户事实 / §2 LLM 推断被误写成用户事实 / §3 遗漏的已否决方向 / "
+            "§4 遗漏的高风险争议 / §5 需要向用户确认的高影响决策 / §6 修复动作\n"
+            "  - **审计联动 readiness 决策**：\n"
+            "    - 若 §1 / §2 / §3 任一非空 → readiness.decision 不得 `ready_for_prd`，"
+            "降级为 `continue_discussion`\n"
+            "    - 若 §5 非空 → readiness.decision = `ask_user`，questions_for_user 包含 §5 条目\n"
+            "  - §6 修复动作必须列出本轮 rolling_brief 已补充的修复条目\n"
+        )
+
+    user_prompt += render_required_outputs(output_rels)
 
     try:
         raw_output = call_claude(system_prompt, user_prompt, ROLE)
@@ -203,8 +270,10 @@ def main() -> int:
         print(f"[{ROLE}] 写入: {dest}")
         written.append(rel_resolved)
 
-    # Audit 检查 3 份产物是否全产出
+    # Audit 检查产物是否全产出（R3/R6 额外要求 audit md）
     expected = {"产品创意原型.md", "brainstorm_readiness.json", "rolling_brief.md"}
+    if is_audit_round:
+        expected.add(f"rolling_brief_audit-R{round_num}.md")
     written_basenames = {Path(w).name for w in written}
     missing_outputs = expected - written_basenames
     if missing_outputs:
@@ -239,17 +308,42 @@ def main() -> int:
         else:
             print(f"[{ROLE}] ✅ readiness lint 通过（decision={readiness_decision}）")
 
+    # rolling_brief.md 静态 lint（[[rolling-brief.schema]] §7）
+    brief_errors: list[str] = []
+    brief_rel = next(
+        (w for w in written if Path(w).name == "rolling_brief.md"),
+        None,
+    )
+    if brief_rel:
+        brief_path = resolve_path(brief_rel, project)
+        try:
+            brief_text = brief_path.read_text(encoding="utf-8")
+            brief_errors = validate_rolling_brief(brief_text)
+        except OSError as e:
+            brief_errors = [f"[read] 文件读取失败：{e}"]
+        if brief_errors:
+            print(
+                f"[{ROLE}] ⚠️ rolling_brief lint 失败 {len(brief_errors)} 条：",
+                file=sys.stderr,
+            )
+            for err in brief_errors:
+                print(f"  - {err}", file=sys.stderr)
+        else:
+            print(f"[{ROLE}] ✅ rolling_brief lint 通过")
+
     set_role_status(ROLE, status="success", reset_counters=True)
     set_role_status(ROLE, status="idle")
     append_audit({
         "timestamp": utc_now(), "role": ROLE, "project": project,
         "task": task, "result": "success", "outputs": written,
         "round": round_num,
+        "audit_round": is_audit_round,
         "missing_outputs": list(missing_outputs) if missing_outputs else [],
         "readiness_lint_errors": readiness_errors,
         "readiness_decision": readiness_decision,
+        "rolling_brief_lint_errors": brief_errors,
     })
-    print(f"[{ROLE}] 完成，输出：{written}")
+    print(f"[{ROLE}] R{round_num} 完成，输出：{written}")
     return 0
 
 

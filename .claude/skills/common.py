@@ -71,6 +71,10 @@ def parse_args() -> argparse.Namespace:
         "--sub-skill", default=None, dest="sub_skill",
         help="子技能名称（可选，部分技能用）",
     )
+    parser.add_argument(
+        "--round", type=int, default=1, dest="round_num",
+        help="脑暴轮次（多轮脑暴 skill 用，默认 1；其他 skill 忽略）",
+    )
     return parser.parse_args()
 
 
