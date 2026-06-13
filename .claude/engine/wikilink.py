@@ -133,6 +133,23 @@ _STEM_EXCLUDED_PREFIXES = (
 )
 
 
+def _is_domain_rule_adapter(rel_posix: str) -> bool:
+    """跨域适配器路径模板：`00-系统/规则/<domain>/<adapter>.md`（vault命名规则 §2.11）。
+
+    `规则/` 下的 *子目录* 文件是域适配器（如 `用户体验者-视角.md` / `复盘者-视角.md`），
+    跨域同名 stem 是**设计意图**（开闭原则：每加新域只新建 adapter，不改主角色基因）。
+    引用此类文件必须用完整路径 `[[00-系统/规则/<domain>/<adapter>]]`，stem 索引排除。
+
+    `规则/` 顶层文件（如 `技术栈.md` / `角色基因规范.md`）仍参与 stem 索引（按 §2.3）。
+    """
+    parts = rel_posix.split("/")
+    return (
+        len(parts) >= 4
+        and parts[0] == "00-系统"
+        and parts[1] == "规则"
+    )
+
+
 @lru_cache(maxsize=1)
 def _stem_index() -> dict[str, list[Path]]:
     """vault 全局 stem → 路径列表索引；首次访问触发扫描。
@@ -150,6 +167,8 @@ def _stem_index() -> dict[str, list[Path]]:
             continue
         rel_posix = rel.as_posix()
         if any(rel_posix.startswith(pre) for pre in _STEM_EXCLUDED_PREFIXES):
+            continue
+        if _is_domain_rule_adapter(rel_posix):
             continue
         idx.setdefault(p.stem, []).append(p)
     return idx

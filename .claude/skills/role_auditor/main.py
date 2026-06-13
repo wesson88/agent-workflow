@@ -230,6 +230,20 @@ _SECTION_RE = re.compile(r"^##\s+(\d+)\.\s+", re.MULTILINE)
 _STEM_SCAN_EXCLUDES = ("10-项目/", "99-临时/", ".runtime-state/")
 
 
+def _is_domain_rule_adapter(rel_posix: str) -> bool:
+    """跨域适配器路径模板：`00-系统/规则/<domain>/<adapter>.md`（vault命名规则 §2.11）。
+
+    与 engine.wikilink._is_domain_rule_adapter 同步：domain 子目录下的同名 stem
+    是开闭原则的设计意图，stem 扫描应跳过。
+    """
+    parts = rel_posix.split("/")
+    return (
+        len(parts) >= 4
+        and parts[0] == "00-系统"
+        and parts[1] == "规则"
+    )
+
+
 def _parse_frontmatter(text: str) -> tuple[dict, str, int]:
     """从 markdown 文件提取 frontmatter。
 
@@ -454,13 +468,15 @@ def _scan_vault_stem_uniqueness() -> dict[str, list[Path]]:
             continue
         if any(rel.startswith(prefix) for prefix in _STEM_SCAN_EXCLUDES):
             continue
+        if _is_domain_rule_adapter(rel):
+            continue
         groups[p.stem].append(p)
     return {stem: sorted(paths) for stem, paths in groups.items() if len(paths) >= 2}
 
 
 def _format_stem_uniqueness(dupes: dict[str, list[Path]]) -> str:
     """把 stem 重名清单格式化为 markdown，注入到审计报告。"""
-    excludes = "、".join(_STEM_SCAN_EXCLUDES)
+    excludes = "、".join(_STEM_SCAN_EXCLUDES) + "、00-系统/规则/<域>/（跨域适配器）"
     if not dupes:
         return (
             "# Vault stem 唯一性扫描\n\n"
