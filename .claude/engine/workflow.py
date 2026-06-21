@@ -37,6 +37,7 @@ class WorkflowStep:
 
     type=linear: 单角色顺序执行（Phase 3a 起支持）
     type=discussion: 多角色辩论（Phase 4b 起支持）
+    type=brainstorm-loop: 3 角色多轮脑暴 + readiness 决策路由（T2.6 起支持）
     type=parallel: 多角色并发（未实现）
     type=discussion-loop: 多角色循环对话（已被 type=discussion 取代）
 
@@ -52,12 +53,18 @@ class WorkflowStep:
     # type=linear 字段
     role: str | None = None
 
-    # type=discussion / parallel 字段
+    # type=discussion / parallel / brainstorm-loop 字段
     roles: tuple[str, ...] = ()                # 参与者列表（中文角色名）
     name: str | None = None                    # 议题名（脑暴笔记文件名 + display）
     moderator: str | None = None               # 主持人（None = 第一个参与者主持）
     max_rounds: int = 5                        # 讨论最大轮数（每轮 = 一个角色发言）
-    topic_template: str | None = None          # 议题模板（可引用 {project} 等占位符）
+    topic_template: str | None = None          # 议题模板（可引用 {project} 等占位符)
+
+    # type=brainstorm-loop 字段（T2.6）
+    audit_rounds: tuple[int, ...] = ()         # 触发 scribe 审计模式的轮次（默认 (3, 6)）
+    start_round: int = 1                       # 起始轮次（重启时由 round_state.json 覆盖）
+    readiness_threshold: int = 85              # prd_readiness 触达即 ready
+    context_warn_tokens: int = 30000           # 下轮 input 估算超此值打 WARN
 
     # 层三：post_compress haiku 钩子
     post_compress: dict | None = None
@@ -110,6 +117,28 @@ class WorkflowStep:
                     moderator=(str(data["moderator"]) if data.get("moderator") else None),
                     max_rounds=int(data.get("max_rounds", 5)),
                     topic_template=(str(data["topic_template"]) if data.get("topic_template") else None),
+                )
+            if t == "brainstorm-loop":
+                roles = tuple(str(r) for r in (data.get("roles") or ()))
+                if len(roles) != 3:
+                    raise ValueError(
+                        f"brainstorm-loop step 必须恰好 3 角色（发散者/质询者/记录员）："
+                        f"{data}"
+                    )
+                audit_raw = data.get("audit_rounds")
+                if audit_raw is None:
+                    audit_rounds: tuple[int, ...] = (3, 6)
+                else:
+                    audit_rounds = tuple(int(r) for r in audit_raw)
+                return cls(
+                    type="brainstorm-loop",
+                    roles=roles,
+                    name=str(data.get("name") or "创意脑暴"),
+                    max_rounds=int(data.get("max_rounds", 8)),
+                    audit_rounds=audit_rounds,
+                    start_round=int(data.get("start_round", 1)),
+                    readiness_threshold=int(data.get("readiness_threshold", 85)),
+                    context_warn_tokens=int(data.get("context_warn_tokens", 30000)),
                 )
             # 已知但未实现的类型 —— 保留数据，运行时由 build_graph 抛 NotImplementedError
             roles = tuple(str(r) for r in (data.get("roles") or ()))

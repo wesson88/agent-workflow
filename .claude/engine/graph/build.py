@@ -12,7 +12,7 @@ from langgraph.graph import StateGraph, START, END
 
 from ..role_loader import load_role
 from ..workflow import WorkflowTemplate, WorkflowStep, role_to_skill_dir
-from .nodes import make_role_node, make_discussion_node
+from .nodes import make_role_node, make_discussion_node, make_brainstorm_loop_node
 from .state import ProjectState
 
 
@@ -21,15 +21,19 @@ def _normalize(name_or_alias: str) -> str:
 
 
 def _step_node_key(step: WorkflowStep, idx: int) -> str:
-    """生成 LangGraph 内部唯一节点名。type=linear 用 skill_dir，type=discussion 用名字。"""
+    """生成 LangGraph 内部唯一节点名。"""
     if step.type == "linear":
         return f"step_{idx:02d}_{role_to_skill_dir(_normalize(step.role))}"
     if step.type == "discussion":
         # 中文名转 ASCII 替代字符以避免 graph key 问题
         safe = (step.name or "discussion").replace(" ", "_").replace("/", "_")
         return f"step_{idx:02d}_disc_{safe}"
+    if step.type == "brainstorm-loop":
+        safe = (step.name or "brainstorm").replace(" ", "_").replace("/", "_")
+        return f"step_{idx:02d}_bsloop_{safe}"
     raise NotImplementedError(
-        f"工作流步骤 type='{step.type}' 暂不支持。Phase 4b 支持 linear / discussion。"
+        f"工作流步骤 type='{step.type}' 暂不支持。"
+        f"已支持：linear / discussion / brainstorm-loop。"
     )
 
 
@@ -37,15 +41,15 @@ def _step_match_target(step: WorkflowStep, target: str) -> bool:
     """步骤是否匹配 --start-from / --end-at 目标。
 
     - linear：按角色名匹配（中文名或英文别名都可，统一 normalize 后比较）
-    - discussion：按讨论名（step.name）匹配
-      （不再按 participants 匹配——避免讨论参与者与后续 linear 步骤角色重名时锚点歧义）
+    - discussion / brainstorm-loop：按 step.name 匹配
+      （不按 participants 匹配——避免参与者与后续 linear 步骤角色重名时锚点歧义）
     """
     if step.type == "linear":
         try:
             return _normalize(step.role) == _normalize(target)
         except Exception:
             return False
-    if step.type == "discussion":
+    if step.type in ("discussion", "brainstorm-loop"):
         return (step.name or "") == target
     return False
 
@@ -90,6 +94,8 @@ def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool):
         )
     if step.type == "discussion":
         return make_discussion_node(step, halt_on_failure)
+    if step.type == "brainstorm-loop":
+        return make_brainstorm_loop_node(step, halt_on_failure)
     raise NotImplementedError(f"未知步骤类型：{step.type}")
 
 

@@ -22,6 +22,7 @@ from pathlib import Path
 from ..config import PROJECT_ROOT, VAULT_ROOT
 from ..workflow import role_to_skill_dir, WorkflowStep
 from .discussion import build_discussion_graph
+from .brainstorm import build_brainstorm_graph
 from .state import ProjectState
 
 
@@ -433,4 +434,80 @@ def make_discussion_node(step: WorkflowStep, halt_on_failure: bool):
         return {"succeeded": [f"讨论:{name}"]}
 
     node.__name__ = f"discussion_{name.replace(' ', '_')}"
+    return node
+
+
+# ── 脑暴 orchestrator node（T2.6）─────────────────────────────────────
+_BRAINSTORM_GRAPH = None  # 进程内单例
+
+
+def _get_brainstorm_graph():
+    global _BRAINSTORM_GRAPH
+    if _BRAINSTORM_GRAPH is None:
+        _BRAINSTORM_GRAPH = build_brainstorm_graph()
+    return _BRAINSTORM_GRAPH
+
+
+def make_brainstorm_loop_node(step: WorkflowStep, halt_on_failure: bool):
+    """工厂函数：把 type=brainstorm-loop 的 WorkflowStep 包装成主图 node。
+
+    主图 node 入口接收 ProjectState（项目级 state），内部洐生 BrainstormState
+    去 invoke 脑暴 subgraph，跑完后回写主图 state（succeeded / failed / halted）。
+    """
+    name = step.name or "创意脑暴"
+    if len(step.roles) != 3:
+        raise ValueError(
+            f"brainstorm-loop step 必须 3 角色，实际 {len(step.roles)}: {step.roles}"
+        )
+    diverger, challenger, scribe = step.roles
+    max_rounds = step.max_rounds
+    audit_rounds = step.audit_rounds or (3, 6)
+    start_round = step.start_round
+    readiness_threshold = step.readiness_threshold
+    context_warn_tokens = step.context_warn_tokens
+
+    def node(state: ProjectState) -> dict:
+        if state.get("halted"):
+            print(f"\n⏭️  跳过脑暴循环「{name}」（上游 halt）")
+            return {"skipped": [f"脑暴:{name}"]}
+
+        print(f"\n{'=' * 60}\n🧠 脑暴节点：{name}\n{'=' * 60}")
+
+        sub_state = {
+            "project": state["project"],
+            "task": state.get("task", ""),
+            "loop_name": name,
+            "roles": (diverger, challenger, scribe),
+            "max_rounds": max_rounds,
+            "audit_rounds": audit_rounds,
+            "readiness_threshold": readiness_threshold,
+            "context_warn_tokens": context_warn_tokens,
+            "start_round": start_round,
+            "round_history": [],
+            "halted": False,
+            "finished": False,
+        }
+        try:
+            final = _get_brainstorm_graph().invoke(sub_state)
+        except Exception as e:
+            print(f"\n❌ 脑暴「{name}」异常：{e}")
+            patch = {"failed": [f"脑暴:{name}"]}
+            if halt_on_failure:
+                patch["halted"] = True
+            return patch
+
+        finish_reason = final.get("finish_reason")
+        if finish_reason in ("halted", "role_failed", "readiness_missing", "readiness_parse_failed"):
+            print(f"\n❌ 脑暴「{name}」中断（{finish_reason}）")
+            patch = {"failed": [f"脑暴:{name}"]}
+            if halt_on_failure:
+                patch["halted"] = True
+            return patch
+
+        # ready_for_prd / ask_user / stop_low_value / max_rounds / pending_gate
+        # 都视为正常退出（subgraph 已写 round_state.json，下游可读）
+        print(f"\n✅ 脑暴「{name}」结束：finish_reason={finish_reason}")
+        return {"succeeded": [f"脑暴:{name}"]}
+
+    node.__name__ = f"brainstorm_{name.replace(' ', '_')}"
     return node
