@@ -33,17 +33,17 @@ BRAINSTORM_ROLES = ("创意发散者", "创意质询者", "创意记录员")
 
 @pytest.fixture(scope="module")
 def brainstorm_roles() -> dict:
-    """加载 3 个 brainstorm 角色（在 00-系统/角色基因/ 根目录，非子域）。"""
-    from engine.config import VAULT_ROOT
-    from engine.role_loader import _build_role, invalidate_cache
+    """加载 3 个 brainstorm 角色（走 load_role 自动 rglob，不依赖具体子目录位置）。
+
+    T2.7 后 3 角色从 00-系统/角色基因/ 顶层挪到 00-系统/角色基因/通用/ 子目录。
+    走 load_role API 解耦具体路径，未来再挪也不影响测试。
+    """
+    from engine.role_loader import load_role, invalidate_cache
 
     invalidate_cache()
     roles: dict = {}
-    base = VAULT_ROOT / "00-系统/角色基因"
     for name in BRAINSTORM_ROLES:
-        note = base / f"角色-{name}.md"
-        assert note.is_file(), f"角色基因缺失：{note}"
-        roles[name] = _build_role(note)
+        roles[name] = load_role(name)
     return roles
 
 
