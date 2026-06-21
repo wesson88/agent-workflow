@@ -183,6 +183,106 @@ def _strip_evidence_lines(text: str) -> str:
     return _EVIDENCE_LINE_RE.sub("", text)
 
 
+# ── T2.7 白名单契约：业务角色严格 §1-§6 / 元角色全豁免 ─────────────────
+_SECTION_HEADING_RE = re.compile(r"^(##\s+)(\d+)(\.\d+)?\.\s*(.+)$", re.MULTILINE)
+_VERSION_HISTORY_RE = re.compile(
+    r"^##\s+\d+\.\s*版本历史.*?(?=^##\s+|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _strip_version_history(text: str) -> str:
+    """剥除"## N. 版本历史"章节（含整段内容）。"""
+    return _VERSION_HISTORY_RE.sub("", text).rstrip() + "\n"
+
+
+def _strip_dynamic_block(text: str) -> str:
+    """剥除 DYNAMIC marker 间内容 + 其外层 "## N. 运行时补丁"标题段。
+
+    元角色 system prompt 不需要 DYNAMIC 区（独立路径处理）+ 控制区说明。
+    保留其他章节完整。
+    """
+    # 剥 DYNAMIC marker 间内容（多个对都剥）
+    text = re.sub(
+        r"<!-- DYNAMIC_START -->.*?<!-- DYNAMIC_END -->",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+    # 剥 "## N. 运行时补丁..." 标题段（到下一个 ##）
+    text = re.sub(
+        r"^##\s+\d+\.\s*运行时补丁.*?(?=^##\s+|\Z)",
+        "",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    return text.rstrip() + "\n"
+
+
+def _extract_sections_by_range(body: str, start_n: int, end_n: int) -> str:
+    """从 body 抽取 §start_n ~ §end_n 章节（含子节 §N.x）。
+
+    遇到 §(end_n+1) 或更大序号或文末停。保留 H1 标题。
+    """
+    lines = body.splitlines(keepends=True)
+    result: list[str] = []
+    in_range = False
+    # 先把 H1（# 角色：...）拿出来
+    for line in lines:
+        if line.startswith("# ") and not line.startswith("## "):
+            result.append(line)
+            break
+    # 抽 §start_n ~ §end_n
+    for line in lines:
+        m = re.match(r"^##\s+(\d+)(\.\d+)?\.\s*", line)
+        if m:
+            n = int(m.group(1))
+            if start_n <= n <= end_n:
+                in_range = True
+                result.append(line)
+            else:
+                in_range = False
+        elif in_range:
+            result.append(line)
+    return "".join(result)
+
+
+def _extract_role_prompt_sections(body: str, domain: str) -> tuple[str, str]:
+    """T2.7 白名单契约：业务角色严格 §1-§6 / 元角色全 body 减 DYNAMIC + 版本历史。
+
+    返回 (text, path_used)：
+      - path_used="business_strict"：domain ≠ 元，按 §1-§6 严格抽取
+      - path_used="meta_full"：domain == 元，全 body 减 DYNAMIC + 版本历史
+
+    业务角色 §1-§6 任一缺失或乱序 → raise RuntimeError 阻断主路径。
+    """
+    if domain == "元":
+        text = _strip_dynamic_block(body)
+        text = _strip_version_history(text)
+        return text.strip(), "meta_full"
+
+    # 业务角色严格 §1-§6
+    sections = _SECTION_HEADING_RE.findall(body)
+    if not sections:
+        raise RuntimeError(
+            f"业务角色基因结构不合规：未找到任何 ## N. 标题（domain={domain}）"
+        )
+    # 收集顶层章节序号（不含子节 §N.x）
+    top_nums = sorted({int(n) for _, n, sub, _ in sections if not sub})
+    if not top_nums:
+        raise RuntimeError(
+            f"业务角色基因未找到顶层 ## N. 章节（domain={domain}）"
+        )
+    missing = [i for i in range(1, 7) if i not in top_nums]
+    if missing:
+        raise RuntimeError(
+            f"业务角色基因 §1-§6 缺章：缺 {missing}（domain={domain}，"
+            f"实际章节 {top_nums}）"
+        )
+    text = _extract_sections_by_range(body, 1, 6)
+    return text.strip(), "business_strict"
+
+
 def _extract_dynamic_patch(body: str) -> str:
     """从角色笔记正文里抽出 DYNAMIC 区域的有效补丁（过滤注释行）。
 
@@ -220,19 +320,24 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     """
     role = load_role(role_name_or_alias)
 
-    # ── static：核心层 ────────────────────────────────────
-    CORE_SECTIONS = ["全局约束", "角色设定", "角色", "身份", "编码规范", "技术约束"]
-    core_text = _extract_sections(role.body, CORE_SECTIONS)
+    # ── static：核心层（T2.7 白名单契约）────────────────────
+    # 业务角色严格 §1-§6 / 元角色全 body 减 DYNAMIC + 版本历史
+    core_text, path_used = _extract_role_prompt_sections(role.body, role.domain)
 
-    if "⚠️ [sections 警告]" in core_text:
-        summary = [
-            f"角色：{role.name}",
-            f"领域：{role.domain}",
-            f"风格：{role.style}",
-        ]
-        if role.skills:
-            summary.append(f"技能：{', '.join(role.skills)}")
-        core_text = "\n".join(summary)
+    # 写 audit.jsonl：本次 system prompt 抽取路径
+    try:
+        from engine.llm import _append_token_audit
+        _append_token_audit(
+            "info", "role_prompt_extracted",
+            {
+                "role": role.name,
+                "domain": role.domain,
+                "path_used": path_used,
+                "core_chars": len(core_text),
+            },
+        )
+    except Exception:
+        pass
 
     static_parts = [
         f"## 角色：{role.name}",

@@ -359,6 +359,53 @@ def _measure_role(path: Path) -> dict:
     is_agent_generated = bool(fm.get("agent_generated", False))
     is_tiny = fm.get("role", "") in ("批判者", "用户体验者")
 
+    # T2.7 白名单契约 lint
+    # 业务角色（domain != 元）必须 §1-§6 完整 + §7 是运行时补丁 + §8 是版本历史
+    # 元角色仅检查 DYNAMIC marker + 版本历史段存在
+    # ⚠️ 直接扫原 body（不依赖 body_no_dynamic），避免 §6.4 DYNAMIC marker 滥用
+    # 反模式（字面引用 marker 让 _DYNAMIC_RE 非贪婪匹配吞掉中间章节）干扰本 lint
+    import re as _re
+    _TOP_SECTION_RE = _re.compile(r"^##\s+(\d+)\.\s+(.+)$", _re.MULTILINE)
+    top_sections: dict[int, str] = {}
+    for m in _TOP_SECTION_RE.finditer(body):
+        top_sections[int(m.group(1))] = m.group(2).strip()
+
+    prompt_whitelist_issues: list[str] = []
+    if is_meta:
+        # 元角色：DYNAMIC marker 已在 has_dynamic_markers 检查；只查版本历史存在
+        has_version = any("版本历史" in title for title in top_sections.values())
+        if not has_version:
+            prompt_whitelist_issues.append("元角色缺『版本历史』章节")
+    else:
+        # 业务角色严格 §1-§6 完整
+        missing_business_sections = [n for n in range(1, 7) if n not in top_sections]
+        if missing_business_sections:
+            prompt_whitelist_issues.append(
+                f"业务角色 §1-§6 缺章：缺 §{missing_business_sections}"
+            )
+        # §7 应该是"运行时补丁"标题
+        s7_title = top_sections.get(7, "")
+        if s7_title and "运行时补丁" not in s7_title and "控制区" not in s7_title:
+            prompt_whitelist_issues.append(
+                f"业务角色 §7 标题应为『运行时补丁（控制区）』，实际：『{s7_title}』"
+            )
+        # §8 应该是"版本历史"
+        s8_title = top_sections.get(8, "")
+        if s8_title and "版本历史" not in s8_title:
+            prompt_whitelist_issues.append(
+                f"业务角色 §8 标题应为『版本历史』，实际：『{s8_title}』"
+            )
+
+    # 新业务角色更严格：agent_generated=true 不允许 prompt_whitelist 任何不合规
+    prompt_whitelist_level = "OK"
+    if prompt_whitelist_issues:
+        if not is_meta and is_agent_generated:
+            prompt_whitelist_level = "ERROR_NEW"
+        elif not is_meta:
+            prompt_whitelist_level = "WARN_NORMALIZE"
+        else:
+            prompt_whitelist_level = "WARN_META"
+
     return {
         "filename": path.name,
         "role": fm.get("role", path.stem),
@@ -389,6 +436,9 @@ def _measure_role(path: Path) -> dict:
         "body_over_limit": body_no_dynamic_chars > LIMITS["body_no_dynamic"],
         "section_over_limit": max_section > LIMITS["single_section"],
         "dynamic_over_limit": len(dynamic_body) > LIMITS["dynamic"],
+        # T2.7 prompt 白名单契约 lint
+        "prompt_whitelist_issues": prompt_whitelist_issues,
+        "prompt_whitelist_level": prompt_whitelist_level,
     }
 
 
@@ -445,6 +495,26 @@ def _format_measurements(measures: list[dict]) -> str:
             lines.append(f"\n### {m['role']}（{m['filename']}）")
             for iss in issues:
                 lines.append(f"- {iss}")
+
+    # T2.7 白名单契约 lint 段落
+    lines.append("")
+    lines.append("## T2.7 prompt 白名单契约 lint")
+    lines.append("")
+    lines.append("| 角色 | domain | 等级 | 问题 |")
+    lines.append("|---|---|---|---|")
+    for m in measures:
+        level = m.get("prompt_whitelist_level", "OK")
+        issues = m.get("prompt_whitelist_issues", [])
+        if level == "OK":
+            continue
+        badge = {
+            "ERROR_NEW": "🔴 ERROR",
+            "WARN_NORMALIZE": "🟡 WARN",
+            "WARN_META": "🔵 INFO",
+        }.get(level, level)
+        lines.append(
+            f"| {m['role']} | {m['domain']} | {badge} | {'; '.join(issues)} |"
+        )
     return "\n".join(lines)
 
 

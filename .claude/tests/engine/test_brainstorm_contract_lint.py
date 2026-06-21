@@ -60,10 +60,13 @@ class TestRoleInventory:
     def test_three_roles_loaded(self, brainstorm_roles):
         assert set(brainstorm_roles.keys()) == set(BRAINSTORM_ROLES)
 
-    def test_all_meta_domain(self, brainstorm_roles):
-        """3 角色全部 domain=元（跨域元角色）。"""
+    def test_all_business_general_domain(self, brainstorm_roles):
+        """3 角色 domain=通用（T2.7 修正：脑暴 3 角色产业务内容，不是元角色）。"""
         for name, role in brainstorm_roles.items():
-            assert role.domain == "元", f"{name} domain 应为 '元'，实际 {role.domain!r}"
+            assert role.domain == "通用", (
+                f"{name} domain 应为 '通用'（脑暴角色产业务内容），"
+                f"实际 {role.domain!r}"
+            )
 
     def test_all_cross_domain(self, brainstorm_roles):
         """3 角色 frontmatter 应声明 domains: [se, music, manhua]（跨域复用）。"""
