@@ -27,7 +27,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
-    load_rule_block,
+    load_rule_block, load_skill_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -210,17 +210,15 @@ def main() -> int:
         if rule_block:
             context = context + "\n\n" + rule_block
 
-        # 按 task 正文里的 wikilink 按需注入 frontend skill（仅 F<N>- 前缀）
+        # D3 双路径：wikilink 显式 ∪ keyword 触发，按 stem 去重 union
         task_text = task_file.read_text(encoding="utf-8")
-        skill_block, loaded_skills, unresolved = _load_task_skills(task_text)
-        if loaded_skills:
-            print(f"[{ROLE}] 📚 task 引用 skill: {', '.join(loaded_skills)}")
-        if unresolved:
-            print(
-                f"[{ROLE}] ⚠️ task 引用了 {len(unresolved)} 个未解析 wikilink: "
-                f"{', '.join(unresolved)}（已跳过，task 继续）",
-                file=sys.stderr,
-            )
+        skill_block, skill_hint = load_skill_block(
+            ROLE, task_text, upstream_text="", domain="se",
+        )
+        if skill_block:
+            print(f"[{ROLE}] 📚 skill_trigger（双路径）：{skill_hint}")
+        else:
+            print(f"[{ROLE}] skill_trigger：{skill_hint}")
 
         # 注入已生成文件列表，防止后续任务重新发明架构
         prior_files = [p for p in written_all if p.startswith("src/frontend/") or p.startswith("tests/")]

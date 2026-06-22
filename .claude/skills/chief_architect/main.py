@@ -25,7 +25,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
-    load_rule_block,
+    load_rule_block, load_skill_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -80,6 +80,17 @@ def main() -> int:
         context = read_input_files([prd, tech_stack]) + "\n\n" + rule_block
     else:
         context = read_input_files([prd, tech_stack, decomp_rules])
+
+    # D3 双路径 skill 加载：扫 task 描述 + PRD 关键词触发 A1-A5 等架构师 skill
+    prd_text = prd.read_text(encoding="utf-8") if prd.exists() else ""
+    skill_block, skill_hint = load_skill_block(
+        ROLE, task or "", upstream_text=prd_text, domain="se",
+    )
+    if skill_block:
+        print(f"[{ROLE}] 📚 skill_trigger（双路径）：{skill_hint}")
+        context = context + "\n\n" + skill_block
+    else:
+        print(f"[{ROLE}] skill_trigger：{skill_hint}")
 
     base_prompt = (
         f"项目名：`{project}`\n\n"

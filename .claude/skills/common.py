@@ -535,6 +535,112 @@ def load_genre_skill_block(
     return block, " / ".join(hint_parts)
 
 
+def load_skill_block(
+    role_name: str,
+    task_text: str,
+    upstream_text: str = "",
+    domain: str = "se",
+    *,
+    code_root=None,
+) -> tuple[str, str]:
+    """通用双路径 skill 加载（D1 推广用，覆盖 SE 域 5 角色）。
+
+    与 `load_genre_skill_block`（music 专用）的区别：
+    - wikilink **不过滤**（无 music 命名前缀限制）—— 信任上游显式 `[[skill]]` 引用
+    - wikilink **不强制 role_dir 范围** —— 允许跨目录加载（如架构师写 [[B7-...]] 给后端用）
+    - 可选 `code_root` 参数：dev_backend / dev_frontend 等需扫项目代码做 file_patterns 时传入
+
+    vault 路径：`20-知识/角色技能/{domain}/{role_name}/`（domain 默认 "se"）。
+
+    返回 (skill_block, source_hint)，目录不存在或双路径均空 → ("", 原因)。
+    """
+    from engine import (
+        VAULT_ROOT, discover_role_skills, render_triggered_block,
+        expand_wikilinks, extract_core_section,
+    )
+    from engine.obsidian_io import split_frontmatter
+
+    role_dir = VAULT_ROOT / "20-知识" / "角色技能" / domain / role_name
+    if not role_dir.is_dir():
+        return "", f"skill 目录不存在：{role_dir}"
+
+    # ── 1. wikilink 显式路径（不过滤，信任上游）────────────────────────────
+    wikilink_parts: list[str] = []
+    wikilink_loaded: list[str] = []
+    wikilink_unresolved: list[str] = []
+    haystack = (task_text or "") + "\n" + (upstream_text or "")
+    if haystack.strip():
+        try:
+            result = expand_wikilinks(
+                haystack,
+                filter=None,
+                max_chars_per_link=3000,
+                total_char_budget=12_000,
+                max_depth=0,
+                on_unresolved="warn",
+            )
+            for e in result.expansions:
+                if e.reason != "ok" or not e.content or not e.path:
+                    continue
+                raw = e.path.read_text(encoding="utf-8")
+                _, body = split_frontmatter(raw)
+                core = extract_core_section(body).strip()
+                if len(core) > 3000:
+                    core = core[:3000] + (
+                        f"\n\n…（截断：原文 {len(core)} 字符，本次取前 3000）"
+                    )
+                wikilink_parts.append(
+                    f"=== Skill (wikilink:[[{e.wikilink.target}]]) ===\n{core}"
+                )
+                wikilink_loaded.append(e.path.stem)
+            wikilink_unresolved = list(result.unresolved)
+        except Exception as exc:
+            print(
+                f"[load_skill_block:{role_name}] ⚠️ wikilink 展开失败 "
+                f"（{type(exc).__name__}: {exc}），仅走 keyword 路径。",
+                file=sys.stderr,
+            )
+
+    # ── 2. keyword 触发路径（兜底，可选 code_root）────────────────────────
+    if code_root is not None:
+        hits = discover_role_skills(role_dir, task_text, upstream_text, code_root)
+    else:
+        hits = discover_role_skills(role_dir, task_text, upstream_text)
+    dedup_hits = [(p, r) for p, r in hits if p.stem not in set(wikilink_loaded)]
+    keyword_block, keyword_loaded = render_triggered_block(dedup_hits)
+    keyword_body = ""
+    if keyword_block:
+        idx = keyword_block.find("=== Skill")
+        keyword_body = keyword_block[idx:].rstrip() if idx >= 0 else keyword_block.strip()
+
+    # ── 3. 合并 ──────────────────────────────────────────────────────────
+    if not wikilink_parts and not keyword_body:
+        hint = "双路径均空"
+        if wikilink_unresolved:
+            hint += f"（wikilink unresolved={wikilink_unresolved}）"
+        return "", hint
+
+    sections: list[str] = []
+    if wikilink_parts:
+        sections.append("\n\n".join(wikilink_parts))
+    if keyword_body:
+        sections.append(keyword_body)
+
+    block = (
+        "\n\n## 引用 / 自动触发技能（wikilink ∪ keyword）\n\n"
+        + "\n\n".join(sections)
+        + "\n"
+    )
+    hint_parts = [
+        f"wikilink={len(wikilink_loaded)}",
+        f"keyword={len(keyword_loaded)}",
+        f"union={len(wikilink_loaded) + len(keyword_loaded)}",
+    ]
+    if wikilink_unresolved:
+        hint_parts.append(f"unresolved={len(wikilink_unresolved)}")
+    return block, " / ".join(hint_parts)
+
+
 # ── 输入文件批量读取 ──────────────────────────────────────────────────────────────
 def _extract_sections(content: str, sections: list[str]) -> str:
     """从 Markdown 文档中只提取指定章节（## 标题匹配）。
