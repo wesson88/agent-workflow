@@ -477,7 +477,7 @@ def _run_pass_split(
         "```json\n"
         "{\n"
         '  "tasks": [\n'
-        '    {"id": "T01", "title": "...", "summary": "1-3 句，含核心交付 + 关键依赖", '
+        '    {"id": "T01", "title": "...", "summary": "1-3 句，含核心交付 + 关键依赖 + [[skill]] wikilink", '
         '"estimate_hours": 3, "depends_on": []},\n'
         '    {"id": "T02", "title": "...", "summary": "...", '
         '"estimate_hours": 2, "depends_on": ["T01"]}\n'
@@ -492,6 +492,14 @@ def _run_pass_split(
         "- estimate_hours 为整数（1-8），超过 4 小时的任务**必须**在 summary 中说明拆法\n"
         "- depends_on 是任务 id 数组（如 `[\"T01\", \"T02\"]`），无依赖填 `[]`，**不要写成字符串**\n"
         "- 不需要复述架构决议 / 依赖图 / 速查表（引擎模板会处理表头与统计行）\n"
+        "\n"
+        "**派活 skill wikilink 约束（B1 D4 推广）**：\n"
+        f"- 在每个任务的 `summary` 字段里**显式写出**该任务依赖的 skill `[[skill 文件名]]` wikilink\n"
+        "- skill wikilink **只能从上文 §6 工程参考 skill 索引（F-技术主管 / F-后端 / F-前端）中挑**\n"
+        f"- 命名规约：`TL<N>-标题` 技术主管域 / `B<N>-标题` 后端域 / `F<N>-标题` 前端域\n"
+        "- **禁止编造文件名**——不在索引里出现的 wikilink 一律不写\n"
+        "- 不确定时优先不写 wikilink（下游有 keyword 触发器兜底）\n"
+        "- summary 示例：`T01 实现用户登录 API，含 POST /login + JWT 签发，依赖 [[B7-FastAPI共享资源async]] + [[B5-空集守卫]]`\n"
     )
 
     if plan is None:
