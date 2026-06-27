@@ -127,62 +127,27 @@ gpt-4o-mini:
 # ── Gemini ────────────────────────────────────────────────
 # Gemini 使用 SentencePiece 分词器，tiktoken 不支持。
 # tokenizer: chars → 由 token_counter.py 用 chars // 2.5 估算。
-# API 路由：Gemini 官方提供 OpenAI 兼容端点（需 GEMINI_API_KEY）。
+# API 路由：Gemini 官方提供 OpenAI 兼容端点。
 # CLI 路由：Google Gemini CLI（gemini），无 --system-prompt flag。
+#
+# 双 key 分流（2026-06 起）：
+#   GEMINI_API_KEY_FREE  → flash 系列（量大、便宜，跑免费配额）
+#   GEMINI_API_KEY_PAID  → pro 系列（贵且关键，付费避免被免费 rate limit 卡）
+#   key 在 .env 里设置；任一为空时对应模型在入口审计阶段报错。
 #
 # 精度说明：chars 估算对 Gemini 误差约 ±20%（英文偏低，中文偏高）。
 # 如需精确计数，安装 google-generativeai 并调用 model.count_tokens()。
 
-gemini-2.0-pro:
-  mode: dual_track
-  prefer: auto
-  tokenizer: chars
-  context_window: 2000000
-  api:
-    kind: openai_compat
-    key_env: GEMINI_API_KEY
-    base_url: https://generativelanguage.googleapis.com/v1beta/openai
-    model: gemini-2.0-pro
-  cli:
-    path: gemini
-    model: gemini-2.0-pro
-    output_format: plain
-    extra_args: []
-    use_system_prompt_flag: false
-
-gemini-2.0-flash:
-  mode: dual_track
-  prefer: auto
+# Flash 系列 → 免费 key
+gemini-3.5-flash:
+  mode: api_only
   tokenizer: chars
   context_window: 1000000
   api:
     kind: openai_compat
-    key_env: GEMINI_API_KEY
+    key_env: GEMINI_API_KEY_FREE
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
-    model: gemini-2.0-flash
-  cli:
-    path: gemini
-    model: gemini-2.0-flash
-    output_format: plain
-    extra_args: []
-    use_system_prompt_flag: false
-
-gemini-2.5-pro:
-  mode: dual_track
-  prefer: auto
-  tokenizer: chars
-  context_window: 1000000
-  api:
-    kind: openai_compat
-    key_env: GEMINI_API_KEY
-    base_url: https://generativelanguage.googleapis.com/v1beta/openai
-    model: gemini-2.5-pro-preview-05-06
-  cli:
-    path: gemini
-    model: gemini-2.5-pro
-    output_format: plain
-    extra_args: []
-    use_system_prompt_flag: false
+    model: gemini-3.5-flash
 
 gemini-2.5-flash:
   mode: dual_track
@@ -191,9 +156,9 @@ gemini-2.5-flash:
   context_window: 1000000
   api:
     kind: openai_compat
-    key_env: GEMINI_API_KEY
+    key_env: GEMINI_API_KEY_FREE
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
-    model: gemini-2.5-flash-preview-04-17
+    model: gemini-2.5-flash
   cli:
     path: gemini
     model: gemini-2.5-flash
@@ -201,17 +166,33 @@ gemini-2.5-flash:
     extra_args: []
     use_system_prompt_flag: false
 
-# 保留旧 key 向后兼容
-gemini-pro:
-  mode: cli_only
+# Pro 系列 → 收费 key
+gemini-2.5-pro:
+  mode: dual_track
+  prefer: auto
   tokenizer: chars
-  context_window: 32000
+  context_window: 1000000
+  api:
+    kind: openai_compat
+    key_env: GEMINI_API_KEY_PAID
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-2.5-pro
   cli:
     path: gemini
-    model: gemini-2.0-pro
+    model: gemini-2.5-pro
     output_format: plain
     extra_args: []
     use_system_prompt_flag: false
+
+gemini-3.1-pro-preview:
+  mode: api_only
+  tokenizer: chars
+  context_window: 1000000
+  api:
+    kind: openai_compat
+    key_env: GEMINI_API_KEY_PAID
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-3.1-pro-preview
 
 # ── Ollama（本地）─────────────────────────────────────────
 # 默认监听 http://localhost:11434/v1，OpenAI 兼容
