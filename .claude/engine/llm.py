@@ -154,7 +154,7 @@ def is_provider_available(name: str) -> bool:
 
 # ── 公共入口 ────────────────────────────────────────────
 def call_llm(
-    system_prompt: str | tuple[str, str],
+    system_prompt: str | tuple[str, str] | tuple[str, str, str],
     user_prompt: str,
     *,
     model: str,
@@ -165,9 +165,14 @@ def call_llm(
     """统一 LLM 调用入口。
 
     参数：
-        system_prompt: 系统提示词，或 (static, dynamic) 两段 tuple。
-            tuple 形式仅对 Anthropic SDK 路径生效：static 块打 cache_control，
-            dynamic 块不缓存；CLI 路径自动拼接为单字符串。
+        system_prompt: 系统提示词。3 种形态（自动分派）：
+            - str：单字符串（老 API）
+            - (static, dynamic) 2-tuple：static 打 cache_control，dynamic 不 cache
+            - (static, dynamic_own, dynamic_upstream) 3-tuple（**B1 P10.5 新增**）：
+              static + dynamic_own 各自打独立 cache breakpoint（own 变化频率
+              低，跨 call 命中率高）；dynamic_upstream 不 cache（上游 [NEW]
+              补丁频繁变化）
+            CLI 路径全部拼为单字符串。
         user_prompt: 用户输入
         model: 必传；同时是 llm_providers.yaml 中的 key
         max_tokens: API 路径有效；CLI 路径不直接控制（受模型/订阅限制）
@@ -180,28 +185,41 @@ def call_llm(
     cfg = get_provider(model)
     track = _resolve_track(cfg)
 
-    # 规范化 system_prompt 为 (static, dynamic)，给审计 + 各路径分发统一格式
+    # 规范化 system_prompt 为 (static, dynamic_own, dynamic_upstream) 三段
     if isinstance(system_prompt, tuple):
-        static, dynamic = system_prompt
+        if len(system_prompt) == 3:
+            static, dynamic_own, dynamic_upstream = system_prompt
+        elif len(system_prompt) == 2:
+            static, dynamic_flat = system_prompt
+            dynamic_own, dynamic_upstream = "", dynamic_flat
+        else:
+            raise ValueError(
+                f"system_prompt tuple 长度必须为 2 或 3，实际：{len(system_prompt)}"
+            )
     else:
-        static, dynamic = system_prompt, ""
+        static, dynamic_own, dynamic_upstream = system_prompt, "", ""
+
+    dynamic_combined = "\n".join(filter(None, [dynamic_own, dynamic_upstream]))
 
     # 入口审计：在真正调用 LLM 前过两道护栏（system 单独阈值 + 总量百分比/角色预算）
-    _audit_token_budget(model, static, dynamic, user_prompt, input_budget=input_budget)
+    _audit_token_budget(model, static, dynamic_combined, user_prompt, input_budget=input_budget)
 
     if track == "api":
         api_cfg = cfg["api"]
         kind = api_cfg.get("kind", "anthropic")
         if kind == "anthropic":
-            return _call_anthropic_sdk(api_cfg, static, dynamic, user_prompt, max_tokens, print_stream)
+            return _call_anthropic_sdk(
+                api_cfg, static, dynamic_own, dynamic_upstream,
+                user_prompt, max_tokens, print_stream,
+            )
         # openai_compat：拼接为单字符串
-        flat = "\n\n".join(filter(None, [static, dynamic])) if dynamic else static
+        flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
         if kind == "openai_compat":
             return _call_openai_compat(api_cfg, flat, user_prompt, max_tokens, print_stream)
         raise ValueError(f"未知 api kind：{kind}（provider={model}）")
 
     if track == "cli":
-        flat = "\n\n".join(filter(None, [static, dynamic])) if dynamic else static
+        flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
         return _call_cli(cfg["cli"], flat, user_prompt, print_stream)
 
     # unavailable：给出可操作的提示
@@ -336,24 +354,40 @@ def _audit_token_budget(
 
 # ── Anthropic SDK ────────────────────────────────────────
 def _call_anthropic_sdk(
-    api_cfg: dict, system_static: str, system_dynamic: str, user_prompt: str,
+    api_cfg: dict, system_static: str,
+    system_dynamic_own: str, system_dynamic_upstream: str,
+    user_prompt: str,
     max_tokens: int, print_stream: bool,
 ) -> str:
-    """调用 Anthropic SDK，静态/动态 system prompt 分块缓存。
+    """调用 Anthropic SDK，B1（P10.5）3-block 分层缓存。
 
-    - system_static：角色设定 + 全局约束 + 输出格式规范，几乎不变 → cache_control=ephemeral
-    - system_dynamic：DYNAMIC 补丁（每轮可能变化）→ 不缓存
+    - system_static：角色 §1-§6 + contract + capability + OUTPUT_FORMAT_SPEC
+      几乎不变 → 打 breakpoint 1（cache_control=ephemeral）
+    - system_dynamic_own：当前角色 DYNAMIC 补丁（B4 label 过滤后只含 [KEEP]/[GRADUATE?]）
+      变化频率低 → 打 breakpoint 2（跨 call 复用概率高）
+    - system_dynamic_upstream：上游角色 DYNAMIC 补丁
+      变化频率高 → 不 cache
     - 缓存有效期 5 分钟（同一 API key 内跨请求共享），命中后费用降至 1/10
+    - 向后兼容：3-tuple 调用者传 dynamic_own="", 走 static + dynamic_upstream；
+      2-tuple 调用者被 call_llm 归一为 dynamic_upstream 路径（即老行为）
     """
     import anthropic  # 延迟 import
     key = os.environ.get(api_cfg["key_env"], "")
     client = anthropic.Anthropic(api_key=key, timeout=300.0) if key else anthropic.Anthropic(timeout=300.0)
 
+    # B1：3-block 系统 prompt。Anthropic API 最多 4 个 cache breakpoint，
+    # 这里用 2 个（static + dynamic_own），dynamic_upstream 不打 cache。
     system_block: list[dict] = [
         {"type": "text", "text": system_static, "cache_control": {"type": "ephemeral"}},
     ]
-    if system_dynamic.strip():
-        system_block.append({"type": "text", "text": system_dynamic})
+    if system_dynamic_own.strip():
+        system_block.append({
+            "type": "text",
+            "text": system_dynamic_own,
+            "cache_control": {"type": "ephemeral"},
+        })
+    if system_dynamic_upstream.strip():
+        system_block.append({"type": "text", "text": system_dynamic_upstream})
 
     _RETRYABLE = (
         anthropic.RateLimitError,

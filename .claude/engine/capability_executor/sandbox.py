@@ -19,6 +19,7 @@ capability_executor/sandbox.py — 路径 sandbox 校验。
 from __future__ import annotations
 
 import fnmatch
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 from ..config import VAULT_ROOT
@@ -44,6 +45,23 @@ def _to_rel_posix(path: Path | str, root: Path) -> str | None:
     return str(PurePosixPath(rel))
 
 
+@lru_cache(maxsize=256)
+def _match_rel_against_patterns(rel: str, patterns_tuple: tuple[str, ...]) -> bool:
+    """B5：可缓存的内层 fnmatch 循环。
+
+    key = (rel_posix_str, allowed_patterns_tuple)；
+    workflow 里 allowed_patterns 通常 3-5 个固定 pattern，rel 有大量重复
+    （每个 capability 会对多个 input/output 校验），命中率高。
+    """
+    for pat in patterns_tuple:
+        pat_clean = pat.rstrip("/")
+        if fnmatch.fnmatch(rel, pat_clean):
+            return True
+        if pat.endswith("/") and fnmatch.fnmatch(rel, pat_clean + "/*"):
+            return True
+    return False
+
+
 def check_path_within(
     path: Path | str,
     allowed_patterns: list[str],
@@ -60,21 +78,19 @@ def check_path_within(
     - 目录后缀 `/`（如 `10-项目/*/交付物/`）视为"允许该目录及其子孙"
     - 无 `/` 后缀（如 `10-项目/*/API契约.md`）视为"精确文件匹配"
     - fnmatch 特性：`*` 不跨 `/`（跟 shell glob 一致，规范 §3.2 隐含）
+
+    B5（P10.5）：内层 fnmatch 循环走 `_match_rel_against_patterns` lru_cache。
     """
     vr = (vault_root or VAULT_ROOT).resolve()
     rel = _to_rel_posix(path, vr)
     if rel is None:
         return False
+    return _match_rel_against_patterns(rel, tuple(allowed_patterns))
 
-    for pat in allowed_patterns:
-        pat_clean = pat.rstrip("/")
-        # 精确路径匹配
-        if fnmatch.fnmatch(rel, pat_clean):
-            return True
-        # 目录前缀匹配（allowed_pattern 以 / 结尾）
-        if pat.endswith("/") and fnmatch.fnmatch(rel, pat_clean + "/*"):
-            return True
-    return False
+
+def invalidate_cache() -> None:
+    """B5：清 fnmatch cache（测试用）。"""
+    _match_rel_against_patterns.cache_clear()
 
 
 def assert_path_within(

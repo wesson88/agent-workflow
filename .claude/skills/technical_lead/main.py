@@ -51,19 +51,9 @@ _ROUND_HEADING_RE = re.compile(r"^### 第\s*(\d+)\s*轮\b", re.MULTILINE)
 # 末轮决议合计上限（多份脑暴拼接后的总体积，防止极端情况打爆 prompt）
 _DISCUSSION_LAST_ROUND_MAX_CHARS = 30 * 1024
 
-# §3.2 章节级输入：TL 派活只需系统设计中「模块结构 / 接口契约 / 错误处理 / 任务约束 / 技术映射」。
-# 跨项目章节命名差异大（3 样本观测：pain-radar / mini-ledger / _quiz-game + 2026-06-09 重跑），
-# 用关键词 any-match 兜底；全部未命中时 _extract_sections 回退全文 + warning，兼容历史项目。
-# 单文件均值 ~14-18KB → 章节裁剪后 ~5-9KB，单次省 ~3-5K input tokens。
-_SYS_DESIGN_SECTIONS_FOR_TL = [
-    "模块划分", "服务边界", "业务域", "业务领域",     # 模块结构（业务域 / 领域驱动两种说法）
-    "前后端模块", "模块依赖", "目录布局",            # 模块边界 / 目录约定
-    "数据流", "数据模型",                            # 数据契约
-    "API 契约", "API契约", "接口", "外部依赖",       # 接口契约（含外部依赖与契约）
-    "错误处理", "韧性", "失败模式", "降级",          # 错误处理（多命名变体）
-    "任务粒度", "交付下游", "关键约束",              # 任务约束
-    "技术栈映射", "技术栈",                          # 技术约束
-]
+# B3（P10.5）：抽到 common.SYS_DESIGN_SECTIONS_KEYWORDS 共享。
+# 保留本地 alias 保 diff 最小 + 引用清晰。
+from common import SYS_DESIGN_SECTIONS_KEYWORDS as _SYS_DESIGN_SECTIONS_FOR_TL  # noqa: E402
 
 
 def _extract_last_round_text(content: str) -> str | None:

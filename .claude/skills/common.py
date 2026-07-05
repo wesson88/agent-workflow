@@ -331,33 +331,87 @@ def _extract_role_prompt_sections(body: str, domain: str) -> tuple[str, str]:
     return text.strip(), "business_strict"
 
 
+# B4（P10.5）：DYNAMIC 补丁 label 过滤 —— 只把 [KEEP] / [GRADUATE?] 状态的
+# 补丁进执行 prompt；[NEW] / [DROP?] 属于复盘者视角的实验状态，不该干扰
+# 正在跑的角色 LLM。**依据**：capability 注册表规范 §6 生命周期约定 +
+# 2026-07-05 code review Explore-2 分析（DYNAMIC 段占 250-1250 tokens/call）。
+#
+# 匹配格式：`# Patch [<时间>] [<label>] <标题>`
+# 补丁块从含 `# Patch [...] [<label>]` 的注释行开始，直到下一个 `# Patch` 或末尾。
+_PATCH_HEADER_RE = re.compile(
+    r"^\s*#\s*Patch\s*\[[^\]]+\]\s*\[(?P<label>[A-Z?]+)\]",
+    re.IGNORECASE,
+)
+# 只有这些 label 会进执行 prompt。[NEW] 补丁太新（还没实战证据），[DROP?]
+# 已被复盘者标记为待淘汰，两者不该继续污染 prompt。
+_EXECUTION_KEEP_LABELS = frozenset({"KEEP", "GRADUATE?"})
+
+
 def _extract_dynamic_patch(body: str) -> str:
-    """从角色笔记正文里抽出 DYNAMIC 区域的有效补丁（过滤注释行）。
+    """从角色笔记正文里抽出 DYNAMIC 区域的**执行相关**补丁。
 
     取**最后一对** DYNAMIC_START/DYNAMIC_END：角色笔记的 §3.1 / §4 等说明
     段经常字面引用 `<!-- DYNAMIC_START -->` / `<!-- DYNAMIC_END -->` marker
     （在反引号内），non-greedy `.*?` 会误抓到首个 marker → 末尾 marker
     之间的内容，包括所有正文。固定取最后一对就是真正的控制区。
 
-    过滤两类无效行：
-    - markdown 注释 `# 这是注释`（含模板说明 / 占位符行）
-    - HTML 注释 `<!-- 元角色不接收自身补丁 -->`（元角色 DYNAMIC 区惯用占位）
+    行级过滤（保留）：
+    - 剥离 markdown 注释 `# 这是注释`（含模板说明 / 占位符行）
+    - 剥离 HTML 注释 `<!-- 元角色不接收自身补丁 -->`（元角色 DYNAMIC 区惯用占位）
+
+    **B4 patch-block 级过滤**（新增）：
+    - 识别 `# Patch [<时间>] [<label>] <标题>` 起始的补丁块
+    - 只保留 label ∈ {KEEP, GRADUATE?} 的补丁块；[NEW]/[DROP?] 剥除
+    - 补丁块延伸到下一个 `# Patch [...]` 或末尾
+    - 若整个 DYNAMIC 区无 `# Patch [...]` header（即老格式无 label），全保留
+      （向后兼容：不破坏尚未引入 label 语义的 role）
     """
     matches = list(_DYNAMIC_RE.finditer(body))
     if not matches:
         return ""
     text = matches[-1].group(1).strip()
-    keep = []
+
+    # 老流程：先做行级注释剥离
+    stripped_lines: list[str] = []
     for l in text.splitlines():
         s = l.strip()
         if not s:
+            stripped_lines.append(l)  # 保留空行帮助补丁块分隔
             continue
-        if s.startswith("#"):                         # markdown 注释
+        if s.startswith("<!--") and s.endswith("-->"):
             continue
-        if s.startswith("<!--") and s.endswith("-->"):  # HTML 注释
-            continue
-        keep.append(l)
-    return "\n".join(keep).strip()
+        stripped_lines.append(l)
+
+    # B4 patch-block 级过滤
+    has_any_patch_header = any(
+        _PATCH_HEADER_RE.match(l) for l in stripped_lines
+    )
+    if not has_any_patch_header:
+        # 兼容老 DYNAMIC 区：无 label 语义 → 保留行级过滤结果（并剥离 markdown 注释）
+        return "\n".join(
+            l for l in stripped_lines
+            if not l.strip().startswith("#")
+        ).strip()
+
+    # 有 `# Patch [...]` header：按补丁块切分，只保留 KEEP / GRADUATE?
+    kept_blocks: list[str] = []
+    current_block: list[str] = []
+    current_kept = False
+    for l in stripped_lines:
+        m = _PATCH_HEADER_RE.match(l)
+        if m:
+            # 上一个补丁块收尾
+            if current_kept and current_block:
+                kept_blocks.append("\n".join(current_block))
+            label = m.group("label").upper()
+            current_kept = label in _EXECUTION_KEEP_LABELS
+            current_block = [l] if current_kept else []
+        elif current_kept:
+            current_block.append(l)
+    # 尾块
+    if current_kept and current_block:
+        kept_blocks.append("\n".join(current_block))
+    return "\n\n".join(kept_blocks).strip()
 
 
 def _read_env_contract_overrides() -> dict | None:
@@ -533,6 +587,37 @@ def invalidate_capability_summary_cache() -> None:
     _render_capability_summary_cached.cache_clear()
 
 
+# B3（P10.5）：系统设计.md 的章节关键词共享词表。
+#
+# 抽自 technical_lead/main.py::_SYS_DESIGN_SECTIONS_FOR_TL（2026-06-09 §3.4 首发）。
+# 让任何 skill 需要读 `10-项目/{project}/系统设计.md` 时都能用同一套 keyword
+# 做 `read_input_files(dict entry with sections)` 裁剪，避免每个 skill 各写一份。
+#
+# **依据**：3 项目实测（pain-radar / mini-ledger / _quiz-game）章节命名差异大，
+# 用关键词 any-match 兜底；全部未命中时 `_extract_sections` 回退全文 + warning。
+SYS_DESIGN_SECTIONS_KEYWORDS = [
+    "模块划分", "服务边界", "业务域", "业务领域",
+    "前后端模块", "模块依赖", "目录布局",
+    "数据流", "数据模型",
+    "API 契约", "API契约", "接口", "外部依赖",
+    "错误处理", "韧性", "失败模式", "降级",
+    "任务粒度", "交付下游", "关键约束",
+    "技术栈映射", "技术栈",
+]
+
+
+def sys_design_entry(sys_design_path):
+    """B3（P10.5）：辅助构造 `read_input_files` 的 dict entry with sections。
+
+    用法：
+        read_input_files([sys_design_entry(sys_design_path), tech_stack])
+
+    未来 dev_backend / dev_frontend 若开始读系统设计.md，直接调此 helper 避免
+    每个 skill 各写一份 sections list。
+    """
+    return {"path": sys_design_path, "sections": SYS_DESIGN_SECTIONS_KEYWORDS}
+
+
 def _render_capability_summary(role, project: str | None = None) -> str:
     """P10：把 role.capability_refs 里每个 manifest 渲染成 ≤ 200 chars 摘要。
 
@@ -557,6 +642,31 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     自动传给 load_role 走契约参数化路径（覆盖 role.outputs / role.inputs）。
     P8.7 起：契约展开结果通过 `_render_contract_summary` 暴露给 LLM，让 LLM
     明确本轮契约参数 + 产出清单，凌驾于 body 中的示例产出格式（补 P5b 半吊子）。
+    B1（P10.5）：**dynamic 段现由 own_patch + upstream_patch 拼接**；如果调用方
+    需要更细粒度的 cache 分层，用 `build_system_prompt_ex()` 拿 3-tuple。
+    """
+    static, dynamic_own, dynamic_upstream = build_system_prompt_ex(
+        role_name_or_alias, project=project,
+    )
+    dynamic = "\n".join(filter(None, [dynamic_own, dynamic_upstream]))
+    return static, dynamic
+
+
+def build_system_prompt_ex(
+    role_name_or_alias: str, project: str | None = None,
+) -> tuple[str, str, str]:
+    """B1（P10.5）：3-block 变体，供 engine.llm 打分层 cache breakpoint。
+
+    返回 (static, dynamic_own, dynamic_upstream)：
+    - **static**：角色 §1-§6 + contract_summary + capability_summary + OUTPUT_FORMAT_SPEC
+      变化频率极低 → 打 `cache_control: ephemeral` breakpoint
+    - **dynamic_own**：当前角色 DYNAMIC 补丁（B4 过滤后只含 [KEEP]/[GRADUATE?]）
+      变化频率低（复盘者更新才变） → 也打 breakpoint，提升多 call 场景的 cache 命中
+    - **dynamic_upstream**：上游角色 DYNAMIC 补丁
+      变化频率高（上游 [NEW] 补丁频繁）→ **不打** breakpoint
+
+    调用方（call_llm）根据 tuple 长度自动适配（2-tuple 走 static+flat_dynamic；
+    3-tuple 走 static+dynamic_own+dynamic_upstream 三段 cache 布局）。
     """
     role = load_role(role_name_or_alias, contract_overrides=_read_env_contract_overrides())
 
@@ -592,13 +702,16 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     static_parts.append(OUTPUT_FORMAT_SPEC)
     static = "\n".join(static_parts)
 
-    # ── dynamic：DYNAMIC 补丁 ─────────────────────────────
-    dynamic_parts: list[str] = []
+    # ── dynamic_own：当前角色 DYNAMIC 补丁（B4 已 label 过滤）─────
+    dynamic_own_parts: list[str] = []
     own_patch = _strip_evidence_lines(_extract_dynamic_patch(role.body))
     if own_patch.strip():
-        dynamic_parts.append("## 当前动态约束")
-        dynamic_parts.append(own_patch)
+        dynamic_own_parts.append("## 当前动态约束")
+        dynamic_own_parts.append(own_patch)
+    dynamic_own = "\n".join(dynamic_own_parts)
 
+    # ── dynamic_upstream：上游角色 DYNAMIC 补丁（不 cache）─────
+    dynamic_upstream_parts: list[str] = []
     for upstream_name in role.upstream:
         try:
             up_role = load_role(upstream_name)
@@ -606,11 +719,11 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
             continue
         patch = _strip_evidence_lines(_extract_dynamic_patch(up_role.body))
         if patch.strip():
-            dynamic_parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
-            dynamic_parts.append(patch)
+            dynamic_upstream_parts.append(f"## 上游角色 [{up_role.name}] 动态补丁指令")
+            dynamic_upstream_parts.append(patch)
+    dynamic_upstream = "\n".join(dynamic_upstream_parts)
 
-    dynamic = "\n".join(dynamic_parts)
-    return static, dynamic
+    return static, dynamic_own, dynamic_upstream
 
 
 # ── rule_refs 章节级展开（W3 P0c+ 音乐域 + SE 架构师共用） ────────────────────
@@ -930,6 +1043,48 @@ def _extract_sections(content: str, sections: list[str]) -> str:
     return "".join(result)
 
 
+# B2（P10.5）：单文件读取进程内缓存 —— 单 subprocess 内避免重复读同一文件。
+# key = (path_str, mtime_ns)：mtime 变化即穿透缓存。
+#
+# **架构限制**：本 cache **仅覆盖单 subprocess 内**多次 read_input_files 调用同一
+# 文件的场景（如 TL Plan+Detail×N 循环里的 sys_design.md / tech_stack.md）。
+# **跨 skill 共享 cache**（review 报告 B2 原设想的"同轮 PRD 被 3 skill 读只喂 1 次"）
+# 需磁盘缓存 or Redis —— 挂 98-待办 P11 独立立项。
+_FILE_CACHE: dict[tuple[str, int], str] = {}
+
+
+def _read_file_cached(path) -> str:
+    """B2：按 (path, mtime_ns) 缓存单文件读取结果。"""
+    from pathlib import Path as _Path
+    p = _Path(path)
+    if not p.exists() or not p.is_file():
+        return "（文件不存在或为空）"
+    try:
+        mtime = p.stat().st_mtime_ns
+    except OSError:
+        # 无法 stat → 走非缓存路径
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception as e:
+            return f"（读取失败：{e}）"
+    key = (str(p), mtime)
+    if key in _FILE_CACHE:
+        return _FILE_CACHE[key]
+    try:
+        content = p.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"（读取失败：{e}）"
+    _FILE_CACHE[key] = content
+    # cache 保护上限：本 dict 只在单 subprocess 生命周期，最多几十条 entry，
+    # 无 LRU 淘汰；如未来跨 workflow 长驻进程再加 maxsize/淘汰
+    return content
+
+
+def invalidate_file_cache() -> None:
+    """B2：清进程内文件缓存（测试用；vault git pull 后由主入口调）。"""
+    _FILE_CACHE.clear()
+
+
 def read_input_files(
     file_paths: list,
     max_chars_per_file: int = 25000,
@@ -963,13 +1118,8 @@ def read_input_files(
             file_max = max_chars_per_file
             sections = []
 
-        if fp.exists() and fp.is_file():
-            try:
-                content = fp.read_text(encoding="utf-8")
-            except Exception as e:
-                content = f"（读取失败：{e}）"
-        else:
-            content = "（文件不存在或为空）"
+        # B2（P10.5）：走进程内缓存（跨 subprocess 不共享，仅覆盖同 subprocess 多次调用）
+        content = _read_file_cached(fp)
 
         # 层二扩展：章节裁剪（在截断前做，尽量保留有效内容）
         if sections:
