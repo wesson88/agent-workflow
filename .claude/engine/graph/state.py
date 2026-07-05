@@ -33,3 +33,11 @@ class ProjectState(TypedDict, total=False):
     discussion_log: Annotated[list[dict], add]
     discussion_iterations: int
     consensus_reached: bool
+
+    # P8.3 模块化工作流 human_gate select_module 用
+    # - selected_module_id：本轮用户选中的 module id（从 resolved gate.user_response 读）
+    # - manifest_path：模块清单.md vault 相对路径（human_gate step 定义时传入）
+    # - module_role：selected module 的 role（backend / frontend），供 P8.4 dispatch
+    selected_module_id: str | None
+    manifest_path: str | None
+    module_role: str | None

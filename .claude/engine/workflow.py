@@ -78,6 +78,29 @@ class WorkflowStep:
     # 节点执行前评估，命中即跳过 subprocess 调用（对称 dev_*/main.py 内部跳过的上移版）
     skip_if: dict | None = None
 
+    # 契约参数化 override（P5b 2026-07-04 新增）：workflow yaml 显式声明的
+    # contract_overrides，供 role_loader 在契约化角色加载时替换 outputs/inputs。
+    # 结构：{"output_contract": {"artifacts_pattern": "module_manifest", ...},
+    #        "input_contract": {...}}
+    # None（默认）→ role_loader 走 P5a 影子模式（用 fields.default 展开 + assert）；
+    # 传入 → role_loader 用 overrides 覆盖 field 值并选 template（参见规范 §11.3）。
+    # 校验（run_chain 层 + role_loader 层双护栏）：override 引用不存在的 field
+    # 或 template → raise ContractSchemaError（fail-closed）。
+    contract_overrides: dict | None = None
+
+    # P8.3 human_gate step 类型（模块化开发工作流用）：
+    # - gate：介入 gate 名，唯一识别值。已知：select_module（从模块清单 ready 集选一个）
+    # - manifest_path：模块清单.md vault 相对路径（含 {project} 占位符）
+    # - prompt：显式给用户的说明文本（None 时 select_module 用默认模板）
+    gate: str | None = None
+    manifest_path: str | None = None
+    prompt: str | None = None
+
+    # P8.4 module_development_loop step 用：engineer subprocess 的 contract_overrides
+    # （通常设为 {"input_contract": {"task_source": "module_manifest"}}）；
+    # 与顶层 contract_overrides 分开命名以避免 TL step 的 output_contract 覆盖串味
+    engineer_contract_overrides: dict | None = None
+
     # 兜底未识别字段
     extras: dict = field(default_factory=dict, repr=False)
 
@@ -98,6 +121,14 @@ class WorkflowStep:
                 pre_flight = data.get("pre_flight") or None
                 auto_split = bool(data.get("auto_split", False))
                 skip_if = data.get("skip_if") or None
+                contract_overrides = data.get("contract_overrides") or None
+                if contract_overrides is not None and not isinstance(
+                    contract_overrides, dict
+                ):
+                    raise ValueError(
+                        f"linear step '{role}' 的 contract_overrides 必须是 dict，"
+                        f"实际：{type(contract_overrides).__name__}"
+                    )
                 return cls(
                     type="linear",
                     role=str(role),
@@ -105,6 +136,7 @@ class WorkflowStep:
                     pre_flight=pre_flight,
                     auto_split=auto_split,
                     skip_if=skip_if,
+                    contract_overrides=contract_overrides,
                 )
             if t == "discussion":
                 roles = tuple(str(r) for r in (data.get("roles") or data.get("participants") or ()))
@@ -139,6 +171,43 @@ class WorkflowStep:
                     start_round=int(data.get("start_round", 1)),
                     readiness_threshold=int(data.get("readiness_threshold", 85)),
                     context_warn_tokens=int(data.get("context_warn_tokens", 30000)),
+                )
+            if t == "human_gate":
+                gate = data.get("gate")
+                if not gate:
+                    raise ValueError(
+                        f"human_gate step 缺少 gate 字段（识别名，如 select_module）：{data}"
+                    )
+                manifest_path = data.get("manifest_path")
+                if str(gate) == "select_module" and not manifest_path:
+                    raise ValueError(
+                        f"human_gate select_module step 缺少 manifest_path（模块清单.md）：{data}"
+                    )
+                return cls(
+                    type="human_gate",
+                    gate=str(gate),
+                    manifest_path=str(manifest_path) if manifest_path else None,
+                    name=str(data.get("name") or f"human_gate:{gate}"),
+                    prompt=str(data["prompt"]) if data.get("prompt") else None,
+                )
+            if t == "module_development_loop":
+                manifest_path = data.get("manifest_path")
+                if not manifest_path:
+                    raise ValueError(
+                        f"module_development_loop step 缺少 manifest_path："
+                        f"{data}"
+                    )
+                engineer_ovr = data.get("engineer_contract_overrides") or None
+                if engineer_ovr is not None and not isinstance(engineer_ovr, dict):
+                    raise ValueError(
+                        f"engineer_contract_overrides 必须是 dict，实际："
+                        f"{type(engineer_ovr).__name__}"
+                    )
+                return cls(
+                    type="module_development_loop",
+                    name=str(data.get("name") or "模块化开发循环"),
+                    manifest_path=str(manifest_path),
+                    engineer_contract_overrides=engineer_ovr,
                 )
             # 已知但未实现的类型 —— 保留数据，运行时由 build_graph 抛 NotImplementedError
             roles = tuple(str(r) for r in (data.get("roles") or ()))

@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from .config import VAULT_ROOT, role_genes_dir
 from .obsidian_io import read_note, split_frontmatter
@@ -21,6 +22,31 @@ from .obsidian_io import read_note, split_frontmatter
 
 class RoleNotFound(KeyError):
     pass
+
+
+class ContractSchemaError(ValueError):
+    """契约声明或与 outputs/inputs 的等价关系违反规范 §11 / §7.1。
+
+    P5a 影子模式：契约化角色（output_contract / input_contract）
+    加载时 raise（fail-closed），保证\"契约展开 = 硬编码 outputs\"不变量。
+    未契约化的角色不受影响。
+    """
+    pass
+
+
+@dataclass(frozen=True)
+class ResolvedContract:
+    """契约解析结果（P5a 影子模式：仅用于 assert 校验，不驱动真实产出）。
+
+    P5a：role_loader 加载契约化角色时用 fields 的 default 值展开
+    首选 template（legacy_directives 优先，否则第一个），产出 outputs 供
+    assert 与 frontmatter.outputs 语义等价。
+
+    P5b：将来 workflow 传入 contract_overrides 时用此结构替换 role.outputs。
+    """
+    template_name: str                    # 使用的 template（legacy_directives 优先）
+    field_values: dict                    # 展开时用的 field values（default 优先）
+    outputs: tuple[str, ...]              # 展开后的路径（保留 {project} / {n} 等 workflow bindings 占位符）
 
 
 @dataclass(frozen=True)
@@ -75,6 +101,17 @@ class Role:
     # 护栏会按此值做 RAISE（warn = 60% × 此值），代替 _TOTAL_RAISE_RATIO 百分比
     budget_input_tokens: int | None = None
 
+    # 契约解析结果（P5a 影子模式）——契约化角色加载时展开首选 template + assert
+    # 与 outputs/inputs 语义等价（抽象化后集合相等）。P5b 起 workflow contract_overrides
+    # 会驱动真实 outputs 替换；P5a 阶段仅用于 fail-closed 校验。
+    resolved_output_contract: ResolvedContract | None = None
+    resolved_input_contract: ResolvedContract | None = None
+
+    # P10 能力引用（capability manifest wikilink，形如 `[[huashu-design/manifest]]`）。
+    # **不**进 body inline；由 common.build_system_prompt 走 _render_capability_summary
+    # 生成 ≤ 400 chars 摘要 + 调用方式后拼进 system_prompt（规范 §5.2 关键不变量）。
+    capability_refs: tuple[str, ...] = ()
+
     @property
     def all_names(self) -> tuple[str, ...]:
         """name + aliases 的并集，用于查找匹配。"""
@@ -123,7 +160,214 @@ def _resolve_skill_refs(refs: tuple[str, ...], vault_root: Path) -> str:
     return "\n\n## 引用技能（来自 skill_refs）\n\n" + "\n\n".join(parts)
 
 
-def _build_role(note_path: Path) -> Role:
+# ── 契约解析（P5a 影子模式）─────────────────────────────
+_CONTRACT_BUILTIN_PLACEHOLDERS = frozenset({
+    "project", "date", "n", "current_module_id",
+    "title_slug", "ts", "role", "domain",
+})
+_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+
+def _abstract_module_id(path: str) -> str:
+    """将 T01 / T0N / T{n} / {module_id_template} 归一为 T*。
+
+    与 tests/engine/test_se_contract_lint.py::TestOutputContractSchema
+    使用同款抽象化，使 outputs 字段允许保留历史 T01/T0N 冗余写法而不误判。
+    """
+    norm = path.replace("\\", "/").replace("{project}", "PROJECT")
+    norm = norm.replace("{module_id_template}", "T{n}")
+    return re.sub(r"T(0N|\{n\}|0?\d+)", "T*", norm)
+
+
+def _resolve_contract(
+    contract: dict,
+    contract_type: str,
+    role_name: str,
+    overrides: dict | None = None,
+) -> ResolvedContract:
+    """按 contract 声明选择 template 并展开 field 值。
+
+    P5a 影子模式（overrides=None）：用 fields.default 展开首个/legacy_directives
+    template；产出用于 assert 与硬编码 outputs 语义等价的路径集合。
+
+    P5b 写入模式（overrides=dict）：优先用 overrides 覆盖 fields.default，
+    template 选择走 `artifacts_pattern` 约定（overrides > fields.default > legacy）；
+    resolved outputs 由调用方（_build_role）真替换 role.outputs。
+
+    Template 选择优先级（规范 §11.3 约定；泛化后不依赖固定字段名）：
+    1. overrides 中任一 selector field（values 集合 ⊆ templates keys 的 enum field）
+    2. selector field 的 default 值（若指向存在的 template）
+    3. templates 里有 'legacy_directives' → 选之
+    4. 首个 template
+
+    "Selector field" 惯例：契约里若某 enum field 的 values 恰好等于/子集 templates
+    keys（如 TL.artifacts_pattern.values = [legacy_directives, module_manifest] =
+    templates keys；Backend.task_source 同款），它就自动被识别为 template 选择器。
+    这允许 output_contract 用 `artifacts_pattern`、input_contract 用 `task_source`
+    等语义化命名，无需强制统一。
+
+    校验：
+    - parameterizable 必须 = True
+    - fields ≥ 1、templates ≥ 1
+    - template 里的 outputs/inputs 是非空 list
+    - 占位符必须在 fields 或 builtin 集合中（§11.7 反例 2）
+    - overrides 中的 field / template 必须在契约声明中（§11.3 决策规则）
+    """
+    if contract.get("parameterizable") is not True:
+        raise ContractSchemaError(
+            f"{role_name}.{contract_type}: parameterizable 必须显式 = true"
+        )
+    fields = contract.get("fields") or {}
+    templates = contract.get("templates") or {}
+    if not fields:
+        raise ContractSchemaError(
+            f"{role_name}.{contract_type}: fields 为空（§7.1 不可豁免项）"
+        )
+    if not templates:
+        raise ContractSchemaError(
+            f"{role_name}.{contract_type}: templates 为空（§7.1 不可豁免项）"
+        )
+
+    overrides = overrides or {}
+    # 校验 overrides 里所有 key 必须在 fields 声明（§11.3 决策规则）
+    for override_key in overrides:
+        if override_key not in fields:
+            raise ContractSchemaError(
+                f"{role_name}.{contract_type}: contract_overrides 中 field "
+                f"'{override_key}' 未在契约 fields 声明；已声明字段："
+                f"{sorted(fields.keys())}"
+            )
+
+    # 识别 selector fields：values 集合 ⊆ templates keys 的 enum field
+    template_keys = set(templates.keys())
+    selector_fields: list[str] = []
+    for fname, fspec in fields.items():
+        if not isinstance(fspec, dict):
+            continue
+        if fspec.get("type") != "enum":
+            continue
+        values = fspec.get("values") or []
+        if values and set(str(v) for v in values).issubset(template_keys):
+            selector_fields.append(fname)
+
+    # 选 template：override selector > selector default > legacy_directives > first
+    template_name: str | None = None
+    for sf in selector_fields:
+        if sf in overrides:
+            template_name = str(overrides[sf])
+            break
+    if template_name is None:
+        for sf in selector_fields:
+            spec = fields[sf]
+            if isinstance(spec, dict) and "default" in spec:
+                default_val = str(spec["default"])
+                if default_val in templates:
+                    template_name = default_val
+                    break
+    if template_name is None:
+        template_name = (
+            "legacy_directives" if "legacy_directives" in templates
+            else next(iter(templates))
+        )
+
+    if template_name not in templates:
+        raise ContractSchemaError(
+            f"{role_name}.{contract_type}: template '{template_name}' 未在契约 "
+            f"templates 声明；已声明模板：{sorted(templates.keys())}"
+        )
+    template = templates[template_name]
+    key = "outputs" if contract_type == "output_contract" else "inputs"
+    paths = template.get(key)
+    if not paths or not isinstance(paths, list):
+        raise ContractSchemaError(
+            f"{role_name}.{contract_type}.templates.{template_name}.{key}: "
+            f"缺失或非 list"
+        )
+
+    # 校验占位符 declared（§11.7 反例 2）
+    declared = set(fields.keys()) | _CONTRACT_BUILTIN_PLACEHOLDERS
+    for path in paths:
+        for placeholder in _PLACEHOLDER_RE.findall(str(path)):
+            if placeholder not in declared:
+                raise ContractSchemaError(
+                    f"{role_name}.{contract_type}.templates.{template_name}."
+                    f"{key}: 占位符 {{{placeholder}}} 未在 fields 声明"
+                )
+
+    # 收集 field values：overrides > fields.default（其它保留占位符字面）
+    field_values: dict[str, Any] = {}
+    for fname, spec in fields.items():
+        if isinstance(spec, dict) and "default" in spec:
+            field_values[fname] = spec["default"]
+    for fname, fval in overrides.items():
+        field_values[fname] = fval
+
+    resolved: list[str] = []
+    for path in paths:
+        expanded = str(path)
+        for fname, fval in field_values.items():
+            expanded = expanded.replace(f"{{{fname}}}", str(fval))
+        resolved.append(expanded)
+
+    return ResolvedContract(
+        template_name=template_name,
+        field_values=field_values,
+        outputs=tuple(resolved),
+    )
+
+
+def _assert_contract_matches_declared(
+    contract_type: str,
+    resolved: ResolvedContract,
+    declared_paths: tuple[str, ...],
+    role_name: str,
+) -> None:
+    """assert 契约展开与 frontmatter 声明的 outputs/inputs 语义等价。
+
+    比对方式：module_id 抽象化后集合相等（允许 outputs 字段保留 T01/T0N
+    的历史冗余写法，同时接受 template 里的 T{n} / {module_id_template}）。
+
+    §11.5 向后兼容硬约束：契约化角色的 outputs 字段应等价于 templates 首个
+    template + 默认 field 值展开。不等价即代表 spec 漂移，fail-closed。
+    """
+    declared_abstract = {_abstract_module_id(p) for p in declared_paths}
+    resolved_abstract = {_abstract_module_id(p) for p in resolved.outputs}
+    if declared_abstract == resolved_abstract:
+        return
+    missing_in_template = declared_abstract - resolved_abstract
+    extra_in_template = resolved_abstract - declared_abstract
+    detail: list[str] = []
+    if missing_in_template:
+        detail.append(
+            f"declared 中未被 template 展开覆盖：{sorted(missing_in_template)}"
+        )
+    if extra_in_template:
+        detail.append(
+            f"template 展开出 declared 未声明：{sorted(extra_in_template)}"
+        )
+    field_key = contract_type.replace("_contract", "s")  # output_contract → outputs
+    raise ContractSchemaError(
+        f"{role_name}.{contract_type}: 契约展开与 {field_key} 字段不等价"
+        f"（抽象化 T* 后集合不同）\n  " + "\n  ".join(detail)
+    )
+
+
+def _build_role(
+    note_path: Path,
+    contract_overrides: dict | None = None,
+) -> Role:
+    """构造 Role 对象。
+
+    contract_overrides（P5b 起）：workflow 层显式注入的契约参数：
+        {
+            "output_contract": {"artifacts_pattern": "module_manifest", ...},
+            "input_contract": {...}
+        }
+    - 传入且角色声明了对应契约 → resolved outputs/inputs 替换 role.outputs / role.inputs
+    - 传入但角色未声明对应契约 → raise ContractSchemaError（防止误用）
+    - 未传入且角色有契约 → 影子模式（P5a 行为，assert 契约展开与硬编码 outputs 等价）
+    - 未传入且角色无契约 → baseline 行为不变
+    """
     content = read_note(note_path)
     fm, body = split_frontmatter(content)
     if not fm.get("role"):
@@ -132,8 +376,55 @@ def _build_role(note_path: Path) -> Role:
     skill_block = _resolve_skill_refs(skill_refs, VAULT_ROOT) if skill_refs else ""
     body_with_skills = body + ("\n\n" + skill_block if skill_block else "")
     rule_refs = _seq(fm.get("rule_refs"))
+    capability_refs = _seq(fm.get("capability_refs"))
+    declared_outputs = _seq(fm.get("outputs"))
+    declared_inputs = _seq(fm.get("inputs"))
+
+    role_name = str(fm["role"])
+    overrides = contract_overrides or {}
+    out_overrides = overrides.get("output_contract")
+    in_overrides = overrides.get("input_contract")
+
+    resolved_out = None
+    out_contract_fm = fm.get("output_contract")
+    if isinstance(out_contract_fm, dict) and out_contract_fm:
+        resolved_out = _resolve_contract(
+            out_contract_fm, "output_contract", role_name, overrides=out_overrides
+        )
+        if out_overrides:
+            # P5b 写入模式：resolved 替换硬编码 outputs
+            declared_outputs = resolved_out.outputs
+        else:
+            # P5a 影子模式：assert 契约展开与 outputs 等价
+            _assert_contract_matches_declared(
+                "output_contract", resolved_out, declared_outputs, role_name
+            )
+    elif out_overrides:
+        raise ContractSchemaError(
+            f"{role_name}: contract_overrides.output_contract 传入但角色未声明 "
+            f"output_contract；请先按规范 §11 补契约声明或移除 overrides"
+        )
+
+    resolved_in = None
+    in_contract_fm = fm.get("input_contract")
+    if isinstance(in_contract_fm, dict) and in_contract_fm:
+        resolved_in = _resolve_contract(
+            in_contract_fm, "input_contract", role_name, overrides=in_overrides
+        )
+        if in_overrides:
+            declared_inputs = resolved_in.outputs
+        else:
+            _assert_contract_matches_declared(
+                "input_contract", resolved_in, declared_inputs, role_name
+            )
+    elif in_overrides:
+        raise ContractSchemaError(
+            f"{role_name}: contract_overrides.input_contract 传入但角色未声明 "
+            f"input_contract；请先按规范 §11 补契约声明或移除 overrides"
+        )
+
     return Role(
-        name=str(fm["role"]),
+        name=role_name,
         aliases=_seq(fm.get("aliases")),
         note_path=note_path,
         domain=str(fm.get("domain", "")),
@@ -146,14 +437,17 @@ def _build_role(note_path: Path) -> Role:
         upstream=_seq(fm.get("upstream")),
         downstream=_seq(fm.get("downstream")),
         monitors=_seq(fm.get("monitors")),
-        inputs=_seq(fm.get("inputs")),
-        outputs=_seq(fm.get("outputs")),
+        inputs=declared_inputs,
+        outputs=declared_outputs,
         skill_refs=skill_refs,
+        capability_refs=capability_refs,
         rule_refs=rule_refs,
         body=body_with_skills,
         frontmatter=fm,
         budget_input_tokens=(int(fm["budget_input_tokens"])
                              if fm.get("budget_input_tokens") else None),
+        resolved_output_contract=resolved_out,
+        resolved_input_contract=resolved_in,
     )
 
 
@@ -187,7 +481,16 @@ def invalidate_cache() -> None:
     _index.cache_clear()
 
 
-def load_role(name_or_alias: str) -> Role:
+def load_role(
+    name_or_alias: str,
+    contract_overrides: dict | None = None,
+) -> Role:
+    """按名或别名加载角色。
+
+    contract_overrides（P5b 起）：workflow 层传入的契约参数字典。
+    结构：`{"output_contract": {"artifacts_pattern": ...}, "input_contract": {...}}`
+    详见 `_build_role` docstring。
+    """
     idx = _index()
     note = idx.get(name_or_alias)
     if note is None:
@@ -195,7 +498,7 @@ def load_role(name_or_alias: str) -> Role:
         raise RoleNotFound(
             f"未找到角色 '{name_or_alias}'。已知名称/别名：{available}"
         )
-    return _build_role(note)
+    return _build_role(note, contract_overrides=contract_overrides)
 
 
 def list_roles() -> list[Role]:

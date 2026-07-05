@@ -25,7 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common import (
-    parse_args, resolve_project, build_system_prompt, read_input_files,
+    parse_args, resolve_project, resolve_module_id, render_module_focus_hint,
+    build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
     load_rule_block,
@@ -142,6 +143,15 @@ def _task_marker(project: str, task_label: str):
     return VAULT_ROOT / "00-系统" / ".runtime-state" / f"dev_backend.{project}.{safe}.done"
 
 
+def _resolve_module_task_files(proj_dir: Path, module_id: str) -> list[Path]:
+    """P8.7：模块化模式输入源 `模块/{module_id}-*.md`。
+
+    仅供 main() 里 `if module_id:` 分支复用；抽出便于单元测试锁定 glob 语义。
+    返回按 name 排序的 Path 列表；未找到 → 空 list（调用方 fail）。
+    """
+    return sorted((proj_dir / "模块").glob(f"{module_id}-*.md"))
+
+
 def _collect_task_files(proj_dir, role_prefix: str, tech_stack):
     """收集任务文件列表。
 
@@ -172,6 +182,7 @@ def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
     project = resolve_project(args)
+    module_id = resolve_module_id(args)  # P8.6：模块化 workflow 时非 None
 
     if role_is_blocked(ROLE):
         print(f"[{ROLE}] status=blocked，跳过。", file=sys.stderr)
@@ -182,7 +193,31 @@ def main() -> int:
     proj_dir = project_dir(project)
     tech_stack = rules_dir() / "技术栈.md"
 
-    task_files, use_split = _collect_task_files(proj_dir, "给后端", tech_stack)
+    if module_id:
+        # P8.7：模块化模式输入源改为 `模块/{module_id}-*.md`（TL 走 module_manifest
+        # 分支产出的模块详情文件），不再读 legacy `给后端-T0N.md`。
+        module_task_files = _resolve_module_task_files(proj_dir, module_id)
+        if not module_task_files:
+            print(
+                f"[{ROLE}] 必需输入缺失：{proj_dir}/模块/{module_id}-*.md。"
+                f"请先跑技术主管（module_manifest 模式）产出模块详情。",
+                file=sys.stderr,
+            )
+            set_role_status(
+                ROLE, status="failed",
+                increment_consecutive_failures=True, increment_error=True,
+                enforce_transition=False,
+            )
+            append_audit({
+                "timestamp": utc_now(), "role": ROLE, "project": project,
+                "task": task, "result": "failed",
+                "error": "missing_module_file", "module_id": module_id,
+            })
+            return 2
+        task_files = module_task_files
+        use_split = True  # 单模块作为 1 个 task，走"多任务"路径的通用循环
+    else:
+        task_files, use_split = _collect_task_files(proj_dir, "给后端", tech_stack)
 
     if not task_files:
         # 检查是否存在索引文件且明确说明无后端任务（对称 dev_frontend 的跳过逻辑）
@@ -293,8 +328,17 @@ def main() -> int:
         else:
             api_hint = f"  - **不要**输出 `10-项目/{project}/API契约.md`（留给最后一个任务统一输出）\n"
 
+        # P8.6：模块化模式下加"单模块聚焦"约束段 + 追加进度流/测试报告要求
+        module_focus = render_module_focus_hint(module_id, project)
+        if module_id:
+            required.extend([
+                f"10-项目/{project}/进度/{module_id}-progress.md",
+                f"10-项目/{project}/测试报告/{module_id}.md",
+            ])
+
         user_prompt = (
             f"项目名：`{project}`\n\n"
+            f"{module_focus}"
             f"{context}"
             f"{skill_block}\n\n"
             f"{prior_context}"

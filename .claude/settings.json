@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__mcpvault__read_note",
+      "mcp__mcpvault__list_directory",
+      "mcp__mcpvault__search_notes",
+      "mcp__mcpvault__read_multiple_notes",
+      "mcp__mcpvault__get_frontmatter",
+      "Bash(npx tsc --noEmit*)",
+      "Bash(cd D:/workstation/ai/claude-approval-bot && npx tsc --noEmit*)",
+      "Bash(cd \"D:/workstation/ai/claude-approval-bot\" && npx tsc --noEmit*)",
+      "Bash(cd D:/workstation/ai/agent-workflow && git status*)"
+    ]
+  }
+}

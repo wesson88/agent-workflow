@@ -296,6 +296,7 @@ def make_role_node(
     post_compress: dict | None = None,
     pre_flight: dict | None = None,
     skip_if: dict | None = None,
+    contract_overrides: dict | None = None,
 ):
     """工厂函数：返回一个 LangGraph node 函数。
     role_name 是 vault 角色 frontmatter 的 role 字段（中文名）。
@@ -310,6 +311,10 @@ def make_role_node(
         "instruction_file": "10-项目/{project}/指令/给后端.md",
         "split_limit_lines": 400
     }
+    contract_overrides（P8.2 起）: workflow step 里声明的契约参数（如
+    {"output_contract": {"artifacts_pattern": "module_manifest"}}），本工厂
+    序列化为 JSON 塞进 subprocess env `AGENT_CONTRACT_OVERRIDES`，skill main.py
+    通过 common.build_system_prompt 自动传给 load_role 走契约参数化路径。
     """
     skill_dir = role_to_skill_dir(role_name)
     main_py = PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"
@@ -342,6 +347,14 @@ def make_role_node(
         env = os.environ.copy()
         env["PROJECT"] = state["project"]
         env["TASK"] = state["task"]
+        # P8.2：workflow step 声明 contract_overrides 时透传给 subprocess，
+        # skill main.py 通过 common.build_system_prompt 自动读 env 传给 load_role
+        if contract_overrides:
+            env["AGENT_CONTRACT_OVERRIDES"] = json.dumps(
+                contract_overrides, ensure_ascii=False
+            )
+        else:
+            env.pop("AGENT_CONTRACT_OVERRIDES", None)
 
         if sub_tasks_to_run:
             print(f"\n✂️  拆分为 {len(sub_tasks_to_run)} 个子任务执行")

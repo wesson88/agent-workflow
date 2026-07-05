@@ -12,6 +12,8 @@ from langgraph.graph import StateGraph, START, END
 
 from ..role_loader import load_role
 from ..workflow import WorkflowTemplate, WorkflowStep, role_to_skill_dir
+from .human_gate_node import make_human_gate_node
+from .module_dev_loop_node import make_module_development_loop_node
 from .nodes import make_role_node, make_discussion_node, make_brainstorm_loop_node
 from .state import ProjectState
 
@@ -31,9 +33,14 @@ def _step_node_key(step: WorkflowStep, idx: int) -> str:
     if step.type == "brainstorm-loop":
         safe = (step.name or "brainstorm").replace(" ", "_").replace("/", "_")
         return f"step_{idx:02d}_bsloop_{safe}"
+    if step.type == "human_gate":
+        safe = (step.gate or "gate").replace(" ", "_").replace("/", "_")
+        return f"step_{idx:02d}_hg_{safe}"
+    if step.type == "module_development_loop":
+        return f"step_{idx:02d}_modloop"
     raise NotImplementedError(
         f"工作流步骤 type='{step.type}' 暂不支持。"
-        f"已支持：linear / discussion / brainstorm-loop。"
+        f"已支持：linear / discussion / brainstorm-loop / human_gate / module_development_loop。"
     )
 
 
@@ -51,6 +58,10 @@ def _step_match_target(step: WorkflowStep, target: str) -> bool:
             return False
     if step.type in ("discussion", "brainstorm-loop"):
         return (step.name or "") == target
+    if step.type == "human_gate":
+        return (step.name or "") == target or (step.gate or "") == target
+    if step.type == "module_development_loop":
+        return (step.name or "") == target or target == "module_development_loop"
     return False
 
 
@@ -91,11 +102,16 @@ def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool):
             post_compress=step.post_compress,
             pre_flight=step.pre_flight if (step.pre_flight or step.auto_split) else None,
             skip_if=step.skip_if,
+            contract_overrides=step.contract_overrides,
         )
     if step.type == "discussion":
         return make_discussion_node(step, halt_on_failure)
     if step.type == "brainstorm-loop":
         return make_brainstorm_loop_node(step, halt_on_failure)
+    if step.type == "human_gate":
+        return make_human_gate_node(step, halt_on_failure)
+    if step.type == "module_development_loop":
+        return make_module_development_loop_node(step, halt_on_failure)
     raise NotImplementedError(f"未知步骤类型：{step.type}")
 
 

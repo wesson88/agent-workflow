@@ -17,6 +17,7 @@ Phase 5 重构：本文件已按职责拆分为四个子模块：
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import json
@@ -47,7 +48,6 @@ def resolve_project(args: argparse.Namespace) -> str:
     优先级：--project > $PROJECT > $PROJECT_NAME > 'default'
     集中到 common.py，各 skill/main.py 无需重复实现。
     """
-    import os
     raw = (
         args.project
         or os.environ.get("PROJECT")
@@ -55,6 +55,54 @@ def resolve_project(args: argparse.Namespace) -> str:
         or "default"
     )
     return raw.strip() or "default"
+
+
+def resolve_module_id(args: argparse.Namespace | None = None) -> str | None:
+    """P8.6：从 CLI 参数或环境变量解析当前单模块聚焦的 module id。
+
+    优先级：--module-id > $AGENT_SELECTED_MODULE_ID > None
+    - 非模块化 workflow / 传统 dispatch 模式：返回 None，engineer 走原全量输入路径
+    - 模块化 workflow：module_development_loop node 塞 env，engineer 读到后
+      触发 §6 单模块聚焦模式（仅输出 selected_module_id 对应文件）
+
+    args 可为 None（部分入口不通过 argparse）。
+    """
+    module_id = None
+    if args is not None:
+        module_id = getattr(args, "module_id", None)
+    if not module_id:
+        module_id = os.environ.get("AGENT_SELECTED_MODULE_ID", "").strip() or None
+    return module_id.strip() if isinstance(module_id, str) and module_id.strip() else None
+
+
+def render_module_focus_hint(module_id: str | None, project: str) -> str:
+    """P8.6：把 module_id 转成 user_prompt 头部的单模块聚焦约束段。
+
+    module_id=None → 返回空串（非模块化 workflow 全兼容）
+    非空 → 返回一段明确约束的 markdown 文本，告诉 LLM：
+    - 本轮只输出该模块相关文件
+    - 模块清单.md 路径 + 单模块详情路径供读取
+    - 额外产出：进度流 + 测试报告
+    """
+    if not module_id:
+        return ""
+    return (
+        "## 【单模块聚焦模式】\n\n"
+        f"本次聚焦模块 **{module_id}**（由 workflow 模块化开发循环选中）。\n\n"
+        "**只输出以下类型的 FILE 块**：\n"
+        f"1. 模块 {module_id} 对应的实现代码（src/backend/... 或 src/frontend/...）\n"
+        f"2. 模块 {module_id} 对应的测试代码（tests/backend/... 或 tests/frontend/...）\n"
+        f"3. 进度流：`10-项目/{project}/进度/{module_id}-progress.md`\n"
+        f"4. 测试报告：`10-项目/{project}/测试报告/{module_id}.md`\n\n"
+        "**不要输出**：\n"
+        "- 其他模块的实现（下一轮 workflow 再跑）\n"
+        "- 全量 API 契约（若非当前模块所属功能，留给该模块的负责轮次）\n\n"
+        "**上下文读取**：\n"
+        f"- 模块清单：`10-项目/{project}/模块清单.md`（含 DAG 与 status）\n"
+        f"- 模块详情：`10-项目/{project}/模块/{module_id}-*.md`（本模块 spec）\n"
+        f"- 系统设计与 PRD：正常读取\n\n"
+        "---\n\n"
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -312,13 +360,174 @@ def _extract_dynamic_patch(body: str) -> str:
     return "\n".join(keep).strip()
 
 
+def _read_env_contract_overrides() -> dict | None:
+    """P8.2：从 AGENT_CONTRACT_OVERRIDES env 读契约参数注入（workflow 层透传）。
+
+    workflow 层（graph/nodes.py::make_role_node）序列化 WorkflowStep.contract_overrides
+    为 JSON 塞进 env；skill main.py 无需改代码，通过 build_system_prompt 自动生效。
+
+    - env 缺失或空 → None（走影子模式，等同 P4-P7 现状）
+    - env 是合法 JSON dict → 传给 load_role 作为 contract_overrides
+    - env 是非法 JSON → 丢 stderr 警告后返回 None（fail-open，避免阻塞主链路）
+    """
+    raw = os.environ.get("AGENT_CONTRACT_OVERRIDES", "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(
+            f"⚠️ AGENT_CONTRACT_OVERRIDES 解析失败（{e}），忽略 override 走影子模式",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(parsed, dict):
+        print(
+            f"⚠️ AGENT_CONTRACT_OVERRIDES 顶层应为 dict，实际 {type(parsed).__name__}，忽略",
+            file=sys.stderr,
+        )
+        return None
+    return parsed
+
+
+def _render_contract_summary(role) -> str:
+    """P8.7 修：把契约展开结果暴露给 LLM，纠正 role.body 硬指令与 outputs 声明的冲突。
+
+    P5b 已让 workflow 层通过 contract_overrides 替换 role.outputs / role.inputs，
+    但只是数据层替换 —— LLM 看到的 system_prompt 仍是 role.body（硬指令走 legacy 模式）。
+    本函数把 resolved_output_contract / resolved_input_contract 的 field_values +
+    展开后的 outputs 清单塞进 system_prompt，让 LLM 明确"本轮契约参数是什么、
+    应产出什么文件"，凌驾于 body 中的示例产出格式。
+
+    - 无契约声明 → 返回空串（未契约化角色零影响）
+    - 有契约但 field_values 与 outputs 都为空 → 空串
+    - 有契约 → 一段 markdown，含参数表 + 产出清单 + 优先级声明
+    """
+    if not role.resolved_output_contract and not role.resolved_input_contract:
+        return ""
+
+    parts: list[str] = []
+    if role.resolved_output_contract:
+        rc = role.resolved_output_contract
+        field_lines = [
+            f"- **{k}**: `{v}`"
+            for k, v in rc.field_values.items()
+            if v is not None and str(v) != ""
+        ]
+        if field_lines:
+            parts.append("## 【当前 output_contract 参数】\n\n" + "\n".join(field_lines))
+        if role.outputs:
+            outputs_lines = "\n".join(f"- `{o}`" for o in role.outputs)
+            parts.append(
+                "## 【本轮需产出的文件清单】\n\n"
+                f"{outputs_lines}\n\n"
+                "> **强制契约**：以上路径为本轮 workflow 声明的最终产出结构，"
+                "**优先级高于本角色 md 正文中列举的示例产出格式**。若正文示例（如"
+                "「给X-T0N.md」等 legacy 命名）与本清单冲突，一律以本清单为准，"
+                "禁止产出正文示例但不在本清单里的路径。"
+            )
+
+    if role.resolved_input_contract:
+        ric = role.resolved_input_contract
+        field_lines = [
+            f"- **{k}**: `{v}`"
+            for k, v in ric.field_values.items()
+            if v is not None and str(v) != ""
+        ]
+        if field_lines:
+            parts.append("## 【当前 input_contract 参数】\n\n" + "\n".join(field_lines))
+        if role.inputs:
+            inputs_lines = "\n".join(f"- `{i}`" for i in role.inputs)
+            parts.append(
+                "## 【本轮输入文件清单】\n\n"
+                f"{inputs_lines}\n\n"
+                "> 输入路径由 workflow 契约声明；若正文示例路径与本清单冲突，"
+                "以本清单为准。"
+            )
+
+    return "\n\n".join(parts)
+
+
+def _render_capability_summary(role, project: str | None = None) -> str:
+    """P10：把 role.capability_refs 里每个 manifest 渲染成 ≤ 200 chars 摘要。
+
+    - 规范 §5.2 关键不变量：能力实现**永远不进** prompt，只进 ≤ 200 chars 摘要 + 调用方式
+    - 无 capability_refs 或加载全失败 → 返回空串（未启用能力的角色零影响）
+    - LLM 看到摘要 + triggers 后自主判断是否 invoke（不做 keyword 命中过滤，节省逻辑）
+    """
+    refs = getattr(role, "capability_refs", ()) or ()
+    if not refs:
+        return ""
+
+    import re as _re
+    from engine import config as _cfg
+    from engine.capability_executor import ManifestValidationError
+    from engine.capability_executor.manifest_loader import (
+        load_manifest as _load_manifest,
+        validate_manifest as _validate_manifest,
+    )
+
+    proj_hint = project or "{project}"
+    summaries: list[str] = []
+
+    for ref in refs:
+        # ref 形如 "[[huashu-design/manifest]]" —— 提取 root（capability 根目录名）
+        target = ref.strip().strip("[]").split("|", 1)[0].split("#", 1)[0].strip()
+        m = _re.match(r"^([a-z0-9\-]+)(?:/.*)?$", target)
+        if not m:
+            continue
+        root = m.group(1)
+        # 直接构造 manifest 路径（避免 load_manifest 里的 id vs root 歧义）
+        manifest_path = _cfg.VAULT_ROOT / "20-知识" / "能力注册表" / root / "manifest.json"
+        try:
+            manifest = _load_manifest(str(manifest_path))
+            _validate_manifest(manifest)
+        except ManifestValidationError:
+            # 缺 manifest 或 schema 挂 → 静默跳过（角色规范师会审计出来）
+            continue
+
+        cap_id = manifest["id"]
+        ver = manifest["version"]
+        rt_type = manifest["runtime"]["type"]
+        triggers = manifest.get("triggers", [])
+        # 只取前 5 个触发词避免爆 200 chars
+        trig_preview = ", ".join(triggers[:5])
+        summary = (
+            f"- **{cap_id}** (v{ver}, runtime={rt_type})\n"
+            f"  triggers: {trig_preview}\n"
+            f"  invoke: `python -m engine.capability_executor.invoke "
+            f"--id {cap_id} --project {proj_hint} --input k=v`"
+        )
+        # 硬截断到 400 chars（每段最多 ≈ 200 chars 摘要 + 200 chars 调用示例）
+        # 依据：capability 注册表规范 §5.2 说的"~200 chars 摘要"指的是 manifest.summary
+        # 段本身；含调用方式行后 400 chars 是合理上限
+        if len(summary) > 400:
+            summary = summary[:400] + "…"
+        summaries.append(summary)
+
+    if not summaries:
+        return ""
+
+    header = (
+        "## 【可调用能力（capability_refs）】\n\n"
+        "以下能力已注册，你可按需 invoke（**不是**总要调；LLM 判断"
+        "任务与 triggers 契合时才用）。产出 artifact 直接落 vault，不回流 prompt。\n"
+    )
+    return header + "\n\n".join(summaries)
+
+
 def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> tuple[str, str]:
     """从 vault 加载角色笔记，返回 (static, dynamic) 两段 system prompt。
 
     static：角色设定 + 全局约束 + 输出格式规范（几乎不变，适合 prompt cache）
     dynamic：DYNAMIC 补丁 + 上游补丁（每轮可能变化，不缓存）
+
+    P8.2 起：若 env `AGENT_CONTRACT_OVERRIDES` 存在（workflow 层塞入），
+    自动传给 load_role 走契约参数化路径（覆盖 role.outputs / role.inputs）。
+    P8.7 起：契约展开结果通过 `_render_contract_summary` 暴露给 LLM，让 LLM
+    明确本轮契约参数 + 产出清单，凌驾于 body 中的示例产出格式（补 P5b 半吊子）。
     """
-    role = load_role(role_name_or_alias)
+    role = load_role(role_name_or_alias, contract_overrides=_read_env_contract_overrides())
 
     # ── static：核心层（T2.7 白名单契约）────────────────────
     # 业务角色严格 §1-§6 / 元角色全 body 减 DYNAMIC + 版本历史
@@ -342,8 +551,14 @@ def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> 
     static_parts = [
         f"## 角色：{role.name}",
         _strip_evidence_lines(core_text.strip()),
-        OUTPUT_FORMAT_SPEC,
     ]
+    contract_summary = _render_contract_summary(role)
+    if contract_summary:
+        static_parts.append(contract_summary)
+    capability_summary = _render_capability_summary(role, project=project)
+    if capability_summary:
+        static_parts.append(capability_summary)
+    static_parts.append(OUTPUT_FORMAT_SPEC)
     static = "\n".join(static_parts)
 
     # ── dynamic：DYNAMIC 补丁 ─────────────────────────────

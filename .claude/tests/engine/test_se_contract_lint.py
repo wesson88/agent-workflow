@@ -261,3 +261,160 @@ class TestFstarIndexExists:
             "SE ship 角色应通过 rule_refs 引用 F-* 索引（§3.1 路线图）：\n"
             + "\n".join(missing)
         )
+
+
+class TestContractSchema:
+    """契约化角色的 output_contract / input_contract 必须满足规范 §11 + §7.1。
+
+    P4（2026-07-04）：TL output_contract shadow declaration
+    P7（2026-07-04）：Backend / Frontend input_contract shadow declaration
+
+    校验维度：
+    1. parameterizable=true（§7.1 不可豁免项）
+    2. fields ≥ 1 项 + 每项含 type
+    3. templates ≥ 1 项 + 每项含 outputs / inputs 列表
+    4. templates 里的 fields 占位符必须在 fields 声明中（§11.7 反例 2）
+    5. templates.legacy_directives（若存在）展开默认 field values 后
+       与 frontmatter.outputs / inputs 语义等价（模块 ID 抽象化后集合相等）
+    """
+
+    # role → 契约类型（output_contract 或 input_contract）
+    ROLE_CONTRACTS: dict[str, str] = {
+        "技术主管": "output_contract",       # P4
+        "后端工程师": "input_contract",       # P7
+        "前端工程师": "input_contract",       # P7
+    }
+
+    @staticmethod
+    def _contract_paths_key(contract_type: str) -> str:
+        """output_contract → 'outputs'；input_contract → 'inputs'。"""
+        return "outputs" if contract_type == "output_contract" else "inputs"
+
+    @staticmethod
+    def _declared_paths(role, contract_type: str) -> tuple[str, ...]:
+        """从 Role 对象读对应的 outputs 或 inputs 字段。"""
+        return role.outputs if contract_type == "output_contract" else role.inputs
+
+    @staticmethod
+    def _abstract_module_id(path: str) -> str:
+        """T01 / T0N / T{n} / {module_id_template} 归一为 T*。"""
+        norm = path.replace("\\", "/").replace("{project}", "PROJECT")
+        norm = norm.replace("{module_id_template}", "T{n}")
+        return re.sub(r"T(0N|\{n\}|0?\d+)", "T*", norm)
+
+    def _iter_contracts(self, ship_roles):
+        """产出 (role_name, contract_type, contract_dict, role_obj) 四元组。"""
+        for name, contract_type in self.ROLE_CONTRACTS.items():
+            role = ship_roles[name]["role"]
+            contract = role.frontmatter.get(contract_type) or {}
+            yield name, contract_type, contract, role
+
+    def test_contract_roles_have_contract(self, ship_roles):
+        """预期契约化的角色必须真的有对应契约声明。"""
+        missing = [
+            f"{name}.{ctype}"
+            for name, ctype in self.ROLE_CONTRACTS.items()
+            if not ship_roles[name]["role"].frontmatter.get(ctype)
+        ]
+        assert not missing, f"预期契约化角色缺契约声明：{missing}"
+
+    def test_contract_parameterizable(self, ship_roles):
+        """契约字段必须显式 parameterizable=true（§7.1 不可豁免项）。"""
+        broken: list[str] = []
+        for name, ctype, contract, _ in self._iter_contracts(ship_roles):
+            if contract.get("parameterizable") is not True:
+                broken.append(f"  {name}.{ctype}: parameterizable 缺失或非 true")
+        assert not broken, "契约化角色 parameterizable 未声明：\n" + "\n".join(broken)
+
+    def test_contract_fields_and_templates_non_empty(self, ship_roles):
+        """§7.1：契约化角色必须同时含 fields ≥ 1 项 + templates ≥ 1 项。"""
+        broken: list[str] = []
+        for name, ctype, contract, _ in self._iter_contracts(ship_roles):
+            if not (contract.get("fields") or {}):
+                broken.append(f"  {name}.{ctype}.fields 为空")
+            if not (contract.get("templates") or {}):
+                broken.append(f"  {name}.{ctype}.templates 为空")
+        assert not broken, "契约完整性违反：\n" + "\n".join(broken)
+
+    def test_contract_fields_have_type(self, ship_roles):
+        """每个 field 必须声明 type（§11.2 schema 必填）。"""
+        broken: list[str] = []
+        for name, ctype, contract, _ in self._iter_contracts(ship_roles):
+            for field_name, spec in (contract.get("fields") or {}).items():
+                if not spec.get("type"):
+                    broken.append(f"  {name}.{ctype}.{field_name}: 缺 type")
+        assert not broken, "field 缺 type 字段：\n" + "\n".join(broken)
+
+    def test_contract_templates_have_paths_list(self, ship_roles):
+        """每个 template 必须含对应的 outputs / inputs 列表。"""
+        broken: list[str] = []
+        for name, ctype, contract, _ in self._iter_contracts(ship_roles):
+            key = self._contract_paths_key(ctype)
+            for tpl_name, tpl in (contract.get("templates") or {}).items():
+                paths = tpl.get(key)
+                if not paths or not isinstance(paths, list):
+                    broken.append(
+                        f"  {name}.{ctype}.templates.{tpl_name}.{key}: 缺失或非 list"
+                    )
+        assert not broken, "template 路径结构非法：\n" + "\n".join(broken)
+
+    def test_contract_placeholders_declared_in_fields(self, ship_roles):
+        """§11.7 反例 2：templates 里用的 {field_name} 占位符必须在 fields 声明。
+
+        允许 builtin 占位符：由 workflow bindings 提供。
+        """
+        BUILTIN_PLACEHOLDERS = {
+            "project", "date", "n", "current_module_id",
+            "title_slug", "ts", "role", "domain",
+        }
+        placeholder_re = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+        broken: list[str] = []
+        for name, ctype, contract, _ in self._iter_contracts(ship_roles):
+            declared_fields = set((contract.get("fields") or {}).keys())
+            allowed = declared_fields | BUILTIN_PLACEHOLDERS
+            key = self._contract_paths_key(ctype)
+            for tpl_name, tpl in (contract.get("templates") or {}).items():
+                for path in tpl.get(key, []):
+                    for placeholder in placeholder_re.findall(str(path)):
+                        if placeholder not in allowed:
+                            broken.append(
+                                f"  {name}.{ctype}.templates.{tpl_name}: 占位符 "
+                                f"{{{placeholder}}} 未在 fields 声明"
+                            )
+        assert not broken, "占位符未声明：\n" + "\n".join(broken)
+
+    def test_legacy_template_matches_declared(self, ship_roles):
+        """§11.5 向后兼容：契约化角色的 outputs / inputs 字段应等价于 legacy_directives
+        template（或首个 template）+ 默认 field 值展开（模块 ID 抽象化后集合相等）。
+        """
+        broken: list[str] = []
+        for name, ctype, contract, role in self._iter_contracts(ship_roles):
+            templates = contract.get("templates") or {}
+            legacy = templates.get("legacy_directives") or (
+                templates[next(iter(templates))] if templates else None
+            )
+            if not legacy:
+                continue
+            key = self._contract_paths_key(ctype)
+            template_paths = {
+                self._abstract_module_id(p) for p in legacy.get(key, [])
+            }
+            declared = {
+                self._abstract_module_id(p) for p in self._declared_paths(role, ctype)
+            }
+            missing_in_template = declared - template_paths
+            extra_in_template = template_paths - declared
+            if missing_in_template or extra_in_template:
+                detail: list[str] = []
+                if missing_in_template:
+                    detail.append(
+                        f"    {key} 中未被 template 覆盖：{sorted(missing_in_template)}"
+                    )
+                if extra_in_template:
+                    detail.append(
+                        f"    template 展开出 {key} 未声明的路径：{sorted(extra_in_template)}"
+                    )
+                broken.append(
+                    f"  {name}.{ctype} 契约展开与 {key} 不等价：\n" + "\n".join(detail)
+                )
+        assert not broken, "契约首个 template 与 declared 路径语义不等价：\n" + "\n".join(broken)

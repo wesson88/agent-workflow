@@ -66,14 +66,50 @@ FORBIDDEN_FIELDS = {
     "workflow", "description", "prompt_template",
 }
 
-# 长度上限（字符数）
+# 长度上限（字符数）+ 数量上限
+# ⚠️ 阈值来源硬约束（见项目 CLAUDE.md「阈值来源必须显式声明」）
 LIMITS = {
+    # 依据：**初值，无数据支持**。规范 §4 长度软上限章节沿用 5A-1（DYNAMIC 5000）
+    # 与 role_auditor 首版实施同期设定，未做实测校准。~1400 tokens/5000 chars 是
+    # 快估算（假设中文 3.5 chars/token）。等大型角色实战暴露具体膨胀点后校准。
     "frontmatter": 800,
     "body_no_dynamic": 5000,
     "single_section": 1500,
     "dynamic": 5000,
     "single_patch": 1200,
+    # P6 新增：角色 skill_refs 数量软上限（触发 [SHRINK?]）
+    # 依据：**推导逻辑 + 实测参考**。当前实测：架构师 5 skill / 后端 4 / TL 2 / 前端 1，
+    # 上限 = 现最高值（架构师 5），高于此值提示治理域过宽应拆分。
+    # 命中不阻塞 load_role，仅 LLM 报告标记。等音乐域 9+ 角色实战后再评估上调。
+    "skill_refs_max": 5,
 }
+
+
+# P6 canonical skill 触发器 schema（对齐 skill_trigger.py::match_skill 读取契约）
+# 一个 skill 文件的 frontmatter 至少要满足以下三条之一，否则 fail-closed 不召回：
+#   - trigger.keywords ≥ 1 项
+#   - trigger.file_patterns ≥ 1 项
+#   - trigger.always: true
+def _skill_trigger_valid(skill_fm: dict) -> bool:
+    """判断 skill frontmatter 的 trigger 字段是否合法（能被 skill_trigger 召回）。
+
+    对齐 `.claude/engine/skill_trigger.py::match_skill` 的读取逻辑；命名规范
+    见 [[角色基因规范#§11]] / [[capability注册表机制-立项-2026-07-02#§11.4]]。
+    """
+    trigger = skill_fm.get("trigger") if isinstance(skill_fm, dict) else None
+    if not isinstance(trigger, dict):
+        return False
+    if trigger.get("always") is True:
+        return True
+    keywords = trigger.get("keywords")
+    if isinstance(keywords, list) and any(isinstance(k, str) and k.strip() for k in keywords):
+        return True
+    file_patterns = trigger.get("file_patterns")
+    if isinstance(file_patterns, list) and any(
+        isinstance(p, str) and p.strip() for p in file_patterns
+    ):
+        return True
+    return False
 
 
 # PM 角色 PRD.md 越界 pattern（来源：[[PM越界-PRD写下游内容]]）
@@ -348,6 +384,37 @@ def _measure_role(path: Path) -> dict:
     missing_required = REQUIRED_FIELDS - present
     present_forbidden = FORBIDDEN_FIELDS & present
 
+    # P6：skill_refs 数量 + 引用 skill 文件的 trigger 完整性
+    # skill_refs 列表本身长度（软上限 LIMITS["skill_refs_max"]）
+    skill_refs_raw = fm.get("skill_refs") if isinstance(fm, dict) else None
+    if isinstance(skill_refs_raw, list):
+        skill_refs_paths = [str(x).strip() for x in skill_refs_raw if x]
+    elif isinstance(skill_refs_raw, str):
+        skill_refs_paths = [skill_refs_raw.strip()] if skill_refs_raw.strip() else []
+    else:
+        skill_refs_paths = []
+    skill_refs_count = len(skill_refs_paths)
+    skill_refs_over_limit = skill_refs_count > LIMITS["skill_refs_max"]
+
+    # 引用 skill 文件的 trigger 完整性：缺 trigger.keywords / file_patterns / always
+    # 的 skill 会被 skill_trigger.discover_role_skills fail-closed 跳过；本 lint 提前
+    # 暴露，防止"角色声明 skill_refs 但触发器机制静默失效"。
+    skill_trigger_gaps: list[str] = []
+    for rel in skill_refs_paths:
+        skill_path = VAULT_ROOT / rel
+        if not skill_path.is_file():
+            # 缺文件与 §10.7 load_role fallback 一致：不 fail_closed，仅记录
+            skill_trigger_gaps.append(f"{rel}（文件缺失）")
+            continue
+        try:
+            skill_text = skill_path.read_text(encoding="utf-8")
+        except OSError as e:
+            skill_trigger_gaps.append(f"{rel}（读取失败：{e}）")
+            continue
+        skill_fm, _, _ = _parse_frontmatter(skill_text)
+        if not _skill_trigger_valid(skill_fm):
+            skill_trigger_gaps.append(f"{rel}（trigger 缺失或不完整）")
+
     # 章节序号检查
     found_sections = sorted(int(k) for k in section_chars if k.isdigit())
 
@@ -439,6 +506,10 @@ def _measure_role(path: Path) -> dict:
         # T2.7 prompt 白名单契约 lint
         "prompt_whitelist_issues": prompt_whitelist_issues,
         "prompt_whitelist_level": prompt_whitelist_level,
+        # P6：skill_refs 治理 lint
+        "skill_refs_count": skill_refs_count,
+        "skill_refs_over_limit": skill_refs_over_limit,
+        "skill_trigger_gaps": skill_trigger_gaps,
     }
 
 
@@ -491,6 +562,14 @@ def _format_measurements(measures: list[dict]) -> str:
         if m["oversized_patches"]:
             for idx, size in m["oversized_patches"]:
                 issues.append(f"DYNAMIC 第 {idx} 条 patch 超限：{size} > {LIMITS['single_patch']} chars")
+        # P6: skill_refs 治理
+        if m.get("skill_refs_over_limit"):
+            issues.append(
+                f"skill_refs 数量 {m['skill_refs_count']} > 软上限 "
+                f"{LIMITS['skill_refs_max']} → 建议 [SHRINK?]（收敛到 `_通用/` 或拆角色）"
+            )
+        for gap in m.get("skill_trigger_gaps", []):
+            issues.append(f"skill_refs 引用的 skill trigger 缺失：{gap}")
         if issues:
             lines.append(f"\n### {m['role']}（{m['filename']}）")
             for iss in issues:

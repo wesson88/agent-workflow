@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # 让 sibling-file 如 _module_manifest_prompt 可 import
 
 from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
@@ -30,6 +31,7 @@ from common import (
     enforce_output_limits, load_rule_block,
 )
 from prompt_builder import build_system_prompt_no_skills, build_task_skill_block
+from _module_manifest_prompt import build_module_manifest_user_prompt
 from engine import (
     set_role_status, role_is_blocked,
     project_dir, rules_dir, resolve_path,
@@ -696,6 +698,112 @@ def _run_backend_pass_split(
     return _run_pass_split("后端", system_prompt, base_prompt, project, proj_dir)
 
 
+def _run_module_manifest_mode(
+    *,
+    project: str,
+    task: str,
+    proj_dir: Path,
+    system_prompt: tuple[str, str],
+    base_prompt: str,
+) -> int:
+    """P8.7 module_manifest 分支：单 call 产出 模块清单.md + 模块/{id}-{slug}.md。
+
+    与 legacy_directives 分支的差异：
+    - 单 call 产出（不走 Plan+Detail×N；模块清单.md 本身就是 Plan 结构）
+    - 产出 `模块清单.md` + `模块/{id}-{slug}.md`（一次给完，靠 FILE 块）
+    - 前后端综合拆解（yaml node.role 区分），不看 project_type
+
+    fail 路径：
+    - LLM 未返回 FILE 块 → 落 raw dump 到 `指令/技术主管-raw-dump.md` + failed
+    - 缺关键产物 `模块清单.md` → failed（下游 manifest_validator 会 fail-closed）
+    """
+    from common import warn_if_no_files
+
+    LIMIT_CHARS = 30 * 1024
+    user_prompt = build_module_manifest_user_prompt(project, base_prompt)
+
+    print(f"[{ROLE}] 📝 单 call 产出模块清单 + 模块详情（module_manifest 模式）...")
+    try:
+        raw_output = call_claude(system_prompt, user_prompt, ROLE)
+    except Exception as e:
+        print(f"[{ROLE}] Claude API 调用失败：{e}", file=sys.stderr)
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
+        append_audit({
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed",
+            "mode": "module_manifest", "error": str(e),
+        })
+        return 1
+
+    output_files = parse_claude_output_to_files(raw_output)
+    if not output_files:
+        warn_if_no_files(raw_output, ROLE)
+        dump = proj_dir / "指令" / "技术主管-raw-dump.md"
+        write_output_atomic(dump, raw_output)
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
+        append_audit({
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed",
+            "mode": "module_manifest", "error": "no_file_blocks",
+            "raw_dump": str(dump),
+        })
+        return 3
+
+    written: list[str] = []
+    manifest_written = False
+    for rel_path, content in output_files.items():
+        rel_resolved = rel_path.replace("{project}", project)
+        dest = resolve_path(rel_resolved, project)
+        rel_posix = rel_resolved.replace("\\", "/")
+        # 模块清单不压缩（yaml block 结构必须保真）；模块详情走 LIMIT_CHARS
+        if dest.name == "模块清单.md":
+            enforced = content
+            manifest_written = True
+        elif "/模块/" in rel_posix:
+            enforced = enforce_output_limits(content, ROLE, dest.name, LIMIT_CHARS)
+        else:
+            enforced = content
+        write_output_atomic(dest, enforced)
+        print(f"[{ROLE}] 写入: {dest}")
+        written.append(rel_resolved)
+
+    if not manifest_written:
+        print(
+            f"[{ROLE}] ❌ 未产出模块清单.md（LLM 输出了 {len(output_files)} 个 FILE 块但缺关键产物）",
+            file=sys.stderr,
+        )
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
+        append_audit({
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed",
+            "mode": "module_manifest", "error": "manifest_missing",
+            "written": written,
+        })
+        return 4
+
+    set_role_status(ROLE, status="success", reset_counters=True)
+    set_role_status(ROLE, status="idle")
+    append_audit({
+        "timestamp": utc_now(), "role": ROLE, "project": project,
+        "task": task, "result": "success",
+        "mode": "module_manifest", "outputs": written,
+    })
+    print(f"[{ROLE}] 完成（module_manifest 模式），输出：{written}")
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
@@ -801,6 +909,21 @@ def main() -> int:
         "每个文件只包含该任务自身的描述 + 验收标准 + 必要的接口约束\n"
         "禁止在单个文件中汇总所有任务\n\n"
     )
+
+    # ── artifacts_pattern 分支：module_manifest 走单 call 模式（P8.7）─────
+    # 契约通过 env AGENT_CONTRACT_OVERRIDES 从 workflow 层透传
+    from common import _read_env_contract_overrides
+    _overrides = _read_env_contract_overrides() or {}
+    _artifacts_pattern = (
+        (_overrides.get("output_contract") or {}).get(
+            "artifacts_pattern", "legacy_directives"
+        )
+    )
+    if _artifacts_pattern == "module_manifest":
+        return _run_module_manifest_mode(
+            project=project, task=task, proj_dir=proj_dir,
+            system_prompt=system_prompt, base_prompt=base_prompt,
+        )
 
     backend_prompt = base_prompt + (
         "**本次只输出后端任务文件**，不要输出任何前端内容。\n"

@@ -23,11 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
-    call_claude, append_audit, utc_now,
+    call_claude, append_audit, utc_now, load_rule_block,
 )
 from engine import (
     set_role_status, role_is_blocked, get_role_status,
     project_dir, rules_dir, resolve_path,
+    load_role,
 )
 
 ROLE = "产品经理"
@@ -107,6 +108,13 @@ def main() -> int:
     # user prompt
     context_files = input_docs + [tech_stack]
     context = read_input_files(context_files)
+
+    # §3.4 rule_refs 章节级注入：frontmatter 声明的规则章节按需拼进 context
+    role_def = load_role(ROLE)
+    rule_block, source_hint = load_rule_block(role_def.rule_refs)
+    print(f"[{ROLE}] rule_refs 注入：{source_hint}")
+    if rule_block:
+        context = context + "\n\n" + rule_block
 
     source_list = "\n".join(
         f"- `{p.name}` → `inputs/{p.name}`" for p in input_docs
