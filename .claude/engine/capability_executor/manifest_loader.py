@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from ..config import VAULT_ROOT
@@ -55,8 +56,26 @@ def _check_enum(value, allowed: frozenset[str], where: str) -> None:
         )
 
 
+@lru_cache(maxsize=32)
+def _load_manifest_cached(path_str: str) -> dict:
+    """P10.5 A2：真正读磁盘的内层 helper，按绝对/规范化路径 key 缓存。
+
+    dict 是**不可变**返回给外层的（caller 承诺不改 —— 用于摘要注入/校验/executor
+    dispatch 都是只读），避免 deepcopy 开销。
+
+    invalidate：manifest 修改后测试或 CLI 需清 cache → 调 `invalidate_cache()`。
+    """
+    path = Path(path_str)
+    if not path.is_file():
+        raise _err(f"manifest 不存在：{path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise _err(f"manifest {path} JSON 解析失败：{e}") from e
+
+
 def load_manifest(capability_id_or_path: str) -> dict:
-    """从 vault 读 manifest.json。
+    """从 vault 读 manifest.json（带 lru_cache）。
 
     支持两种传参：
     - `<root>/<name>` 格式的 capability id（如 `web-scraper/crawl`）→ 从
@@ -71,12 +90,12 @@ def load_manifest(capability_id_or_path: str) -> dict:
         path = VAULT_ROOT.joinpath(*_REGISTRY_SUBDIR, root, "manifest.json")
     else:
         path = Path(capability_id_or_path)
-    if not path.is_file():
-        raise _err(f"manifest 不存在：{path}")
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        raise _err(f"manifest {path} JSON 解析失败：{e}") from e
+    return _load_manifest_cached(str(path))
+
+
+def invalidate_cache() -> None:
+    """P10.5 A2：清 manifest lru_cache（测试 / manifest 修改后 CLI 调）。"""
+    _load_manifest_cached.cache_clear()
 
 
 def validate_manifest(manifest: dict) -> None:

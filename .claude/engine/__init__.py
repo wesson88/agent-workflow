@@ -24,6 +24,7 @@ from .obsidian_io import (
 from .role_loader import (
     Role, load_role, list_roles, RoleNotFound,
 )
+from .audit import append_audit, utc_now
 from .state import (
     get_role_status, set_role_status, role_is_blocked,
     summarize_all_roles, validate_transition,

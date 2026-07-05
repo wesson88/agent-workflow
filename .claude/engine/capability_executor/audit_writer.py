@@ -93,32 +93,23 @@ def write_audit(
     )
     _atomic_write(dest, md_content)
 
-    # ── 全局 audit.jsonl 事件 ────────────────────────────
-    try:
-        from skills.common import append_audit  # type: ignore
-    except ImportError:
-        # 测试环境或 skills path 未加进 sys.path 时兜底：跳过 jsonl 双写
-        append_audit = None  # type: ignore
-
-    if append_audit is not None:
-        try:
-            append_audit({
-                "timestamp": ts_iso,
-                "type": "capability_invoke",
-                "capability_id": cap_id,
-                "version": cap_ver,
-                "project": project,
-                "input_hash": ihash,
-                "exit_code": exit_code,
-                "duration_s": duration_s,
-                "artifact_paths": [str(p) for p in result.artifact_paths],
-                "token_consumed": token_consumed,
-                "error": result.error,
-                "audit_log_path": str(dest),
-            })
-        except Exception:
-            # audit 双写失败不阻塞主链路
-            pass
+    # ── 全局 audit.jsonl 事件（正向依赖 engine.audit，P10.5 A1 修）─────
+    from ..audit import append_audit
+    append_audit({
+        "timestamp": ts_iso,
+        "type": "capability_invoke",
+        "capability_id": cap_id,
+        "version": cap_ver,
+        "project": project,
+        "input_hash": ihash,
+        "exit_code": exit_code,
+        "duration_s": duration_s,
+        "artifact_paths": [str(p) for p in result.artifact_paths],
+        "token_consumed": token_consumed,
+        "error": result.error,
+        "audit_log_path": str(dest),
+    })
+    # append_audit 内部已 fail-safe（不抛异常）
 
     return dest
 

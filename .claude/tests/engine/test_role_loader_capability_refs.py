@@ -1,11 +1,14 @@
 """
-test_role_loader_capability_refs.py — P10 role_loader `capability_refs` 加载。
+test_role_loader_capability_refs.py — P10 role_loader `capability_refs` 加载
++ P10.5 A4 fail-closed 校验。
 
 覆盖：
-- frontmatter 有 capability_refs → Role.capability_refs 为对应 tuple
+- frontmatter 有 capability_refs → Role.capability_refs 为对应 tuple（前提：manifest 存在）
 - frontmatter 无 → 空 tuple
 - 类型：str / list[str] / None 都归一化
-- 向下兼容：已契约化角色（P4/P7）加载不受影响（fixture 用 fake role md）
+- 向下兼容：已契约化角色（P4/P7）加载不受影响
+- **A4 fail-closed**：capability_refs 引用 root 缺 manifest → `CapabilityRefError`
+- **A4 fail-closed**：wikilink 格式非法（无 root）→ `CapabilityRefError`
 """
 
 from __future__ import annotations
@@ -15,7 +18,14 @@ from textwrap import dedent
 
 import pytest
 
-from engine.role_loader import _build_role
+from engine.role_loader import CapabilityRefError, _build_role
+
+
+def _write_fake_manifest(vault_root: Path, root: str) -> None:
+    """辅助：在 tmp vault 建 fake manifest 让 A4 fail-closed 校验通过。"""
+    p = vault_root / "20-知识" / "能力注册表" / root / "manifest.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"id": "' + root + '/x", "version": "0.1.0"}', encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +66,7 @@ class TestCapabilityRefsField:
         assert role.capability_refs == ()
 
     def test_single_capability_ref_as_string(self, tmp_path):
+        _write_fake_manifest(tmp_path, "huashu-design")
         path = _write_role_md(
             tmp_path,
             frontmatter_extra='capability_refs: "[[huashu-design/manifest]]"',
@@ -64,6 +75,8 @@ class TestCapabilityRefsField:
         assert role.capability_refs == ("[[huashu-design/manifest]]",)
 
     def test_list_capability_refs(self, tmp_path):
+        _write_fake_manifest(tmp_path, "huashu-design")
+        _write_fake_manifest(tmp_path, "web-scraper")
         path = _write_role_md(
             tmp_path,
             frontmatter_extra=(
@@ -85,6 +98,53 @@ class TestCapabilityRefsField:
         )
         role = _build_role(path)
         assert role.capability_refs == ()
+
+
+class TestCapabilityRefsFailClosed:
+    """P10.5 A4 fail-closed 校验：capability_refs 引用错误 root 或非法格式 → raise。"""
+
+    def test_missing_manifest_raises(self, tmp_path):
+        # 不建 fake manifest → 加载时 raise
+        path = _write_role_md(
+            tmp_path,
+            frontmatter_extra='capability_refs: "[[nonexistent-cap/manifest]]"',
+        )
+        with pytest.raises(CapabilityRefError, match="nonexistent-cap"):
+            _build_role(path)
+
+    def test_one_missing_one_present_still_raises(self, tmp_path):
+        # 只有 huashu-design 有 manifest；web-scraper 缺 → 全 fail
+        _write_fake_manifest(tmp_path, "huashu-design")
+        path = _write_role_md(
+            tmp_path,
+            frontmatter_extra=(
+                "capability_refs:\n"
+                '  - "[[huashu-design/manifest]]"\n'
+                '  - "[[web-scraper/manifest]]"\n'
+            ),
+        )
+        with pytest.raises(CapabilityRefError, match="web-scraper"):
+            _build_role(path)
+
+    def test_invalid_ref_format_raises(self, tmp_path):
+        # 格式非法（root 含大写 / 空格 / 空）→ raise
+        path = _write_role_md(
+            tmp_path,
+            frontmatter_extra='capability_refs: "[[Not Valid Format]]"',
+        )
+        with pytest.raises(CapabilityRefError, match="无法从"):
+            _build_role(path)
+
+    def test_error_message_contains_expected_path(self, tmp_path):
+        path = _write_role_md(
+            tmp_path,
+            frontmatter_extra='capability_refs: "[[missing-cap/manifest]]"',
+        )
+        with pytest.raises(CapabilityRefError) as exc_info:
+            _build_role(path)
+        # 错误信息含预期 manifest 路径，帮助 debug
+        assert "manifest.json" in str(exc_info.value)
+        assert "missing-cap" in str(exc_info.value)
 
 
 class TestBackwardCompat:

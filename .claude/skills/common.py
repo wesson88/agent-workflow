@@ -448,49 +448,61 @@ def _render_contract_summary(role) -> str:
     return "\n\n".join(parts)
 
 
-def _render_capability_summary(role, project: str | None = None) -> str:
-    """P10：把 role.capability_refs 里每个 manifest 渲染成 ≤ 200 chars 摘要。
+_CAPABILITY_REF_ROOT_RE = None  # 懒编译，避免模块顶部 import re 触发 reload 副作用
 
-    - 规范 §5.2 关键不变量：能力实现**永远不进** prompt，只进 ≤ 200 chars 摘要 + 调用方式
-    - 无 capability_refs 或加载全失败 → 返回空串（未启用能力的角色零影响）
-    - LLM 看到摘要 + triggers 后自主判断是否 invoke（不做 keyword 命中过滤，节省逻辑）
-    """
-    refs = getattr(role, "capability_refs", ()) or ()
-    if not refs:
-        return ""
 
+def _capability_ref_root(ref: str) -> str | None:
+    """从 wikilink `[[<root>/manifest]]` 提取 root。找不到返回 None。"""
     import re as _re
-    from engine import config as _cfg
-    from engine.capability_executor import ManifestValidationError
+    global _CAPABILITY_REF_ROOT_RE
+    if _CAPABILITY_REF_ROOT_RE is None:
+        _CAPABILITY_REF_ROOT_RE = _re.compile(r"^([a-z0-9\-]+)(?:/.*)?$")
+    target = ref.strip().strip("[]").split("|", 1)[0].split("#", 1)[0].strip()
+    m = _CAPABILITY_REF_ROOT_RE.match(target)
+    return m.group(1) if m else None
+
+
+from functools import lru_cache as _lru_cache  # noqa: E402
+
+
+@_lru_cache(maxsize=32)
+def _render_capability_summary_cached(refs_tuple: tuple[str, ...], proj_hint: str) -> str:
+    """P10.5 A2：capability 摘要注入按 (refs, project) 缓存。
+
+    A4 修法：以前 load_manifest 挂 → 静默跳过；现改为 stderr warn（可观测性）。
+    role 声明的 refs 加载真出错的 fail-closed 校验由 role_loader 层做（A4）。
+
+    invalidate：manifest 或 refs 变化 → invalidate_capability_summary_cache()。
+    """
+    import sys as _sys
+    from engine.capability_executor.base import ManifestValidationError
     from engine.capability_executor.manifest_loader import (
         load_manifest as _load_manifest,
         validate_manifest as _validate_manifest,
     )
 
-    proj_hint = project or "{project}"
     summaries: list[str] = []
-
-    for ref in refs:
-        # ref 形如 "[[huashu-design/manifest]]" —— 提取 root（capability 根目录名）
-        target = ref.strip().strip("[]").split("|", 1)[0].split("#", 1)[0].strip()
-        m = _re.match(r"^([a-z0-9\-]+)(?:/.*)?$", target)
-        if not m:
+    for ref in refs_tuple:
+        root = _capability_ref_root(ref)
+        if not root:
             continue
-        root = m.group(1)
-        # 直接构造 manifest 路径（避免 load_manifest 里的 id vs root 歧义）
-        manifest_path = _cfg.VAULT_ROOT / "20-知识" / "能力注册表" / root / "manifest.json"
         try:
-            manifest = _load_manifest(str(manifest_path))
+            # 复用 load_manifest 的 `<root>/xxx` 分派（也走 A2 lru_cache）
+            manifest = _load_manifest(f"{root}/manifest")
             _validate_manifest(manifest)
-        except ManifestValidationError:
-            # 缺 manifest 或 schema 挂 → 静默跳过（角色规范师会审计出来）
+        except ManifestValidationError as e:
+            # A4 修：静默跳过 → stderr warn（可观测；不阻塞主链）
+            print(
+                f"[_render_capability_summary] ⚠️ 加载 capability '{root}' 失败："
+                f"{e}（跳过；建议检查 20-知识/能力注册表/{root}/manifest.json）",
+                file=_sys.stderr,
+            )
             continue
 
         cap_id = manifest["id"]
         ver = manifest["version"]
         rt_type = manifest["runtime"]["type"]
         triggers = manifest.get("triggers", [])
-        # 只取前 5 个触发词避免爆 200 chars
         trig_preview = ", ".join(triggers[:5])
         summary = (
             f"- **{cap_id}** (v{ver}, runtime={rt_type})\n"
@@ -514,6 +526,25 @@ def _render_capability_summary(role, project: str | None = None) -> str:
         "任务与 triggers 契合时才用）。产出 artifact 直接落 vault，不回流 prompt。\n"
     )
     return header + "\n\n".join(summaries)
+
+
+def invalidate_capability_summary_cache() -> None:
+    """P10.5 A2：清 capability_summary lru_cache（测试 / manifest 修改后调）。"""
+    _render_capability_summary_cached.cache_clear()
+
+
+def _render_capability_summary(role, project: str | None = None) -> str:
+    """P10：把 role.capability_refs 里每个 manifest 渲染成 ≤ 200 chars 摘要。
+
+    - 规范 §5.2 关键不变量：能力实现**永远不进** prompt，只进 ≤ 200 chars 摘要 + 调用方式
+    - 无 capability_refs 或加载全失败 → 返回空串
+    - LLM 看到摘要 + triggers 后自主判断是否 invoke（不做 keyword 命中过滤，节省逻辑）
+    - P10.5 A2：外层薄壳，转 tuple 给可缓存内层
+    """
+    refs = getattr(role, "capability_refs", ()) or ()
+    if not refs:
+        return ""
+    return _render_capability_summary_cached(tuple(refs), project or "{project}")
 
 
 def build_system_prompt(role_name_or_alias: str, project: str | None = None) -> tuple[str, str]:
@@ -1082,17 +1113,8 @@ def parse_claude_output_to_files(raw_output: str) -> dict:
     return results
 
 
-# ── 时间与审计 ───────────────────────────────────────────
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def append_audit(entry: dict) -> None:
-    """追加一条审计日志到 .claude/audit.jsonl（Phase 4 会迁到 vault 复盘记录）。"""
-    audit_path = PROJECT_ROOT / ".claude" / "audit.jsonl"
-    audit_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(audit_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+# ── 时间与审计（P10.5 A1：抽 engine.audit 单点入口，此处仅 re-export 保向后兼容）
+from engine.audit import append_audit, utc_now  # noqa: E402, F401
 
 
 # ── LLM API 调用（按角色配置路由）──────────────────────────────────────────────

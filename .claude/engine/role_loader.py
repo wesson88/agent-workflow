@@ -34,6 +34,53 @@ class ContractSchemaError(ValueError):
     pass
 
 
+class CapabilityRefError(ValueError):
+    """角色 frontmatter.capability_refs 声明了不存在或格式不合法的 capability。
+
+    P10.5 A4（2026-07-05 code review 发现）：
+    - 原实现：`_render_capability_summary` 静默 skip 缺失 manifest，只写 stderr
+    - 修法：`role_loader._build_role` 加载时立即校验每个 ref 对应 manifest 存在，
+      不存在 → raise（跟 `ContractSchemaError` 同套 fail-closed 语义）
+    - `_render_capability_summary` 层的 stderr warn 保留作二次防御
+    """
+    pass
+
+
+_CAPABILITY_REGISTRY_SUBDIR = ("20-知识", "能力注册表")
+_CAPABILITY_REF_ROOT_RE = re.compile(r"^([a-z0-9\-]+)(?:/.*)?$")
+
+
+def _extract_capability_ref_root(ref: str) -> str | None:
+    """从 wikilink `[[<root>/manifest]]` 提取 root；格式非法返回 None。"""
+    target = ref.strip().strip("[]").split("|", 1)[0].split("#", 1)[0].strip()
+    m = _CAPABILITY_REF_ROOT_RE.match(target)
+    return m.group(1) if m else None
+
+
+def _validate_capability_refs(refs: tuple[str, ...], role_name: str) -> None:
+    """P10.5 A4：fail-closed 校验每个 capability_refs 对应 manifest.json 存在。
+
+    只校验文件存在（不做 schema 校验 —— schema 交给 manifest_loader.validate_manifest
+    在 _render_capability_summary / executor.invoke 时做）。
+    这样 role 加载快、fail-closed 覆盖"打错 root 名"这最常见的 bug。
+    """
+    for ref in refs:
+        root = _extract_capability_ref_root(ref)
+        if not root:
+            raise CapabilityRefError(
+                f"{role_name}.capability_refs: 无法从 '{ref}' 解析 root；"
+                f"应为 `[[<root>/manifest]]` 格式（root 为 kebab-case）"
+            )
+        path = VAULT_ROOT.joinpath(
+            *_CAPABILITY_REGISTRY_SUBDIR, root, "manifest.json"
+        )
+        if not path.is_file():
+            raise CapabilityRefError(
+                f"{role_name}.capability_refs: 引用的 capability '{root}' 缺 manifest；"
+                f"预期路径不存在：{path}"
+            )
+
+
 @dataclass(frozen=True)
 class ResolvedContract:
     """契约解析结果（P5a 影子模式：仅用于 assert 校验，不驱动真实产出）。
@@ -377,6 +424,9 @@ def _build_role(
     body_with_skills = body + ("\n\n" + skill_block if skill_block else "")
     rule_refs = _seq(fm.get("rule_refs"))
     capability_refs = _seq(fm.get("capability_refs"))
+    if capability_refs:
+        # P10.5 A4：fail-closed 校验每个 ref 对应 manifest 存在（打错 root 名早发现）
+        _validate_capability_refs(capability_refs, str(fm["role"]))
     declared_outputs = _seq(fm.get("outputs"))
     declared_inputs = _seq(fm.get("inputs"))
 
