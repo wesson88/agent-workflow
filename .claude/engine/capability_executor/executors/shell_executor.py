@@ -19,6 +19,7 @@ from typing import Any
 from ..base import ExecutorResult
 from ..manifest_loader import get_timeout_s
 from ._common import (
+    apply_network_sandbox,
     render_argv_template,
     resolve_artifact_paths,
     resolve_working_dir,
@@ -57,6 +58,8 @@ class ShellExecutor:
             )
         argv = render_argv_template(tokens, inputs, project)
         env = os.environ.copy()
+        # A3（P10.5）：shell runtime 默认 disabled（依据：规范 §4 强约束）
+        env = apply_network_sandbox(env, manifest)
         for k, v in (runtime.get("env") or {}).items():
             env[str(k)] = str(v)
         timeout_s = get_timeout_s(manifest)

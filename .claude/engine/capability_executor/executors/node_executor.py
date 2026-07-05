@@ -20,6 +20,7 @@ from typing import Any
 from ..base import ExecutorResult
 from ..manifest_loader import get_timeout_s
 from ._common import (
+    apply_network_sandbox,
     render_argv_template,
     resolve_artifact_paths,
     resolve_working_dir,
@@ -80,6 +81,9 @@ class NodeExecutor:
 
         argv = [node_bin, str(script_path), *rendered[1:]]
         env = os.environ.copy()
+        # A3（P10.5）：按 sandbox.network 拦截；huashu-design manifest 声明 enabled，
+        # 需要网络的 capability 显式声明 network: enabled 即绕过拦截
+        env = apply_network_sandbox(env, manifest)
         for k, v in (runtime.get("env") or {}).items():
             env[str(k)] = str(v)
         timeout_s = get_timeout_s(manifest)

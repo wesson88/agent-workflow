@@ -98,6 +98,56 @@ def resolve_artifact_paths(
     return result
 
 
+# A3（P10.5）：sandbox.network 强制拦截 —— env 层拦截思路
+#
+# **有效范围**：
+# - `disabled` → 环境变量 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 指向本地
+#   一个必然不存在的端点，`NO_PROXY=""` 清空豁免。这对 `requests` / `urllib` /
+#   `httpx` / `aiohttp` 等 respectful 的 HTTP 库有效 —— 请求会 fail-fast。
+# - `read_only` / `enabled` → env 层不主动拦截；`read_only` 语义（只 GET）
+#   需 proxy 层介入，本 PoC 阶段仅在 audit 记录（未来 P11 独立立项拦 proxy）。
+#
+# **绕过路径**（明确不覆盖，需 firewall/network namespace 才能防）：
+# - direct socket API 调用（`socket.socket`）
+# - 编译型二进制里直接 syscall
+# - IP 直连绕过 proxy env（如某些 curl/wget flag）
+#
+# **依据**：capability 注册表规范 §3.2 明标 3 值枚举 + §4 shell 类型默认
+# disabled；本 PoC 覆盖 requests/urllib 家族（约占 Python 生态 HTTP 客户端
+# 90%+）；剩余 10% 待未来真出问题（如某 capability 用 pycurl）再补 firewall
+# 层策略。
+#
+# **环境变量拦截目标**（依据：Python `urllib.request.getproxies_environment`
+# 识别的 6 个标准变量 + 大小写变体；见 CPython Lib/urllib/request.py）。
+_NETWORK_BLOCK_ENV = {
+    "HTTP_PROXY": "http://127.0.0.1:1",
+    "HTTPS_PROXY": "http://127.0.0.1:1",
+    "ALL_PROXY": "http://127.0.0.1:1",
+    "http_proxy": "http://127.0.0.1:1",
+    "https_proxy": "http://127.0.0.1:1",
+    "all_proxy": "http://127.0.0.1:1",
+    "NO_PROXY": "",
+    "no_proxy": "",
+}
+
+
+def apply_network_sandbox(env: dict[str, str], manifest: dict) -> dict[str, str]:
+    """A3：按 `manifest.sandbox.network` 修改 env 拦截网络。
+
+    - `disabled`（默认）→ 注入无效 proxy env，让 requests/urllib 类失败
+    - `read_only` / `enabled` → env 层不动（仅 audit 记录，见 audit_writer）
+
+    返回**新** dict（不 mutate 传入的 env），caller 直接传给 subprocess。
+    """
+    sandbox = manifest.get("sandbox") or {}
+    # 默认 disabled（依据：规范 §3.2）
+    network_level = sandbox.get("network", "disabled")
+    new_env = dict(env)
+    if network_level == "disabled":
+        new_env.update(_NETWORK_BLOCK_ENV)
+    return new_env
+
+
 def _render_output_path(
     pattern: str, inputs: dict[str, Any], project: str
 ) -> str:

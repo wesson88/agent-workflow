@@ -21,6 +21,7 @@ from typing import Any
 from ..base import ExecutorResult
 from ..manifest_loader import get_timeout_s
 from ._common import (
+    apply_network_sandbox,
     render_argv_template,
     resolve_artifact_paths,
     resolve_working_dir,
@@ -76,6 +77,8 @@ class PythonExecutor:
         # Windows 上 Python 子进程 stdout 默认 GBK；强制 utf-8 让 audit stdout 段
         # 可读（P9 PoC 实测：不设时中文变 ��）
         env["PYTHONIOENCODING"] = "utf-8"
+        # A3（P10.5）：按 sandbox.network 拦截网络（disabled → 无效 proxy env）
+        env = apply_network_sandbox(env, manifest)
         for k, v in (runtime.get("env") or {}).items():
             env[str(k)] = str(v)
         timeout_s = get_timeout_s(manifest)
