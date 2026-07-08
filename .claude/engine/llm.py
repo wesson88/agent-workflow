@@ -161,6 +161,7 @@ def call_llm(
     max_tokens: int = 4096,
     print_stream: bool = True,
     input_budget: int | None = None,
+    role_name: str | None = None,
 ) -> str:
     """统一 LLM 调用入口。
 
@@ -211,6 +212,7 @@ def call_llm(
             return _call_anthropic_sdk(
                 api_cfg, static, dynamic_own, dynamic_upstream,
                 user_prompt, max_tokens, print_stream,
+                role_name=role_name, model_name=model,
             )
         # openai_compat：拼接为单字符串
         flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
@@ -358,6 +360,9 @@ def _call_anthropic_sdk(
     system_dynamic_own: str, system_dynamic_upstream: str,
     user_prompt: str,
     max_tokens: int, print_stream: bool,
+    *,
+    role_name: str | None = None,
+    model_name: str | None = None,
 ) -> str:
     """调用 Anthropic SDK，B1（P10.5）3-block 分层缓存。
 
@@ -413,14 +418,28 @@ def _call_anthropic_sdk(
             elapsed = time.monotonic() - t0
             if print_stream:
                 print()
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+            cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
             print(
                 f"[tokens] input={usage.input_tokens}"
-                f"(cache_read={getattr(usage, 'cache_read_input_tokens', 0)}"
-                f" cache_create={getattr(usage, 'cache_creation_input_tokens', 0)})"
+                f"(cache_read={cache_read}"
+                f" cache_create={cache_create})"
                 f" output={usage.output_tokens}"
                 f" total={usage.input_tokens + usage.output_tokens}"
                 f" elapsed={elapsed:.1f}s"
             )
+            # P10.5+ / M4 实战驱动：每次成功 LLM call 落 type=llm_call 事件到 audit.jsonl，
+            # 用于 workflow token 汇总（run_chain 跑完扫 audit.jsonl 按 role 分组）
+            _append_token_audit("info", "llm_call", {
+                "role": role_name or "(unknown)",
+                "model": model_name or api_cfg.get("model") or "(unknown)",
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_create,
+                "elapsed_s": round(elapsed, 3),
+                "attempt": attempt,
+            })
             return "".join(chunks)
         except _RETRYABLE as e:
             if attempt == 3:

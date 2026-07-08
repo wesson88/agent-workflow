@@ -241,7 +241,7 @@ def _split_oversized_detail(
     )
     print(f"[{ROLE}] ✂️ 二次拆分 {tid}（体积/工时超阈值）→ 子任务，使用 {_SPLIT_MODEL}...")
     try:
-        split_raw = call_llm(system_prompt, split_prompt, model=_SPLIT_MODEL, max_tokens=2048)
+        split_raw = call_llm(system_prompt, split_prompt, model=_SPLIT_MODEL, max_tokens=2048, role_name=ROLE)
     except Exception as e:
         print(f"[{ROLE}] ⚠️ 二次拆分 call 失败 ({tid}): {e}，保留原文件", file=sys.stderr)
         return []
@@ -497,7 +497,7 @@ def _run_pass_split(
     if plan is None:
         print(f"[{ROLE}] 📋 {side} Plan call（任务大纲，max_tokens=2048）...")
         try:
-            plan_raw = call_llm(system_prompt, plan_prompt, model=model, max_tokens=2048)
+            plan_raw = call_llm(system_prompt, plan_prompt, model=model, max_tokens=2048, role_name=ROLE)
         except Exception as e:
             print(f"[{ROLE}] ⚠️ {side} Plan call 异常：{e}，回退单 call", file=sys.stderr)
             return False, []
@@ -614,6 +614,7 @@ def _run_pass_split(
             detail_raw = call_llm(
                 detail_system_prompt, detail_prompt,
                 model=model, max_tokens=1536,
+                role_name=ROLE,
             )
         except Exception as e:
             print(f"[{ROLE}] ❌ {side} Detail call 失败 ({tid}): {e}", file=sys.stderr)

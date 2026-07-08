@@ -117,7 +117,7 @@ class TestB1CallLlmTupleDispatch:
             captured["static"] = static
             captured["dynamic_combined"] = dynamic
 
-        def _fake_anthropic(cfg, s, do, du, u, mt, ps):
+        def _fake_anthropic(cfg, s, do, du, u, mt, ps, **kwargs):
             captured["dynamic_own"] = do
             captured["dynamic_upstream"] = du
             return "fake"

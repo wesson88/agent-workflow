@@ -1304,6 +1304,7 @@ def call_llm_for_role(system_prompt: tuple[str, str] | str, user_prompt: str, ro
         system_prompt, user_prompt,
         model=model, max_tokens=max_tokens,
         input_budget=input_budget,
+        role_name=display_name,
     )
 
 
@@ -1366,6 +1367,7 @@ def compress_to_limit(
                 model="claude-haiku-4-5",
                 max_tokens=4096,
                 print_stream=False,
+                role_name="(enforce-limit)",
             )
         except Exception as e:
             print(

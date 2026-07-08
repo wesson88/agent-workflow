@@ -192,7 +192,7 @@ class TestPlanPromptEstimateHours:
         # 拦截 call_llm，记录传入的 prompt
         captured_prompts: list[str] = []
 
-        def fake_llm(system_prompt, prompt, model=None, max_tokens=None):
+        def fake_llm(system_prompt, prompt, model=None, max_tokens=None, **kwargs):
             captured_prompts.append(prompt)
             # 返回有效 Plan JSON
             return json.dumps({
@@ -221,7 +221,7 @@ class TestPlanPromptEstimateHours:
         """Plan prompt 应包含 ≤ 4 小时的约束说明。"""
         captured: list[str] = []
 
-        def fake_llm(system_prompt, prompt, model=None, max_tokens=None):
+        def fake_llm(system_prompt, prompt, model=None, max_tokens=None, **kwargs):
             captured.append(prompt)
             return json.dumps({"tasks": [], "index_md_body": "# 无后端任务"})
 
@@ -252,7 +252,7 @@ class TestRunBackendPassSplit:
         monkeypatch.setattr(engine_config, "VAULT_ROOT", tmp_path)
         monkeypatch.setattr(tl_mod, "_resolve_role_model", lambda: "mock")
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return json.dumps({"tasks": [], "index_md_body": "# 无后端任务\n\n无后端业务"})
 
         monkeypatch.setattr(tl_mod, "call_llm", fake_llm)
@@ -284,7 +284,7 @@ class TestRunBackendPassSplit:
         monkeypatch.setattr(engine_config, "VAULT_ROOT", tmp_path)
         monkeypatch.setattr(tl_mod, "_resolve_role_model", lambda: "mock")
 
-        def raise_llm(sp, p, model=None, max_tokens=None):
+        def raise_llm(sp, p, model=None, max_tokens=None, **kwargs):
             raise RuntimeError("网络超时")
 
         monkeypatch.setattr(tl_mod, "call_llm", raise_llm)
@@ -302,7 +302,7 @@ class TestRunBackendPassSplit:
 
         call_count = {"n": 0}
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # Plan call
@@ -353,7 +353,7 @@ class TestRunBackendPassSplit:
 
         call_count = {"n": 0}
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             call_count["n"] += 1
             return (
                 "<!-- FILE: 10-项目/cached_proj/指令/给后端-T01.md -->\n"
@@ -382,7 +382,7 @@ class TestRunBackendPassSplit:
 
         call_count = {"n": 0}
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return json.dumps({
@@ -425,7 +425,7 @@ class TestSplitOversizedDetail:
         proj_dir = self._proj(tmp_path)
         self._index(proj_dir)
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return (
                 "<!-- FILE: 10-项目/sp/指令/给后端-T01a.md -->\n"
                 "---\ntask_id: T01a\nestimate_hours: 2\n---\n# 子任务 A\n内容\n<!-- /FILE -->\n"
@@ -457,7 +457,7 @@ class TestSplitOversizedDetail:
         proj_dir = self._proj(tmp_path, "sp2")
         self._index(proj_dir)
 
-        def bad_llm(sp, prompt, model=None, max_tokens=None):
+        def bad_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             raise RuntimeError("haiku 超时")
 
         monkeypatch.setattr(tl_mod, "call_llm", bad_llm)
@@ -490,7 +490,7 @@ class TestSplitOversizedDetail:
         proj_dir = self._proj(tmp_path, "sp4")
         index_path = self._index(proj_dir, "T02")
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return (
                 "<!-- FILE: 10-项目/sp4/指令/给后端-T02a.md -->\n"
                 "---\ntask_id: T02a\n---\n# 子A\n内容\n<!-- /FILE -->"
@@ -519,7 +519,7 @@ class TestSplitOversizedDetail:
         _write(index_path, "# 索引\n\n| T99 | 其他任务 | 后端 | 1 |\n")
         original = index_path.read_text(encoding="utf-8")
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return (
                 "<!-- FILE: 10-项目/sp5/指令/给后端-T01a.md -->\n"
                 "---\ntask_id: T01a\n---\n# 子A\n内容\n<!-- /FILE -->"
@@ -568,7 +568,7 @@ class TestSplitTrigger:
         project = "trig1"
         split_called = {"called": False}
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             if "estimate_hours" in prompt and "只列" in prompt and "任务大纲" in prompt:
                 return self._plan_response(project, estimate_hours=5)
             elif "只产出**一个后端任务**" in prompt:
@@ -603,7 +603,7 @@ class TestSplitTrigger:
         project = "trig2"
         split_called = {"called": False}
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             if "只列" in prompt and "任务大纲" in prompt:
                 return self._plan_response(project, estimate_hours=3)
             elif "只产出**一个后端任务**" in prompt:
@@ -639,7 +639,7 @@ class TestSplitTrigger:
         split_called = {"called": False}
         call_count = {"n": 0}
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return self._plan_response(project, estimate_hours=2)
@@ -677,7 +677,7 @@ class TestFrontendPassSplit:
         monkeypatch.setattr(engine_config, "VAULT_ROOT", tmp_path)
         monkeypatch.setattr(tl_mod, "_resolve_role_model", lambda: "mock")
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return json.dumps({"tasks": [], "index_md_body": "# 无前端任务\n\n纯后端项目"})
 
         monkeypatch.setattr(tl_mod, "call_llm", fake_llm)
@@ -701,7 +701,7 @@ class TestFrontendPassSplit:
         project = "fproj2"
         call_count = {"n": 0}
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return json.dumps({
@@ -754,7 +754,7 @@ class TestFrontendPassSplit:
         _write(be_index, "# 后端索引\n\n| T01 | 后端任务 | 2h | [] |\n")
         be_original = be_index.read_text(encoding="utf-8")
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return (
                 "<!-- FILE: 10-项目/fsplit/指令/给前端-T01a.md -->\n"
                 "---\ntask_id: T01a\ntitle: 前端子A\nestimate_hours: 2\n---\n# 前端子A\n内容\n<!-- /FILE -->"
@@ -794,7 +794,7 @@ class TestDynamicSkillInjection:
 
         captured_prompts: list[tuple] = []
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             captured_prompts.append(sp)
             return (
                 "<!-- FILE: 10-项目/dyntest/指令/给后端-T01.md -->\n"
@@ -837,7 +837,7 @@ class TestDynamicSkillInjection:
 
         captured_prompts: list[tuple] = []
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             captured_prompts.append(sp)
             return (
                 "<!-- FILE: 10-项目/dyntest2/指令/给后端-T01.md -->\n"
@@ -884,7 +884,7 @@ class TestDynamicSkillInjection:
 
         received_args: list[tuple] = []
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return (
                 "<!-- FILE: 10-项目/sidetest/指令/给前端-T01.md -->\n"
                 "---\ntask_id: T01\ntitle: 前端任务\nrole: 前端工程师\n"
@@ -1010,7 +1010,7 @@ class TestPlanPromptNoIndexMdBody:
     def test_plan_prompt_omits_index_md_body(self, tmp_path, monkeypatch):
         captured: list[str] = []
 
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             captured.append(prompt)
             return json.dumps({"tasks": []})
 
@@ -1031,7 +1031,7 @@ class TestPlanPromptNoIndexMdBody:
 
     def test_index_rendered_from_template_when_llm_omits(self, tmp_path, monkeypatch):
         """LLM 完全不返回 index 信息也能生成索引（模板兜底）。"""
-        def fake_llm(sp, prompt, model=None, max_tokens=None):
+        def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             return json.dumps({
                 "tasks": [
                     {"id": "T01", "title": "建表", "summary": "s", "estimate_hours": 2,
@@ -1042,7 +1042,7 @@ class TestPlanPromptNoIndexMdBody:
         # Detail call 也走同一 fake_llm，需要返回 FILE 块
         call_count = {"n": 0}
 
-        def routed_llm(sp, prompt, model=None, max_tokens=None):
+        def routed_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return fake_llm(sp, prompt)
@@ -1077,7 +1077,7 @@ class TestPlanPromptNoIndexMdBody:
         """
         call_count = {"n": 0}
 
-        def routed_llm(sp, prompt, model=None, max_tokens=None):
+        def routed_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # LLM 多输出一个无关字段，且字段值含 ASCII 引号，但因为我们不再
