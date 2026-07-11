@@ -163,6 +163,37 @@ class TestResolve:
         _write(tmp_vault / "99-临时/draft.md")
         assert resolve_target("draft") is None
 
+    def test_single_domain_rule_kept_in_stem_index(self, tmp_vault: Path):
+        """P0 修：`00-系统/规则/<domain>/<x>.md` 若无跨域同名，bare stem 可解析。
+
+        回归 [[音乐L3实战-非SE机制差异-2026-07-11#R1]]：原实现无差别排除所有
+        domain rule 子目录，导致音乐 `创作简报.schema.md` 等 rule_refs `[[X#...]]` 全 `未解析`。
+        """
+        p = _write(tmp_vault / "00-系统/规则/music/创作简报.schema.md")
+        got = resolve_target("创作简报.schema")
+        assert got == p
+
+    def test_cross_domain_adapter_excluded_from_stem_index(self, tmp_vault: Path):
+        """跨域同名 adapter（≥ 2 domain 都有同 stem）仍从 stem 索引排除。
+
+        保留原设计意图：`复盘者-视角.md` 在 music/ 和 se/ 都有，bare stem 无法解析，
+        必须用完整路径 `[[00-系统/规则/<domain>/复盘者-视角]]` 消歧。
+        """
+        _write(tmp_vault / "00-系统/规则/music/复盘者-视角.md")
+        _write(tmp_vault / "00-系统/规则/se/复盘者-视角.md")
+        assert resolve_target("复盘者-视角") is None
+
+    def test_domain_rule_plus_non_rule_namesake_kept(self, tmp_vault: Path):
+        """domain rule 下有 X.md，同时 vault 别处有另一份 X.md → 走 DuplicateStem 治理路径。
+
+        不因为 domain rule 匹配就静默排除；命名规则要求 stem 全 vault 唯一，
+        重名由 resolve_target 抛 DuplicateStemError 强制人工介入。
+        """
+        _write(tmp_vault / "00-系统/规则/music/X.md")
+        _write(tmp_vault / "20-知识/X.md")
+        with pytest.raises(DuplicateStemError):
+            resolve_target("X")
+
 
 # ── 3. load_wikilink（章节抽取 + 截断）────────────────────
 class TestLoad:

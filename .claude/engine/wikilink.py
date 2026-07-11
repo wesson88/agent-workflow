@@ -133,21 +133,21 @@ _STEM_EXCLUDED_PREFIXES = (
 )
 
 
-def _is_domain_rule_adapter(rel_posix: str) -> bool:
-    """跨域适配器路径模板：`00-系统/规则/<domain>/<adapter>.md`（vault命名规则 §2.11）。
+def _domain_rule_domain(rel_posix: str) -> str | None:
+    """若路径形如 `00-系统/规则/<domain>/<file>.md` 返回 `<domain>`，否则 None。
 
-    `规则/` 下的 *子目录* 文件是域适配器（如 `用户体验者-视角.md` / `复盘者-视角.md`），
-    跨域同名 stem 是**设计意图**（开闭原则：每加新域只新建 adapter，不改主角色基因）。
-    引用此类文件必须用完整路径 `[[00-系统/规则/<domain>/<adapter>]]`，stem 索引排除。
+    仅识别路径形态，不判定是否要排除。是否排除由 `_stem_index` 的跨域同名碰撞
+    检测决定 —— 有跨域同名的才是真跨域 adapter（如 `复盘者-视角.md`），
+    单域独有的（如 `创作简报.schema.md` 只在 `music/`）仍进 stem 索引。
 
-    `规则/` 顶层文件（如 `技术栈.md` / `角色基因规范.md`）仍参与 stem 索引（按 §2.3）。
+    历史：原 `_is_domain_rule_adapter` 无差别排除所有 `00-系统/规则/<domain>/*`，
+    导致音乐 `创作简报.schema` 等单域规则文件在 rule_refs bare-stem 引用时全部 `未解析`
+    （参见 [[音乐L3实战-非SE机制差异-2026-07-11#R1]]）。
     """
     parts = rel_posix.split("/")
-    return (
-        len(parts) >= 4
-        and parts[0] == "00-系统"
-        and parts[1] == "规则"
-    )
+    if len(parts) >= 4 and parts[0] == "00-系统" and parts[1] == "规则":
+        return parts[2]
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -155,11 +155,19 @@ def _stem_index() -> dict[str, list[Path]]:
     """vault 全局 stem → 路径列表索引；首次访问触发扫描。
 
     返回 list 而非单 Path：方便 resolve_target 在命中 ≥2 个时报错（治理失败硬告警）。
+
+    排除策略：
+    - `_STEM_EXCLUDED_PREFIXES` 目录（项目/临时/运行时状态）无条件排除
+    - `00-系统/规则/<domain>/*.md` 采用**碰撞检测**：同 stem 出现在 ≥ 2 个 domain 下
+      视为跨域 adapter 排除；单域独有的仍保留在索引
     """
-    idx: dict[str, list[Path]] = {}
     root = VAULT_ROOT
     if not root.is_dir():
-        return idx
+        return {}
+
+    # phase 1: 收集所有候选（先不管跨域 adapter 排除）
+    raw: dict[str, list[Path]] = {}
+    domain_of: dict[Path, str | None] = {}
     for p in root.rglob("*.md"):
         try:
             rel = p.relative_to(root)
@@ -168,9 +176,19 @@ def _stem_index() -> dict[str, list[Path]]:
         rel_posix = rel.as_posix()
         if any(rel_posix.startswith(pre) for pre in _STEM_EXCLUDED_PREFIXES):
             continue
-        if _is_domain_rule_adapter(rel_posix):
-            continue
-        idx.setdefault(p.stem, []).append(p)
+        raw.setdefault(p.stem, []).append(p)
+        domain_of[p] = _domain_rule_domain(rel_posix)
+
+    # phase 2: 剔除真跨域 adapter（≥ 2 domain 同 stem）
+    idx: dict[str, list[Path]] = {}
+    for stem, paths in raw.items():
+        domains = {domain_of[p] for p in paths if domain_of[p] is not None}
+        if len(domains) >= 2:
+            # 真跨域 adapter：全部路径都在 domain rule 下且分属 ≥ 2 domain → 排除
+            all_in_domain_rule = all(domain_of[p] is not None for p in paths)
+            if all_in_domain_rule:
+                continue
+        idx[stem] = paths
     return idx
 
 
