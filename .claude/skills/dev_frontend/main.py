@@ -29,6 +29,7 @@ from common import (
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
     load_rule_block, load_skill_block,
+    analyze_task_for_capability_hint,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -278,6 +279,12 @@ def main() -> int:
                 f"10-项目/{project}/测试报告/{module_id}.md",
             ])
 
+        # R3（M4 实战驱动 · 2026-07-08）：task 文本命中 capability_refs 里 triggers
+        # → user_prompt 末尾追加强 hint。无命中或无 capability_refs → 空串。
+        capability_hint = analyze_task_for_capability_hint(role_def, task_text, project)
+        if capability_hint:
+            print(f"[{ROLE}] 🎯 R3 capability hint 命中，注入 user_prompt")
+
         user_prompt = (
             f"项目名：`{project}`\n\n"
             f"{module_focus}"
@@ -297,6 +304,7 @@ def main() -> int:
             "loading/error 状态、响应式适配。\n"
             + render_required_outputs(base_required)
             + "\n上面是路径**示例**；请根据指令清单中的实际功能划分产出对应文件，每个文件用一个 FILE 块。"
+            + capability_hint
         )
 
         try:

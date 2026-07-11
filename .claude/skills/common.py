@@ -574,10 +574,16 @@ def _render_capability_summary_cached(refs_tuple: tuple[str, ...], proj_hint: st
     if not summaries:
         return ""
 
+    # R1 措辞加强（M4 实战驱动 · 2026-07-08）：原措辞"你可按需 invoke（不是总要调）"
+    # 太软 → LLM 保守选内建。改为**默认 invoke，不 invoke 需 justify**的强推向措辞。
     header = (
         "## 【可调用能力（capability_refs）】\n\n"
-        "以下能力已注册，你可按需 invoke（**不是**总要调；LLM 判断"
-        "任务与 triggers 契合时才用）。产出 artifact 直接落 vault，不回流 prompt。\n"
+        "以下能力已注册且工程实现完成。**若 task 与某能力的 triggers 契合（关键词命中）"
+        "或语义匹配，请优先 invoke 而不是自建**——能力产出的 artifact 是稳定、可复用、可审计的"
+        "工程实现，通常比你临时手写更快、更准、更可维护。\n\n"
+        "**若你判断不 invoke**（如任务过小不值得起子进程 / 能力语义不完全覆盖 / 输入前置条件缺失），"
+        "**请在你的输出里明确说明理由**（一句话即可），便于事后复盘。\n\n"
+        "产出 artifact 直接落 vault，不回流 prompt。\n"
     )
     return header + "\n\n".join(summaries)
 
@@ -616,6 +622,78 @@ def sys_design_entry(sys_design_path):
     每个 skill 各写一份 sections list。
     """
     return {"path": sys_design_path, "sections": SYS_DESIGN_SECTIONS_KEYWORDS}
+
+
+def analyze_task_for_capability_hint(
+    role, task_text: str, project: str = "{project}",
+) -> str:
+    """R3（M4 实战驱动 · 2026-07-08）：task 文本命中 role.capability_refs 里的 triggers
+    → 返回强 hint 段供 user_prompt 尾部 append。
+
+    - 无 capability_refs / 加载全失败 / 无 trigger 命中 → 返回 "" （不改 prompt）
+    - 有命中 → 返回一段 "⚠️ 能力匹配提示" 强推 invoke 或 justify 不 invoke
+
+    补 R1（capability_summary header 措辞加强）之外的**任务层信号**：R1 在 static
+    prompt 里说"若匹配请优先 invoke"，R3 在 user_prompt 里明确"你**现在这个任务**
+    确实命中了 X"。两层同修（数据/prompt/skill 主循环）参照 P8.7 教训。
+
+    trigger 命中是**简单子串包含**（跟 role_loader.capability_refs 摘要注入的
+    "LLM 自主判断"保持一致；不做 fuzzy / 词形归一化）。
+    """
+    refs = getattr(role, "capability_refs", ()) or ()
+    if not refs or not task_text:
+        return ""
+
+    from engine.capability_executor.base import ManifestValidationError
+    from engine.capability_executor.manifest_loader import (
+        load_manifest as _load_manifest,
+        validate_manifest as _validate_manifest,
+    )
+
+    hits: list[tuple[str, list[str]]] = []  # [(capability_id, matched_triggers)]
+    for ref in refs:
+        root = _capability_ref_root(ref)
+        if not root:
+            continue
+        try:
+            manifest = _load_manifest(f"{root}/manifest")
+            _validate_manifest(manifest)
+        except ManifestValidationError:
+            continue
+
+        triggers = manifest.get("triggers", []) or []
+        matched = [t for t in triggers if isinstance(t, str) and t and t in task_text]
+        if matched:
+            hits.append((manifest["id"], matched))
+
+    if not hits:
+        return ""
+
+    lines = [
+        "",
+        "---",
+        "",
+        "⚠️ **能力匹配提示**（R3 · task 文本命中已注册能力的 triggers）：",
+        "",
+        "本任务描述命中以下能力的触发词，请**优先评估 invoke 而非自建**——能力是稳定"
+        "工程实现，artifact 直接落 vault，通常比临时手写更快、更准、更可维护：",
+        "",
+    ]
+    for cap_id, matched in hits:
+        preview = ", ".join(f"`{k}`" for k in matched[:5])
+        lines.append(f"- **{cap_id}** — 命中触发词：{preview}")
+        lines.append(
+            f"  invoke: `python -m engine.capability_executor.invoke "
+            f"--id {cap_id} --project {project} --input k=v`"
+        )
+    lines.extend([
+        "",
+        "**若你决定不 invoke**（如任务过小、能力语义不完全覆盖、输入前置条件缺失），"
+        "请在你的输出里**一句话说明理由**；若 invoke 后 artifact 与本任务其他产出"
+        "并存（如 capability 产 HTML 原型、你另写 React 组件），请明确各自的边界与职责。",
+        "",
+    ])
+    return "\n".join(lines)
 
 
 def _render_capability_summary(role, project: str | None = None) -> str:
