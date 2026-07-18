@@ -69,7 +69,10 @@ def _is_source_input(path: str) -> bool:
 
 
 def _normalize_path(path: str) -> str:
-    return path.replace("\\", "/").replace("{project}", "PROJECT")
+    # 2026-07-18 注册表命名对齐：T01 实例 ≡ T{n} 模板。复用 role_loader
+    # 的 T* 抽象（单一来源，不复制第二份归一化逻辑）
+    from engine.role_loader import _abstract_module_id
+    return _abstract_module_id(path.replace("\\", "/"))
 
 
 def _build_producer_index(ship_roles: dict[str, dict]) -> dict[str, str]:

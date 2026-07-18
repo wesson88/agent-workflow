@@ -393,8 +393,7 @@ class TestLoadRoleWithOverrides:
     def test_no_overrides_uses_declared_outputs(self):
         """无 overrides → P5a 影子模式，role.outputs 保持硬编码字段值。"""
         role = load_role("技术主管")
-        assert "10-项目/{project}/指令/给后端-T01.md" in role.outputs
-        assert "10-项目/{project}/指令/给后端-T0N.md" in role.outputs
+        assert "10-项目/{project}/指令/给后端-T{n}.md" in role.outputs
         assert "10-项目/{project}/指令/给前端-索引.md" in role.outputs
         # 未 opt-in 时不含 module_manifest 路径
         assert not any("模块清单.md" in p for p in role.outputs)
@@ -477,7 +476,7 @@ class TestLoadRoleWithOverrides:
             contract_overrides={},
         )
         # 走 P5a 影子模式，outputs 保持硬编码
-        assert "10-项目/{project}/指令/给后端-T01.md" in role.outputs
+        assert "10-项目/{project}/指令/给后端-T{n}.md" in role.outputs
 
 
 # ── P5b workflow yaml step 解析 ────────────────────────────────

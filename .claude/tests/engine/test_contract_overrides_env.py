@@ -90,7 +90,7 @@ class TestBuildSystemPromptWithEnvOverride:
         # 直接调 load_role 用 common 里同款读取，两者应一致
         overrides = common._read_env_contract_overrides()
         role = load_role("技术主管", contract_overrides=overrides)
-        assert "10-项目/{project}/指令/给后端-T01.md" in role.outputs
+        assert "10-项目/{project}/指令/给后端-T{n}.md" in role.outputs
         assert not any("模块清单.md" in p for p in role.outputs)
 
     def test_env_module_manifest_override_applied(self):
