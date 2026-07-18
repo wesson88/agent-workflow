@@ -25,12 +25,9 @@ LangGraph interrupt 集成 HOLD 到 Phase B bridge 部署之后，schema 保持�
 from __future__ import annotations
 
 import json
-import os
-import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Literal
 
 from .config import project_dir
@@ -137,31 +134,12 @@ def load_gate(project: str, gate_id: str) -> HumanGate:
 
 
 def save_gate(gate: HumanGate) -> Path:
-    """原子写入（NamedTemporaryFile + os.replace）。父目录自动创建。"""
-    d = gates_dir(gate.project)
-    d.mkdir(parents=True, exist_ok=True)
-    dest = d / f"{gate.id}.json"
+    """原子写入。2026-07-18 评审统一：委托 obsidian_io.atomic_write_text
+    （原内联 3 次退避与 obsidian_io 的 5 次不一致，统一走一处实现）。"""
+    from .obsidian_io import atomic_write_text
+    dest = gates_dir(gate.project) / f"{gate.id}.json"
     content = json.dumps(gate.to_dict(), ensure_ascii=False, indent=2) + "\n"
-    with NamedTemporaryFile(
-        "w", dir=d, delete=False, encoding="utf-8",
-        suffix=".tmp", newline="\n",
-    ) as tf:
-        tf.write(content)
-        tmp = tf.name
-    # Windows 偶发文件锁，3 次指数退避（参 obsidian_io._atomic_replace_with_retry）
-    for attempt in range(3):
-        try:
-            os.replace(tmp, dest)
-            return dest
-        except PermissionError:
-            if attempt == 2:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
-            time.sleep(0.3 * (2 ** attempt))
-    return dest
+    return atomic_write_text(dest, content)
 
 
 def list_gates(project: str, *, status: GateStatus | None = None) -> list[HumanGate]:
@@ -251,3 +229,32 @@ def resolve_gate(
     g.resolved_at = _utc_now_iso()
     save_gate(g)
     return g
+
+
+# ── 消费标记（2026-07-18 架构评审修复）──────────────────
+def mark_gate_consumed(project: str, gate_id: str) -> HumanGate:
+    """把 resolved gate 标记为"已被 workflow 消费"。
+
+    背景：module_dev_loop 的 _find_active_gate 会返回最新 resolved gate；
+    若消费方处理完（approve→mark done / reject→mark blocked）不做标记，
+    同一条 resolved gate 会在后续每轮重复命中——reject 场景下即永久死锁
+    （每次重跑都 fail+halt，无出路）。
+
+    实现：在 resolution dict 里追加 consumed_at 时间戳（schema 前向兼容，
+    旧 gate 文件无此 key 视为未消费）。幂等：重复调用只更新时间戳。
+    """
+    g = load_gate(project, gate_id)
+    if g.status != "resolved":
+        raise ValueError(
+            f"gate '{gate_id}' status={g.status}，只有 resolved gate 可标记消费"
+        )
+    resolution = dict(g.resolution or {})
+    resolution["consumed_at"] = _utc_now_iso()
+    g.resolution = resolution
+    save_gate(g)
+    return g
+
+
+def gate_is_consumed(g: HumanGate) -> bool:
+    """resolved gate 是否已被 workflow 消费（resolution.consumed_at 存在）。"""
+    return bool((g.resolution or {}).get("consumed_at"))

@@ -217,7 +217,10 @@ def call_llm(
         # openai_compat：拼接为单字符串
         flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
         if kind == "openai_compat":
-            return _call_openai_compat(api_cfg, flat, user_prompt, max_tokens, print_stream)
+            return _call_openai_compat(
+                api_cfg, flat, user_prompt, max_tokens, print_stream,
+                role_name=role_name, model_name=model,
+            )
         raise ValueError(f"未知 api kind：{kind}（provider={model}）")
 
     if track == "cli":
@@ -454,35 +457,111 @@ def _call_anthropic_sdk(
     raise RuntimeError("unreachable")
 
 
-# ── OpenAI 兼容 SDK（GPT / DeepSeek / Ollama / 国产模型）─
+# ── OpenAI 兼容 SDK（GPT / DeepSeek / Gemini / Ollama / 国产模型）─
 def _call_openai_compat(
     api_cfg: dict, system_prompt: str, user_prompt: str,
     max_tokens: int, print_stream: bool,
+    *,
+    role_name: str | None = None,
+    model_name: str | None = None,
 ) -> str:
-    from openai import OpenAI  # 延迟 import
+    """2026-07-18 评审修复：此前该路径是"二等公民"——无重试、无超时、
+    不落 llm_call 审计事件（gemini/deepseek 角色的 token 消耗在 audit.jsonl
+    里是盲区，workflow token 汇总缺这些节点）。现与 Anthropic 路径对齐：
+    - timeout=300s、4 次指数退避重试（RateLimit / Timeout / Connection）
+    - stream_options.include_usage 拿真实 usage；provider 不支持该参数时
+      降级重试一次（usage 记 -1 表示未知），不阻断主路径
+    """
+    import openai  # 延迟 import
+    from openai import OpenAI
+
     key = os.environ.get(api_cfg["key_env"], "") or "sk-no-key"  # ollama 等不验 key
-    client = OpenAI(api_key=key, base_url=api_cfg.get("base_url"))
-    chunks: list[str] = []
-    stream = client.chat.completions.create(
-        model=api_cfg["model"],
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        stream=True,
+    client = OpenAI(api_key=key, base_url=api_cfg.get("base_url"), timeout=300.0)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    _RETRYABLE = (
+        openai.RateLimitError,
+        openai.APITimeoutError,
+        openai.APIConnectionError,
     )
-    for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta.content
-        if delta:
+    base_delay = 5.0
+    include_usage = True
+    for attempt in range(4):
+        chunks: list[str] = []
+        usage = None
+        try:
+            t0 = time.monotonic()
+            kwargs: dict = dict(
+                model=api_cfg["model"],
+                messages=messages,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            if include_usage:
+                kwargs["stream_options"] = {"include_usage": True}
+            try:
+                stream = client.chat.completions.create(**kwargs)
+            except openai.BadRequestError as e:
+                # 个别 OpenAI 兼容端点不认 stream_options → 去掉后降级重试一次
+                if include_usage and "stream_options" in str(e):
+                    include_usage = False
+                    kwargs.pop("stream_options", None)
+                    stream = client.chat.completions.create(**kwargs)
+                else:
+                    raise
+            for chunk in stream:
+                # include_usage 时最后一个 chunk 无 choices、带 usage
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    if print_stream:
+                        print(delta, end="", flush=True)
+                    chunks.append(delta)
+            elapsed = time.monotonic() - t0
             if print_stream:
-                print(delta, end="", flush=True)
-            chunks.append(delta)
-    if print_stream:
-        print()
-    return "".join(chunks)
+                print()
+            in_tok = getattr(usage, "prompt_tokens", None) if usage else None
+            out_tok = getattr(usage, "completion_tokens", None) if usage else None
+            print(
+                f"[tokens] input={in_tok if in_tok is not None else '?'}"
+                f" output={out_tok if out_tok is not None else '?'}"
+                f" elapsed={elapsed:.1f}s"
+            )
+            _append_token_audit("info", "llm_call", {
+                "role": role_name or "(unknown)",
+                "model": model_name or api_cfg.get("model") or "(unknown)",
+                # usage 拿不到时记 -1（区别于真实 0），汇总侧可识别"未知"
+                "input_tokens": in_tok if in_tok is not None else -1,
+                "output_tokens": out_tok if out_tok is not None else -1,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "elapsed_s": round(elapsed, 3),
+                "attempt": attempt,
+                "track": "openai_compat",
+            })
+            return "".join(chunks)
+        except _RETRYABLE as e:
+            if attempt == 3:
+                raise
+            wait = base_delay * (2 ** attempt)
+            retry_after = getattr(getattr(e, "response", None), "headers", None)
+            if retry_after is not None:
+                ra = retry_after.get("retry-after")
+                if ra:
+                    try:
+                        wait = float(ra)
+                    except ValueError:
+                        pass
+            print(f"[llm_retry] {type(e).__name__}，等待 {wait:.0f}s 后重试（{attempt + 1}/3）", flush=True)
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
 
 
 # ── 通用 CLI 子进程 ──────────────────────────────────────

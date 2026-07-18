@@ -114,13 +114,19 @@ def _atomic_replace_with_retry(tmp: str, dest: Path) -> None:
             time.sleep(_REPLACE_RETRY_BASE_DELAY * (2 ** attempt))
 
 
-def write_note(rel_path: str | Path, content: str) -> Path:
-    """原子写入笔记。父目录自动创建。返回写入后的绝对路径。"""
-    abs_p = _resolve(rel_path)
-    abs_p.parent.mkdir(parents=True, exist_ok=True)
+def atomic_write_text(dest: Path, content: str) -> Path:
+    """任意**绝对路径**的原子写（tmp + replace + Windows 锁重试）。
+
+    2026-07-18 评审统一：此前 audit_writer / manifest_writer / human_gate
+    各自持有一份 tmp+replace 实现、且前两者无 Windows 文件锁重试——同 vault
+    下遇 Obsidian/Defender 锁文件时行为不一致（有的重试有的直接抛）。
+    统一从这里走。vault 相对路径请用 write_note（含越界校验）。
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(
         "w",
-        dir=abs_p.parent,
+        dir=dest.parent,
         delete=False,
         encoding="utf-8",
         suffix=".tmp",
@@ -128,8 +134,13 @@ def write_note(rel_path: str | Path, content: str) -> Path:
     ) as tf:
         tf.write(content)
         tmp = tf.name
-    _atomic_replace_with_retry(tmp, abs_p)
-    return abs_p
+    _atomic_replace_with_retry(tmp, dest)
+    return dest
+
+
+def write_note(rel_path: str | Path, content: str) -> Path:
+    """原子写入笔记。父目录自动创建。返回写入后的绝对路径。"""
+    return atomic_write_text(_resolve(rel_path), content)
 
 
 def append_to_note(rel_path: str | Path, content: str, ensure_newline: bool = True) -> Path:

@@ -22,42 +22,16 @@ from typing import Iterable
 from .obsidian_io import split_frontmatter
 
 
-# ── 1. 核心约束章节抽取（与 wikilink._extract_section 同语义）───────
+# ── 1. 核心约束章节抽取 ─────────────────────────────────────────────
 def extract_core_section(content: str) -> str:
     """从 skill 正文抽取 `## 核心约束` 章节；未命中则回退全文。
 
-    匹配规则：h1-h6 标题文本**包含**「核心约束」即命中（大小写不敏感），
-    遇到同级或更高级标题退出。与 `engine.wikilink._extract_section` 一致，
-    但本地独立实现避免引私有 API。
+    2026-07-18 评审去重：原本地复制了 30 行同款算法（当时为避免引私有
+    API）；wikilink._extract_section 已提为公共 extract_section，直接复用。
     """
-    lines = content.splitlines(keepends=True)
-    out: list[str] = []
-    in_section = False
-    current_level = 0
-    key = "核心约束"
-    for line in lines:
-        heading = None
-        for lvl in range(1, 7):
-            prefix = "#" * lvl + " "
-            if line.startswith(prefix):
-                heading = (lvl, line[lvl + 1:].strip())
-                break
-        if heading:
-            lvl, title = heading
-            is_target = key in title
-            if is_target and not in_section:
-                in_section = True
-                current_level = lvl
-                out.append(line)
-            elif in_section and lvl <= current_level:
-                in_section = False
-            elif in_section:
-                out.append(line)
-        elif in_section:
-            out.append(line)
-    if not out:
-        return content
-    return "".join(out)
+    from .wikilink import extract_section
+    text, hit = extract_section(content, "核心约束")
+    return text if hit else content
 
 
 # ── 2. 单 skill 触发判断 ────────────────────────────────────────────

@@ -48,12 +48,14 @@ def main() -> int:
     print(f"project_dir()  = {project_dir()}")
     assert VAULT_ROOT.is_dir(), f"VAULT_ROOT 不存在：{VAULT_ROOT}"
     assert role_genes_dir().is_dir(), f"角色基因目录不存在：{role_genes_dir()}"
-    assert (rules_dir() / "技术栈.md").exists(), "技术栈.md 缺失"
-    assert (rules_dir() / "架构分解规则.md").exists(), "架构分解规则.md 缺失"
+    # 2026-07-18：规则按域重组后 SE 规则在 se/ 子目录（原根路径断言已过期）
+    assert (rules_dir() / "se" / "技术栈.md").exists(), "se/技术栈.md 缺失"
+    assert (rules_dir() / "se" / "架构分解规则.md").exists(), "se/架构分解规则.md 缺失"
 
     title("[2] role_loader：加载所有角色（Role 仅含静态定义）")
     roles = list_roles()
-    assert len(roles) == 5, f"期望 5 个角色，实际 {len(roles)}"
+    # 角色数随 vault 演进增长（SE 5 → 含 music/通用/系统级 25+），只做下限断言
+    assert len(roles) >= 5, f"期望 ≥5 个角色，实际 {len(roles)}"
     print(f"加载到 {len(roles)} 个角色：")
     for r in roles:
         st = get_role_status(r.name)
@@ -110,7 +112,7 @@ def main() -> int:
     title("[7] list_notes：枚举角色基因目录")
     role_notes = list_notes("00-系统/角色基因", "*.md")
     print(f"枚举到 {len(role_notes)} 个角色笔记")
-    assert len(role_notes) == 5, f"期望 5 个角色笔记，实际 {len(role_notes)}"
+    assert len(role_notes) >= 5, f"期望 ≥5 个角色笔记，实际 {len(role_notes)}"
 
     title("✅ Phase 2 engine 全部模块验证通过")
     return 0

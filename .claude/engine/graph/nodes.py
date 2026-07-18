@@ -52,16 +52,21 @@ def _evaluate_skip_if(skip_if: dict, project: str) -> tuple[bool, str]:
     if not target.exists():
         return False, f"目标文件不存在：{rel}（条件不命中，按不跳过处理）"
 
-    text = target.read_text(encoding="utf-8")
-    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
-    if not fm_match:
+    # 2026-07-18 评审去重：原手写正则解析 frontmatter，复用 obsidian_io 统一实现
+    from ..obsidian_io import split_frontmatter
+    try:
+        fm, _ = split_frontmatter(target.read_text(encoding="utf-8"))
+    except Exception as e:
+        return False, f"{rel} frontmatter 解析失败（{e}），按不跳过处理"
+    if not fm:
         return False, f"{rel} 无 frontmatter"
-
-    key_match = re.search(rf"^{re.escape(key)}:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
-    if not key_match:
+    if key not in fm:
         return False, f"{rel} frontmatter 无 {key} 字段"
 
-    actual = key_match.group(1).strip().strip('"').strip("'")
+    raw_val = fm[key]
+    # YAML 会把 true/false 解析成 bool——归一为小写字符串，
+    # 保持与原正则实现（纯文本比较）的语义兼容
+    actual = str(raw_val).lower() if isinstance(raw_val, bool) else str(raw_val).strip()
     if actual == expected:
         return True, f"{key}={actual} 匹配（来自 {rel}）"
     return False, f"{key}={actual} ≠ {expected}"
@@ -239,29 +244,49 @@ def _run_pre_flight(
 _PERMANENT_RC = {2, 3}
 
 
+_SUBPROCESS_TIMEOUT_SECONDS = 1800
+
+
 def _execute_single(
     main_py: Path,
     task: str,
     project: str,
     env: dict,
+    *,
+    extra_args: list[str] | None = None,
+    log_prefix: str = "subprocess",
 ) -> int:
-    """单次调用 main.py，返回 returncode。失败时指数退避重试最多 3 次。"""
+    """单次调用 main.py，返回 returncode。失败时指数退避重试最多 3 次。
+
+    2026-07-18 评审去重：brainstorm._execute_brainstorm_role 原是本函数的
+    逐行复制（仅多 --round 参数）；现通过 extra_args / log_prefix 参数化，
+    两处共用一份重试语义。
+    """
+    argv = [
+        sys.executable, str(main_py),
+        "--task", task, "--project", project,
+        *(extra_args or []),
+    ]
     for attempt in range(3):
         try:
             rc = subprocess.run(
-                [sys.executable, str(main_py), "--task", task, "--project", project],
+                argv,
                 env=env,
-                timeout=1800,
+                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
             ).returncode
         except subprocess.TimeoutExpired:
-            print(f"[subprocess_timeout] {main_py.name} 超时（1800s），attempt={attempt + 1}/3", flush=True)
+            print(
+                f"[{log_prefix}_timeout] {main_py.name} 超时"
+                f"（{_SUBPROCESS_TIMEOUT_SECONDS}s），attempt={attempt + 1}/3",
+                flush=True,
+            )
             rc = 1
         if rc == 0:
             return 0
         if rc in _PERMANENT_RC or attempt == 2:
             return rc
         wait = 2.0 * (2 ** attempt)
-        print(f"[subprocess_retry] rc={rc}，等待 {wait:.0f}s 后重试（{attempt + 1}/3）", flush=True)
+        print(f"[{log_prefix}_retry] rc={rc}，等待 {wait:.0f}s 后重试（{attempt + 1}/3）", flush=True)
         time.sleep(wait)
     return rc  # unreachable but satisfies type checker
 

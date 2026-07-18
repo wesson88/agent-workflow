@@ -28,9 +28,19 @@ from __future__ import annotations
 from typing import Iterable
 
 
-class ManifestValidationError(ValueError):
-    """模块清单 schema 或 DAG 完整性违反。fail-closed 由 P8 workflow 强制。"""
+class ModuleManifestError(ValueError):
+    """模块清单 schema 或 DAG 完整性违反。fail-closed 由 P8 workflow 强制。
+
+    2026-07-18 评审改名：原名 ManifestValidationError 与
+    capability_executor.base.ManifestValidationError（管 capability
+    manifest.json，继承链不同）完全同名，跨模块 except 时极易误捕/漏捕。
+    本类管"模块清单.md"，改名 ModuleManifestError 区分；旧名保留为别名。
+    """
     pass
+
+
+# 向后兼容别名（旧代码/测试 import ManifestValidationError 仍可用）
+ManifestValidationError = ModuleManifestError
 
 
 # 依据：来源 [[模块清单与人机协同工作流-2026-07-02 §4.3]] 示例列表

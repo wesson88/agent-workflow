@@ -244,12 +244,15 @@ def resolve_target(target: str, vault_root: Path | None = None) -> Path | None:
 
 
 # ── 3. load：读文件 + 章节抽取 + 截断 ────────────────────
-def _extract_section(content: str, section: str) -> tuple[str, bool]:
-    """从 Markdown 文档抽取指定章节。返回 (text, hit)。
+def extract_section(content: str, section: str) -> tuple[str, bool]:
+    """从 Markdown 文档抽取指定章节。返回 (text, hit)。**公共 API**。
 
     匹配规则与 skills.common._extract_sections 对齐：标题文字**包含**关键词
     （大小写不敏感）即命中；遇到同级或更高级标题退出。
     返回 hit=False 时调用方应回退全文。
+
+    2026-07-18 评审去重：原为私有 `_extract_section`，skill_trigger 为避免
+    引私有 API 复制了 30 行同款算法；现提为公共 API 供两处共用。
     """
     if not section:
         return content, True
@@ -298,7 +301,7 @@ def load_wikilink(
         return f"[WIKILINK READ ERROR: {path.name}: {e}]"
 
     if wl.section:
-        extracted, hit = _extract_section(text, wl.section)
+        extracted, hit = extract_section(text, wl.section)
         if not hit:
             print(
                 f"[wikilink] ⚠️ 章节 '{wl.section}' 在 {path.name} 未命中，回退全文",

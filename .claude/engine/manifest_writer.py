@@ -17,7 +17,6 @@ fail-closed：文件缺失 / module_id 不存在 / 非法 status → raise Manif
 from __future__ import annotations
 
 import re
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -101,15 +100,8 @@ def mark_status(manifest_path: Path, module_id: str, new_status: str) -> None:
 
 
 def _atomic_write(target: Path, content: str) -> None:
-    """写入 .tmp → replace，避免中途崩溃留下半个文件。"""
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(target.parent),
-        prefix=target.name + ".",
-        suffix=".tmp",
-        delete=False,
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-    tmp_path.replace(target)
+    """原子写入。2026-07-18 评审统一：委托 obsidian_io.atomic_write_text
+    （补上此前缺失的 Windows 文件锁重试——模块清单在 Obsidian 打开时被
+    obsidian-git/Defender 锁住会导致 mark_status 直接抛 PermissionError）。"""
+    from .obsidian_io import atomic_write_text
+    atomic_write_text(target, content)

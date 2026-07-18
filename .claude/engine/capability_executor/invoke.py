@@ -102,6 +102,32 @@ def _validate_input_paths(manifest: dict, inputs: dict[str, Any]) -> None:
                 )
 
 
+def _validate_output_paths(
+    manifest: dict, inputs: dict[str, Any], project: str
+) -> None:
+    """对 type=file 的输出 path_pattern 渲染后做 sandbox 校验（fail-closed）。
+
+    2026-07-18 架构评审修复：sandbox.py 文档承诺的第 2 个校验点此前未接线，
+    manifest 可声明任意输出路径（含绝对路径）而 subprocess 照写不误。
+    在 executor 跑之前拦截，违规 → SandboxViolationError（exit 2，不留脏产物）。
+    """
+    from engine.capability_executor.executors._common import _render_output_path
+
+    allowed = get_sandbox_allowed(manifest)
+    for out_spec in manifest.get("outputs") or []:
+        if out_spec.get("type") != "file":
+            continue
+        rendered = _render_output_path(
+            out_spec.get("path_pattern", ""), inputs, project
+        )
+        if rendered:
+            assert_path_within(
+                rendered,
+                allowed,
+                label=f"outputs.{out_spec.get('name', '?')}",
+            )
+
+
 def invoke_capability(
     capability_id: str,
     project: str,
@@ -121,6 +147,7 @@ def invoke_capability(
             f"必填输入缺失：{missing}（manifest.inputs 里 required=true 但 --input 未传）"
         )
     _validate_input_paths(manifest, inputs_filled)
+    _validate_output_paths(manifest, inputs_filled, project)
     executor = get_executor(manifest["runtime"]["type"])
     result = executor.invoke(manifest, inputs_filled, project)
     write_audit(

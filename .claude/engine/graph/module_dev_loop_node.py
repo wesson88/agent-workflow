@@ -34,7 +34,7 @@ import os
 from pathlib import Path
 
 from ..config import PROJECT_ROOT, VAULT_ROOT
-from ..human_gate import HumanGate, emit_gate, list_gates
+from ..human_gate import HumanGate, emit_gate, list_gates, mark_gate_consumed
 from ..manifest_render import compute_ready_set, parse_manifest, render_summary
 from ..manifest_writer import ManifestWriteError, mark_status
 from ..workflow import WorkflowStep, role_to_skill_dir
@@ -216,23 +216,50 @@ def _handle_confirm_gate(
             print(
                 f"\n❌ confirm_gate {confirm_gate.id} approve 但 module_id 缺失"
             )
+            _consume_gate(confirm_gate)
             return _fail(display_name)
         try:
             mark_status(manifest_path, module_id, "done")
         except ManifestWriteError as e:
             print(f"\n❌ mark_status(done) 失败：{e}")
             return _fail(display_name)
+        _consume_gate(confirm_gate)
         print(f"\n✅ 模块 {module_id} 标记为 done")
         return None
 
     if action == "reject":
-        # 保留 in_progress 状态供用户手动决策（可能改代码后 approve）
-        print(f"\n❌ 用户 reject 模块 {module_id or '(unknown)'}")
+        # 2026-07-18 评审修复：原实现只 fail 不改状态，模块停在 in_progress，
+        # 且 resolved-reject gate 永远是"最新 active gate"→ 每轮重跑都命中
+        # 同一条 reject → 永久死锁。现改为：
+        #   1. 模块 mark blocked（与 gate options.reject.effect 声明一致），
+        #      ready 集自动排除，用户修完代码后手动改 manifest status 解锁
+        #   2. gate 标记 consumed，下轮不再命中
+        # 本轮仍 fail+halt（让用户明确看到 reject 生效）。
+        if module_id:
+            try:
+                mark_status(manifest_path, module_id, "blocked")
+                print(f"\n❌ 用户 reject 模块 {module_id} → 已 mark blocked"
+                      f"（修复后请手动把 manifest 里该模块 status 改回 pending）")
+            except ManifestWriteError as e:
+                print(f"\n⚠️ reject 后 mark_status(blocked) 失败：{e}")
+        else:
+            print(f"\n❌ 用户 reject 模块 (unknown)，无法定位 module_id，"
+                  f"请手动检查 manifest")
+        _consume_gate(confirm_gate)
         return _fail(display_name)
 
-    # 其他 resolution action（skip_node / abort / ...）
+    # 其他 resolution action（skip_node / abort / ...）：同样消费，防重复命中
     print(f"\n❌ confirm_gate {confirm_gate.id} action='{action}' 未识别")
+    _consume_gate(confirm_gate)
     return _fail(display_name)
+
+
+def _consume_gate(gate: HumanGate) -> None:
+    """标记 gate 已消费；失败仅告警不阻断（消费标记是防死锁辅助，非主链）。"""
+    try:
+        mark_gate_consumed(gate.project, gate.id)
+    except Exception as e:
+        print(f"⚠️ mark_gate_consumed({gate.id}) 失败：{e}", flush=True)
 
 
 def _dispatch_engineer(

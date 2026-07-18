@@ -4,14 +4,21 @@ capability_executor/executors/_common.py — python/shell/node executor 复用�
 - `render_argv_template`：把 `runtime.entry` 里的 `{{input_name}}` 替换为实际值
 - `resolve_working_dir`：算 subprocess cwd（manifest 显式 > project_code_root 兜底）
 - `resolve_artifact_paths`：按 manifest.outputs.path_pattern 渲染 + 校验文件存在
+- `error_result` / `run_capability_subprocess`：三 executor 共用的错误结果构造
+  与 subprocess 执行主体（2026-07-18 评审去重：原三份 ~90% 逐行复制）
 """
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
+from ..base import ExecutorResult
+from ..manifest_loader import get_timeout_s
 from ...config import PROJECT_ROOT, VAULT_ROOT, project_code_root
 
 _TEMPLATE_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
@@ -80,10 +87,17 @@ def resolve_artifact_paths(
 ) -> list[Path]:
     """按 manifest.outputs.path_pattern 渲染，检查文件确实存在，返回绝对路径列表。
 
-    - type=file：渲染 + 检查存在
+    - type=file：渲染 + 检查存在 + sandbox 校验（2026-07-18 评审修复：
+      实际落盘的产物必须在 allowed_paths 内，越界 → SandboxViolationError。
+      主防线在 invoke._validate_output_paths（执行前拦截）；这里是直接调
+      executor 的路径（tests / 未来 API）的第二道防线，只校验已存在的文件，
+      避免误伤"pattern 越界但从未落盘"的场景。）
     - type=json/text/url：不落盘，跳过（executor 从 stdout 拿）
     - 相对路径基准：VAULT_ROOT（vault 内产物）
     """
+    from ..sandbox import assert_path_within, get_sandbox_allowed
+
+    allowed = get_sandbox_allowed(manifest)
     result: list[Path] = []
     for out_spec in manifest.get("outputs") or []:
         if out_spec.get("type") not in ("file",):
@@ -94,6 +108,9 @@ def resolve_artifact_paths(
         if not p.is_absolute():
             p = VAULT_ROOT / p
         if p.is_file():
+            assert_path_within(
+                p, allowed, label=f"outputs.{out_spec.get('name', '?')}"
+            )
             result.append(p)
     return result
 
@@ -146,6 +163,91 @@ def apply_network_sandbox(env: dict[str, str], manifest: dict) -> dict[str, str]
     if network_level == "disabled":
         new_env.update(_NETWORK_BLOCK_ENV)
     return new_env
+
+
+def error_result(msg: str) -> ExecutorResult:
+    """前置错误（脚本缺失 / working_dir 不存在等）的统一 ExecutorResult。"""
+    return ExecutorResult(
+        exit_code=-2, duration_s=0.0, stdout="", stderr="", error=msg,
+    )
+
+
+def run_capability_subprocess(
+    argv: list[str],
+    *,
+    working_dir: Path,
+    manifest: dict,
+    inputs: dict[str, Any],
+    project: str,
+    extra_env: dict[str, str] | None = None,
+) -> ExecutorResult:
+    """三 executor 共用的 subprocess 执行主体（2026-07-18 评审去重）。
+
+    职责：env 组装（network sandbox → runtime.env）→ subprocess.run(timeout)
+    → TimeoutExpired/OSError 归一为 ExecutorResult → rc==0 时收集 artifact。
+    executor 侧只负责 argv 前缀差异（sys.executable / PATH 命令 / node_bin）。
+
+    - extra_env：executor 特有的 env（如 python 的 PYTHONIOENCODING），
+      在 network sandbox 之前注入、可被 runtime.env 覆盖——与原三份实现的
+      叠加顺序一致。
+    - shell=False 恒定（安全默认）；**不做**重试，capability 应幂等，
+      重试语义留给上层 workflow。
+    """
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    env = apply_network_sandbox(env, manifest)
+    runtime = manifest.get("runtime", {})
+    for k, v in (runtime.get("env") or {}).items():
+        env[str(k)] = str(v)
+    timeout_s = get_timeout_s(manifest)
+
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv 全由 executor 内部构造
+            argv,
+            cwd=str(working_dir),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        return ExecutorResult(
+            exit_code=-1,
+            duration_s=time.monotonic() - t0,
+            stdout=e.stdout or "",
+            stderr=e.stderr or "",
+            error=f"timeout after {timeout_s}s",
+        )
+    except OSError as e:
+        return ExecutorResult(
+            exit_code=-2,
+            duration_s=time.monotonic() - t0,
+            stdout="",
+            stderr="",
+            error=f"subprocess 启动失败：{e}",
+        )
+
+    duration = time.monotonic() - t0
+    rc = proc.returncode
+    artifact_paths: list[Path] = []
+    error: str | None = None
+    if rc == 0:
+        artifact_paths = resolve_artifact_paths(manifest, inputs, project)
+    else:
+        error = f"exit_code={rc}: {proc.stderr.strip()[:500]}"
+    return ExecutorResult(
+        exit_code=rc,
+        duration_s=duration,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        artifact_paths=artifact_paths,
+        error=error,
+    )
 
 
 def _render_output_path(

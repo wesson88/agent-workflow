@@ -135,9 +135,13 @@ def build_graph(
     node_keys: list[str] = []
     for idx, step in enumerate(sliced):
         key = _step_node_key(step, idx)
-        # 防止重复（极少见，但保护一下）
         if key in node_keys:
-            continue
+            # 2026-07-18 评审修复：原来静默 continue 会无声吞掉重名步骤
+            # （编译出的图比模板短，用户无告警）。重名即模板配置错误，fail-closed。
+            raise ValueError(
+                f"工作流 '{template.name}' 存在重名步骤节点 '{key}'"
+                f"（第 {idx + 1} 步）。同类型多个 step 请用不同 name 区分。"
+            )
         g.add_node(key, _make_node_for_step(step, template.halt_on_failure))
         node_keys.append(key)
 

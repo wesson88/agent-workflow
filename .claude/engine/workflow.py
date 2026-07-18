@@ -227,24 +227,8 @@ class WorkflowTemplate:
     body: str = field(repr=False)
     frontmatter: dict = field(repr=False)
 
-    def linear_role_names(self) -> list[str]:
-        """提取所有步骤的角色名（按声明顺序）。
-
-        Phase 3a 只允许 type=linear；遇到其他类型抛 NotImplementedError，
-        提示用户该工作流需要 Phase 4 才能跑。
-        """
-        names: list[str] = []
-        for s in self.steps:
-            if s.type != "linear":
-                raise NotImplementedError(
-                    f"工作流 '{self.name}' 含 type='{s.type}' 步骤，"
-                    f"Phase 3a 仅支持 type='linear'。"
-                    f"该步骤需要 Phase 4 LangGraph 编排引擎才能执行。"
-                )
-            if not s.role:
-                raise ValueError(f"工作流 '{self.name}' 有 linear 步骤未指定 role")
-            names.append(s.role)
-        return names
+    # linear_role_names() 已删除（2026-07-18 评审）：Phase 3a 遗物，全仓无调用者，
+    # 且"非 linear 抛 NotImplementedError"语义与 build_graph 冲突，留着误导。
 
 
 # ── 加载 ────────────────────────────────────────────────

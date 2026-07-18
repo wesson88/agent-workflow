@@ -68,7 +68,8 @@ def mock_subprocess_succeed(monkeypatch):
         calls.append(cmd)
         return FakeCompleted(0)
 
-    monkeypatch.setattr("engine.graph.brainstorm.subprocess.run", fake_run)
+    # 2026-07-18 去重后 subprocess 执行收敛到 nodes._execute_single
+    monkeypatch.setattr("engine.graph.nodes.subprocess.run", fake_run)
     return calls
 
 

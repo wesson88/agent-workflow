@@ -101,7 +101,7 @@ class TestB1CallLlmTupleDispatch:
         monkeypatch.setattr(llm_mod, "_resolve_track", lambda cfg: "api")
         monkeypatch.setattr(
             llm_mod, "_call_openai_compat",
-            lambda cfg, prompt, user, mt, ps: "fake",
+            lambda cfg, prompt, user, mt, ps, **kw: "fake",
         )
 
         llm_mod.call_llm(("static-content", "dynamic-content"), "user", model="fake")

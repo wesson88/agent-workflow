@@ -182,17 +182,7 @@ def _render_markdown(
 
 
 def _atomic_write(dest: Path, content: str) -> None:
-    """tmp + os.replace 原子落盘。复用 common.write_output_atomic 语义（无循环 import）。"""
-    from tempfile import NamedTemporaryFile
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(
-        "w",
-        dir=dest.parent,
-        delete=False,
-        encoding="utf-8",
-        suffix=".tmp",
-        newline="\n",
-    ) as tf:
-        tf.write(content)
-        tmp = tf.name
-    Path(tmp).replace(dest)
+    """原子落盘。2026-07-18 评审统一：委托 obsidian_io.atomic_write_text
+    （补上此前缺失的 Windows 文件锁重试，与 vault 其他写路径行为一致）。"""
+    from ..obsidian_io import atomic_write_text
+    atomic_write_text(dest, content)

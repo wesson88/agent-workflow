@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from operator import add
 from pathlib import Path
@@ -39,11 +37,7 @@ from ..workflow import role_to_skill_dir
 ROUND_STATE_REL = ".workflow/brainstorm_round_state.json"
 READINESS_REL = "brainstorm_readiness.json"
 
-# 与 nodes.py:_PERMANENT_RC 同语义：不重试的终态返回码
-_PERMANENT_RC = {2, 3}
-
-# 单角色 subprocess 超时（同 nodes._execute_single 1800s）
-_ROLE_TIMEOUT_SECONDS = 1800
+# 重试/超时/永久错误码语义见 nodes._execute_single（2026-07-18 去重后单一来源）
 
 
 # ── State ───────────────────────────────────────────────
@@ -119,46 +113,23 @@ def _execute_brainstorm_role(
     project: str,
     round_num: int,
 ) -> int:
-    """调一个脑暴角色 thin wrapper，传 --round；retry 3 次。
+    """调一个脑暴角色，传 --round。
 
-    复用 nodes._execute_single 模式但加 --round 参数。
+    2026-07-18 评审去重：重试/超时/永久错误码语义全部委托
+    nodes._execute_single（原为逐行复制，改一处要同步改两份）。
     """
+    from .nodes import _execute_single
+
     skill_dir = role_to_skill_dir(role_name)
     main_py = PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"
     env = os.environ.copy()
     env["PROJECT"] = project
     env["TASK"] = task
-
-    for attempt in range(3):
-        try:
-            rc = subprocess.run(
-                [
-                    sys.executable, str(main_py),
-                    "--task", task,
-                    "--project", project,
-                    "--round", str(round_num),
-                ],
-                env=env,
-                timeout=_ROLE_TIMEOUT_SECONDS,
-            ).returncode
-        except subprocess.TimeoutExpired:
-            print(
-                f"[brainstorm] {main_py.name} 超时（{_ROLE_TIMEOUT_SECONDS}s），"
-                f"attempt={attempt + 1}/3",
-                flush=True,
-            )
-            rc = 1
-        if rc == 0:
-            return 0
-        if rc in _PERMANENT_RC or attempt == 2:
-            return rc
-        wait = 2.0 * (2 ** attempt)
-        print(
-            f"[brainstorm] {role_name} rc={rc}，等待 {wait:.0f}s 后重试（{attempt + 1}/3）",
-            flush=True,
-        )
-        time.sleep(wait)
-    return rc  # unreachable
+    return _execute_single(
+        main_py, task, project, env,
+        extra_args=["--round", str(round_num)],
+        log_prefix="brainstorm",
+    )
 
 
 # ── 节点 ────────────────────────────────────────────────

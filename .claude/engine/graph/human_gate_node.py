@@ -23,6 +23,7 @@ from ..config import VAULT_ROOT
 from ..human_gate import (
     HumanGate,
     emit_gate,
+    gate_is_consumed,
     list_gates,
 )
 from ..manifest_render import compute_ready_set, parse_manifest, render_summary
@@ -40,16 +41,23 @@ def _resolve_manifest_path(manifest_template: str, project: str) -> Path:
 
 
 def _find_active_gate(project: str, gate: str) -> HumanGate | None:
-    """找最新的 pending 或 resolved gate（按 created_at 倒序）。
+    """找最新的 pending 或"未消费的 resolved" gate（按 created_at 倒序）。
 
     - pending → 已落盘等用户处理
-    - resolved → 用户已选好，本轮 node 应消费
+    - resolved 且未消费 → 用户已选好，本轮 node 应消费
+    - resolved 且已消费（resolution.consumed_at 存在）→ 跳过
+      （2026-07-18 评审修复：否则 resolved-reject gate 会永久是"最新
+      active gate"，每轮重跑都命中 → fail+halt 死锁）
     - None → 需要新落一条 pending gate
     """
     gates = list_gates(project)
     filtered = [
         g for g in gates
-        if g.gate == gate and g.status in ("pending", "resolved")
+        if g.gate == gate
+        and (
+            g.status == "pending"
+            or (g.status == "resolved" and not gate_is_consumed(g))
+        )
     ]
     if not filtered:
         return None
