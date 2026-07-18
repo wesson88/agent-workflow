@@ -14,7 +14,7 @@ test_module_dev_loop_reparse.py — P8.7 Round 3 v1 stale nodes_list bug 回归�
 **修法**（`module_dev_loop_node.py` L88-108）：
 Step C 消费 confirm gate 后 `nodes_list = parse_manifest(manifest_path)` 重读文件。
 
-**回归保护**：本测试用 monkeypatch `_execute_single` 拦截 engineer subprocess 调用，
+**回归保护**：本测试用 monkeypatch `invoke_role` 拦截 engineer 调用（F7 阶段 B 后接口）,
 若被误调即说明 stale bug 复活。
 """
 
@@ -126,15 +126,17 @@ class TestReparseAfterConfirmApprove:
             action="approve",
         )
 
-        # 关键 spy：拦截 _execute_single，任何调用都是 stale bug 复活的信号
-        exec_calls: list[tuple] = []
+        # 关键 spy：拦截 invoke_role，任何调用都是 stale bug 复活的信号
+        exec_calls: list = []
 
-        def _fake_execute_single(main_py, subtask, project, env):
-            exec_calls.append((main_py, subtask, project, dict(env)))
-            return 0  # 假装 engineer 成功
+        from engine.role_invoke import RoleResult
+
+        def _fake_invoke(inv, **kwargs):
+            exec_calls.append(inv)
+            return RoleResult(status="success", returncode=0, role=inv.role, elapsed_s=0.0)
 
         from engine.graph import module_dev_loop_node as mdln
-        monkeypatch.setattr(mdln, "_execute_single", _fake_execute_single)
+        monkeypatch.setattr(mdln, "invoke_role", _fake_invoke)
 
         step = _make_step()
         node = make_module_development_loop_node(step, halt_on_failure=True)
@@ -196,11 +198,14 @@ class TestReparseAfterConfirmApprove:
             action="approve",
         )
 
-        exec_calls: list[tuple] = []
+        exec_calls: list = []
+        from engine.role_invoke import RoleResult
         from engine.graph import module_dev_loop_node as mdln
         monkeypatch.setattr(
-            mdln, "_execute_single",
-            lambda *a, **kw: exec_calls.append(a) or 0,
+            mdln, "invoke_role",
+            lambda inv, **kw: exec_calls.append(inv) or RoleResult(
+                status="success", returncode=0, role=inv.role, elapsed_s=0.0,
+            ),
         )
 
         step = _make_step()

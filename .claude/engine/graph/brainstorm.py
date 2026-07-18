@@ -28,9 +28,8 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
-from ..config import PROJECT_ROOT, project_dir
+from ..config import project_dir
 from ..human_gate import has_pending, list_gates
-from ..workflow import role_to_skill_dir
 
 
 # ── 常量 ────────────────────────────────────────────────
@@ -106,7 +105,7 @@ def save_round_state(project: str, state_data: dict) -> Path:
     return p
 
 
-# ── subprocess 调用 thin wrapper ────────────────────────
+# ── 角色调用 thin wrapper ───────────────────────────────
 def _execute_brainstorm_role(
     role_name: str,
     task: str,
@@ -115,21 +114,15 @@ def _execute_brainstorm_role(
 ) -> int:
     """调一个脑暴角色，传 --round。
 
-    2026-07-18 评审去重：重试/超时/永久错误码语义全部委托
-    nodes._execute_single（原为逐行复制，改一处要同步改两份）。
+    F7 阶段 B：经 engine.role_invoke 统一接口（重试/超时/env 组装单一来源）。
     """
-    from .nodes import _execute_single
+    from ..role_invoke import RoleInvocation, invoke_role
 
-    skill_dir = role_to_skill_dir(role_name)
-    main_py = PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"
-    env = os.environ.copy()
-    env["PROJECT"] = project
-    env["TASK"] = task
-    return _execute_single(
-        main_py, task, project, env,
-        extra_args=["--round", str(round_num)],
+    result = invoke_role(
+        RoleInvocation(role=role_name, task=task, project=project, round=round_num),
         log_prefix="brainstorm",
     )
+    return result.returncode
 
 
 # ── 节点 ────────────────────────────────────────────────

@@ -29,22 +29,20 @@ graph/module_dev_loop_node.py — P8.4 module_development_loop step 类型
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
-from ..config import PROJECT_ROOT, VAULT_ROOT
+from ..config import VAULT_ROOT
 from ..human_gate import HumanGate, emit_gate, list_gates, mark_gate_consumed
 from ..manifest_render import compute_ready_set, parse_manifest, render_summary
 from ..manifest_writer import ManifestWriteError, mark_status
-from ..workflow import WorkflowStep, role_to_skill_dir
+from ..role_invoke import RoleInvocation, invoke_role
+from ..workflow import WorkflowStep
 from .human_gate_node import (
     _build_select_module_options,
     _emit_pending_and_halt,
     _find_active_gate,
     _resolve_manifest_path,
 )
-from .nodes import _execute_single
 from .state import ProjectState
 
 
@@ -271,24 +269,10 @@ def _dispatch_engineer(
     display_name: str,
     halt_on_failure: bool,
 ) -> dict:
-    """Step F：subprocess dispatch engineer + 成功后 emit confirm_module_done。"""
+    """Step F：dispatch engineer（经 invoke_role 接口）+ 成功后 emit confirm_module_done。"""
     module_id = str(module["id"]).strip()
-    skill_dir = "dev_backend" if module_role == "backend" else "dev_frontend"
-    main_py = PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"
-    if not main_py.is_file():
-        print(f"\n❌ engineer skill 缺 main.py：{main_py}")
-        return _fail(display_name)
-
-    env = os.environ.copy()
-    env["PROJECT"] = state["project"]
-    env["TASK"] = state.get("task", "")
-    env["AGENT_SELECTED_MODULE_ID"] = module_id
-    if engineer_overrides:
-        env["AGENT_CONTRACT_OVERRIDES"] = json.dumps(
-            engineer_overrides, ensure_ascii=False
-        )
-    else:
-        env.pop("AGENT_CONTRACT_OVERRIDES", None)
+    # dev_backend / dev_frontend 是角色 aliases，invoke_role 内部解析 skill 目录
+    engineer_alias = "dev_backend" if module_role == "backend" else "dev_frontend"
 
     subtask = state.get("task", "") + f" [模块 {module_id}]"
     print(
@@ -296,9 +280,20 @@ def _dispatch_engineer(
         f"▶ 运行 engineer({module_role}) 模块 {module_id} — {module.get('title', '')}\n"
         f"{'=' * 60}"
     )
-    rc = _execute_single(main_py, subtask, state["project"], env)
-    if rc != 0:
-        print(f"\n❌ engineer({module_role}) 模块 {module_id} 失败 rc={rc}")
+    # F7 阶段 B：module_id / contract_overrides 走类型化接口（原手拼 env）
+    result = invoke_role(RoleInvocation(
+        role=engineer_alias,
+        task=subtask,
+        project=state["project"],
+        module_id=module_id,
+        contract_overrides=engineer_overrides,
+    ))
+    if result.returncode != 0:
+        print(
+            f"\n❌ engineer({module_role}) 模块 {module_id} 失败 "
+            f"rc={result.returncode}"
+            + (f"（{result.error}）" if result.error else "")
+        )
         return _fail(display_name)
 
     # 成功 → mark in_progress + emit confirm_module_done gate

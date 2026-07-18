@@ -12,14 +12,11 @@ Phase 5 新增：
 from __future__ import annotations
 
 import json
-import os
-import re
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 from ..config import PROJECT_ROOT, VAULT_ROOT
+from ..role_invoke import RoleInvocation, invoke_role
 from ..workflow import role_to_skill_dir, WorkflowStep
 from .discussion import build_discussion_graph
 from .brainstorm import build_brainstorm_graph
@@ -239,77 +236,29 @@ def _run_pre_flight(
     return splits
 
 
-# ── 执行策略（单一职责：仅负责运行 subprocess，不做判断/状态）─────────────────
-# 永久错误码：不重试（2=参数错误/argparse，3=输出解析失败）
-_PERMANENT_RC = {2, 3}
-
-
-_SUBPROCESS_TIMEOUT_SECONDS = 1800
-
-
-def _execute_single(
-    main_py: Path,
-    task: str,
-    project: str,
-    env: dict,
-    *,
-    extra_args: list[str] | None = None,
-    log_prefix: str = "subprocess",
-) -> int:
-    """单次调用 main.py，返回 returncode。失败时指数退避重试最多 3 次。
-
-    2026-07-18 评审去重：brainstorm._execute_brainstorm_role 原是本函数的
-    逐行复制（仅多 --round 参数）；现通过 extra_args / log_prefix 参数化，
-    两处共用一份重试语义。
-    """
-    argv = [
-        sys.executable, str(main_py),
-        "--task", task, "--project", project,
-        *(extra_args or []),
-    ]
-    for attempt in range(3):
-        try:
-            rc = subprocess.run(
-                argv,
-                env=env,
-                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
-            ).returncode
-        except subprocess.TimeoutExpired:
-            print(
-                f"[{log_prefix}_timeout] {main_py.name} 超时"
-                f"（{_SUBPROCESS_TIMEOUT_SECONDS}s），attempt={attempt + 1}/3",
-                flush=True,
-            )
-            rc = 1
-        if rc == 0:
-            return 0
-        if rc in _PERMANENT_RC or attempt == 2:
-            return rc
-        wait = 2.0 * (2 ** attempt)
-        print(f"[{log_prefix}_retry] rc={rc}，等待 {wait:.0f}s 后重试（{attempt + 1}/3）", flush=True)
-        time.sleep(wait)
-    return rc  # unreachable but satisfies type checker
+# ── 执行策略 ───────────────────────────────────────────────────────────────
+# 2026-07-18 F7 阶段 B：subprocess 执行主体（原 _execute_single）迁入
+# engine.role_invoke（接口模块是它的稳定居所）；graph 层经 invoke_role 调用。
 
 
 def _execute_with_subtasks(
-    main_py: Path,
-    task: str,
-    project: str,
+    base_inv: "RoleInvocation",
     sub_tasks: list[dict],
-    env: dict,
 ) -> int:
-    """按子任务列表逐一调用 main.py，任意子任务失败即返回非零 returncode。"""
+    """按子任务列表逐一 invoke_role，任意子任务失败即返回非零 returncode。"""
+    from dataclasses import replace
+
     total = len(sub_tasks)
     for i, st in enumerate(sub_tasks, 1):
         focus = st.get("focus", f"子任务{i}")
         outputs = st.get("outputs", [])
         sub_task_desc = (
-            f"{task} [子任务 {i}/{total}：{focus}，产出={outputs}]"
+            f"{base_inv.task} [子任务 {i}/{total}：{focus}，产出={outputs}]"
         )
         print(f"\n── 子任务 {i}/{total}: focus={focus} ──")
-        rc = _execute_single(main_py, sub_task_desc, project, env)
-        if rc != 0:
-            return rc
+        result = invoke_role(replace(base_inv, task=sub_task_desc))
+        if result.returncode != 0:
+            return result.returncode
     return 0
 
 
@@ -342,8 +291,6 @@ def make_role_node(
     通过 common.build_system_prompt 自动传给 load_role 走契约参数化路径。
     """
     skill_dir = role_to_skill_dir(role_name)
-    main_py = PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"
-
     def node(state: ProjectState) -> dict:
         # 上游 halt 时跳过本 node
         if state.get("halted"):
@@ -369,28 +316,19 @@ def make_role_node(
                 split_limit_lines=pre_flight.get("split_limit_lines", 400),
             )
 
-        env = os.environ.copy()
-        env["PROJECT"] = state["project"]
-        env["TASK"] = state["task"]
-        # P8.2：workflow step 声明 contract_overrides 时透传给 subprocess，
-        # skill main.py 通过 common.build_system_prompt 自动读 env 传给 load_role
-        if contract_overrides:
-            env["AGENT_CONTRACT_OVERRIDES"] = json.dumps(
-                contract_overrides, ensure_ascii=False
-            )
-        else:
-            env.pop("AGENT_CONTRACT_OVERRIDES", None)
-
+        # F7 阶段 B：经 invoke_role 统一接口（env 组装 / contract_overrides
+        # 透传 / 重试语义收敛在 engine.role_invoke 一处）
+        inv = RoleInvocation(
+            role=role_name,
+            task=state["task"],
+            project=state["project"],
+            contract_overrides=contract_overrides,
+        )
         if sub_tasks_to_run:
             print(f"\n✂️  拆分为 {len(sub_tasks_to_run)} 个子任务执行")
-            rc = _execute_with_subtasks(
-                main_py, state["task"], state["project"],
-                sub_tasks_to_run, env,
-            )
+            rc = _execute_with_subtasks(inv, sub_tasks_to_run)
         else:
-            rc = _execute_single(
-                main_py, state["task"], state["project"], env,
-            )
+            rc = invoke_role(inv).returncode
 
         if rc != 0:
             print(f"\n❌ {role_name} 失败（exit={rc}）")

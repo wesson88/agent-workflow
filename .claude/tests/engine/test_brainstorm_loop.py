@@ -68,8 +68,8 @@ def mock_subprocess_succeed(monkeypatch):
         calls.append(cmd)
         return FakeCompleted(0)
 
-    # 2026-07-18 去重后 subprocess 执行收敛到 nodes._execute_single
-    monkeypatch.setattr("engine.graph.nodes.subprocess.run", fake_run)
+    # F7 阶段 B：subprocess 执行收敛到 engine.role_invoke
+    monkeypatch.setattr("engine.role_invoke.subprocess.run", fake_run)
     return calls
 
 
@@ -257,9 +257,9 @@ def test_run_round_invokes_three_roles_with_round_param(
     """run_round 依次调用 diverger / challenger / scribe，每个传 --round N。"""
     from engine.graph.brainstorm import _node_run_round
 
-    # mock role_to_skill_dir 避开 vault 角色加载
+    # mock role_to_skill_dir 避开 vault 角色加载（F7 阶段 B 后解析在 role_invoke → workflow）
     monkeypatch.setattr(
-        "engine.graph.brainstorm.role_to_skill_dir",
+        "engine.workflow.role_to_skill_dir",
         lambda name: {"创意发散者": "brainstorm_diverger",
                       "创意质询者": "brainstorm_challenger",
                       "创意记录员": "brainstorm_scribe"}[name],

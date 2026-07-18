@@ -216,12 +216,14 @@ class TestStepD:
         # 确认没跑 engineer
         called = {"count": 0}
 
-        def fake_exec(*args, **kwargs):
+        from engine.role_invoke import RoleResult
+
+        def fake_invoke(inv, **kwargs):
             called["count"] += 1
-            return 0
+            return RoleResult(status="success", returncode=0, role=inv.role, elapsed_s=0.0)
 
         from engine.graph import module_dev_loop_node as mdln
-        monkeypatch.setattr(mdln, "_execute_single", fake_exec)
+        monkeypatch.setattr(mdln, "invoke_role", fake_invoke)
         step = _make_step()
         node = make_module_development_loop_node(step, halt_on_failure=True)
         patch = node({"project": tmp_vault.project, "task": ""})
@@ -252,22 +254,23 @@ class TestStepEF:
             action="approve",
             user_response="T01",
         )
-        captured_env = {}
+        captured: dict = {}
 
-        def fake_exec(main_py, task, project, env):
-            captured_env.update(env)
-            return 0
+        from engine.role_invoke import RoleResult
 
-        monkeypatch.setattr(mdln, "_execute_single", fake_exec)
+        def fake_invoke(inv, **kwargs):
+            captured["inv"] = inv
+            return RoleResult(status="success", returncode=0, role=inv.role, elapsed_s=0.0)
+
+        monkeypatch.setattr(mdln, "invoke_role", fake_invoke)
         step = _make_step()
         node = make_module_development_loop_node(step, halt_on_failure=True)
         patch = node({"project": tmp_vault.project, "task": "top task"})
         assert patch.get("halted") is True
-        # env 有 module_id + contract_overrides
-        assert captured_env.get("AGENT_SELECTED_MODULE_ID") == "T01"
-        assert "input_contract" in captured_env.get(
-            "AGENT_CONTRACT_OVERRIDES", ""
-        )
+        # F7 阶段 B：module_id + contract_overrides 走类型化 RoleInvocation
+        inv = captured["inv"]
+        assert inv.module_id == "T01"
+        assert "input_contract" in (inv.contract_overrides or {})
         # T01 状态改为 in_progress
         from engine.manifest_render import parse_manifest
         manifest = tmp_vault.path / "10-项目" / tmp_vault.project / "模块清单.md"
@@ -298,7 +301,13 @@ class TestStepEF:
             action="approve",
             user_response="T01",
         )
-        monkeypatch.setattr(mdln, "_execute_single", lambda *a, **kw: 1)
+        from engine.role_invoke import RoleResult
+        monkeypatch.setattr(
+            mdln, "invoke_role",
+            lambda inv, **kw: RoleResult(
+                status="failed", returncode=1, role=inv.role, elapsed_s=0.0,
+            ),
+        )
         step = _make_step()
         node = make_module_development_loop_node(step, halt_on_failure=True)
         patch = node({"project": tmp_vault.project, "task": ""})

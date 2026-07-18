@@ -120,7 +120,7 @@ class TestBuildSystemPromptWithEnvOverride:
 
 # ── graph/nodes.make_role_node 透传 env ──────────────────────
 class TestMakeRoleNodeEnvPropagation:
-    """通过 monkeypatch subprocess.run 检查 env 里是否有 AGENT_CONTRACT_OVERRIDES。"""
+    """通过 monkeypatch role_invoke.subprocess.run 检查 env 里是否有 AGENT_CONTRACT_OVERRIDES（F7 阶段 B 后执行收敛于此）。"""
 
     def setup_method(self):
         invalidate_cache()
@@ -137,7 +137,8 @@ class TestMakeRoleNodeEnvPropagation:
             captured["env"] = env
             r = type("R", (), {"returncode": 0})()
             return r
-        monkeypatch.setattr(nodes.subprocess, "run", fake_run)
+        from engine import role_invoke
+        monkeypatch.setattr(role_invoke.subprocess, "run", fake_run)
 
         # make_role_node 依赖 role_to_skill_dir，直接调 _execute_single 更简单
         node = nodes.make_role_node("技术主管", halt_on_failure=False)
@@ -153,7 +154,8 @@ class TestMakeRoleNodeEnvPropagation:
             captured["env"] = env
             r = type("R", (), {"returncode": 0})()
             return r
-        monkeypatch.setattr(nodes.subprocess, "run", fake_run)
+        from engine import role_invoke
+        monkeypatch.setattr(role_invoke.subprocess, "run", fake_run)
 
         overrides = {"output_contract": {"artifacts_pattern": "module_manifest"}}
         node = nodes.make_role_node(
@@ -176,7 +178,8 @@ class TestMakeRoleNodeEnvPropagation:
             captured["env"] = env
             r = type("R", (), {"returncode": 0})()
             return r
-        monkeypatch.setattr(nodes.subprocess, "run", fake_run)
+        from engine import role_invoke
+        monkeypatch.setattr(role_invoke.subprocess, "run", fake_run)
 
         os.environ["AGENT_CONTRACT_OVERRIDES"] = json.dumps({"stale": "value"})
         node = nodes.make_role_node("技术主管", halt_on_failure=False)
