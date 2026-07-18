@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -225,7 +226,10 @@ def call_llm(
 
     if track == "cli":
         flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
-        return _call_cli(cfg["cli"], flat, user_prompt, print_stream)
+        return _call_cli(
+            cfg["cli"], flat, user_prompt, print_stream,
+            role_name=role_name, model_name=model,
+        )
 
     # unavailable：给出可操作的提示
     api_cfg = cfg.get("api") or {}
@@ -589,9 +593,123 @@ def _filter_extra_args(extra_args: list[str]) -> list[str]:
     return out
 
 
+# ── F7 心跳/超时参数（设计 [[F7-invoke_role-联合设计-2026-07-18]] §4）──
+# HEARTBEAT：拍脑袋初值 300s（正常首 token 30-60s，5-10 倍余量）；
+#   每次成功 call 落 max_stdout_gap_s 遥测到 audit.jsonl，5-10 任务后校准。
+# HARD_TIMEOUT：1800s 有实测支撑（TL Plan+Detail 撞顶 1650s），从外层
+#   subprocess 兜底内移到 CLI 层自持（invoke_role in-process 化后外层消失）。
+_CLI_HEARTBEAT_S = 300.0
+_CLI_POLL_S = 10.0
+_CLI_HARD_TIMEOUT_S = 1800.0
+
+_QUEUE_EOF = object()   # reader 线程送出的流结束哨兵
+
+
+class CliHeartbeatTimeout(RuntimeError):
+    """CLI 子进程超过 _CLI_HEARTBEAT_S 无任何 stdout 输出（F7 M1）。
+
+    继承 RuntimeError → skills main.py 现有 except 映射 rc=1（∉ _PERMANENT_RC）
+    → 外层 _execute_single 3 次退避重试自然接住。
+    """
+
+
+class CliHardTimeout(RuntimeError):
+    """CLI 子进程总时长超过 _CLI_HARD_TIMEOUT_S（原外层 1800s 兜底内移）。"""
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """杀整个进程树。Windows 用 taskkill /T /F 覆盖孙进程（Popen.kill 只杀
+    直接子进程，CLI 可能有 node 孙进程存活 —— F7 立项 §8 风险项）。"""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=15,
+            )
+        else:
+            proc.kill()
+    except Exception as e:
+        print(f"[f7] ⚠️ kill process tree 失败（{type(e).__name__}: {e}）", file=sys.stderr)
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
+def _iter_lines_with_heartbeat(
+    proc: subprocess.Popen,
+    line_queue,
+    stats: dict,
+    *,
+    heartbeat_s: float = None,
+    hard_timeout_s: float = None,
+    poll_s: float = None,
+) -> "list":
+    """从 reader 线程的 queue 消费 stdout 行，同时执行 F7 三道判定。
+
+    生成器：yield 原始 bytes 行（解析器无感知——行的来源从直接管道换成
+    queue，解析逻辑零改动）。
+
+    判定（主线程每 poll_s 醒一次）：
+    - M1 心跳：距上次输出 > heartbeat_s → kill 进程树 + raise CliHeartbeatTimeout
+    - 硬超时：总时长 > hard_timeout_s → kill + raise CliHardTimeout
+      （有输出也算——与原外层 1800s 总墙钟语义一致）
+    - M3 僵尸：proc 已 exit 但连续两个 poll 周期没等到 EOF 哨兵
+      （R3 现象：ps 看不到 CLI 但父进程仍在读管道）→ 正常收尾 break
+
+    stats（调用方传入 dict，原地更新）：max_gap_s —— G4 校准遥测。
+    """
+    hb = heartbeat_s if heartbeat_s is not None else _CLI_HEARTBEAT_S
+    hard = hard_timeout_s if hard_timeout_s is not None else _CLI_HARD_TIMEOUT_S
+    poll = poll_s if poll_s is not None else _CLI_POLL_S
+
+    t_start = time.monotonic()
+    last_output = t_start
+    proc_exited_polls = 0
+    while True:
+        try:
+            item = line_queue.get(timeout=poll)
+        except queue.Empty:
+            now = time.monotonic()
+            if now - last_output > hb:
+                _kill_process_tree(proc)
+                raise CliHeartbeatTimeout(
+                    f"CLI {hb:.0f}s 无 stdout 输出（距启动 {now - t_start:.0f}s），"
+                    f"已 kill 进程树。F7 M1 心跳触发 —— 将由上层重试。"
+                )
+            if now - t_start > hard:
+                _kill_process_tree(proc)
+                raise CliHardTimeout(
+                    f"CLI 总时长超 {hard:.0f}s 硬上限，已 kill 进程树。"
+                )
+            if proc.poll() is not None:
+                # 进程已退出：给 reader 线程一个 poll 周期送 EOF；
+                # 第二次仍空 → 僵尸/管道异常（R3 现象），主动收尾
+                proc_exited_polls += 1
+                if proc_exited_polls >= 2:
+                    break
+            continue
+        if item is _QUEUE_EOF:
+            break
+        ts, raw = item
+        gap = ts - last_output
+        if gap > stats.get("max_gap_s", 0.0):
+            stats["max_gap_s"] = gap
+        last_output = ts
+        if ts - t_start > hard:
+            _kill_process_tree(proc)
+            raise CliHardTimeout(
+                f"CLI 总时长超 {hard:.0f}s 硬上限（输出仍在流动），已 kill 进程树。"
+            )
+        yield raw
+
+
 def _call_cli(
     cli_cfg: dict, system_prompt: str, user_prompt: str,
     print_stream: bool,
+    *,
+    role_name: str | None = None,
+    model_name: str | None = None,
 ) -> str:
     """通用 CLI 调用，输出格式由 cli_cfg.output_format 决定。
 
@@ -600,15 +718,17 @@ def _call_cli(
     - use_system_prompt_flag=True：用 --system-prompt 替换默认（推荐）
       False：把 system 内联到 user prompt 前部（兼容无此 flag 的 CLI）
 
-    防 Windows pipe 死锁的三道护栏：
+    防 Windows pipe 死锁的护栏（M4，历史已在位）：
     1. `--system-prompt` 超过 _CMD_ARG_LIMIT 自动改走 stdin inline
-       （Windows 命令行总长 32767 限制 + 长参数易触发 CLI 解析失败）
-    2. stdin 后台线程写入；主线程同步读 stdout（不互等）
-    3. stderr=DEVNULL：彻底丢弃 stderr buffer。注意 Claude CLI 的
-       --verbose（stream-json 必需）会往 stderr 写进度信息，若用 PIPE 不读
-       会撑满 buffer 导致整个 pipe 死锁——这是真正的根因。
-    另外：_filter_extra_args 剔除空字符串值的参数对（如 --tools ""），
-    避免 CLI 启动即被参数解析失败拒绝、stdout 立即 EOF 被误判为崩溃。
+    2. stdin 后台线程写入（不与 stdout 读互等）
+    3. stderr=DEVNULL：--verbose 往 stderr 写进度，PIPE 不读会撑满死锁
+    4. _filter_extra_args 剔除空字符串参数对
+
+    F7 新增（2026-07-18，设计 [[F7-invoke_role-联合设计-2026-07-18]]）：
+    5. stdout 读取移入 reader 线程 + queue；主线程执行 M1 心跳（300s 无输出
+       kill+raise）/ M3 僵尸检测 / 1800s 硬超时内移；进程树 kill 用 taskkill /T
+    6. 成功 call 落 llm_call 审计事件（含 max_stdout_gap_s 遥测 + stream-json
+       result 事件里的 usage —— CLI telemetry 断点就此接通）
     """
     cli = shutil.which(cli_cfg["path"]) or cli_cfg["path"]
     extra_args = _filter_extra_args(list(cli_cfg.get("extra_args") or []))
@@ -632,6 +752,7 @@ def _call_cli(
 
     stdin_bytes = stdin_text.encode("utf-8")
 
+    t0 = time.monotonic()
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -657,13 +778,32 @@ def _call_cli(
     writer = threading.Thread(target=_write_stdin, daemon=True)
     writer.start()
 
+    # F7：stdout 读取移入 reader 线程（主线程腾出来做心跳判定）
+    line_queue: queue.Queue = queue.Queue()
+
+    def _read_stdout() -> None:
+        try:
+            for raw in proc.stdout:
+                line_queue.put((time.monotonic(), raw))
+        except Exception:
+            pass
+        finally:
+            line_queue.put(_QUEUE_EOF)
+
+    reader = threading.Thread(target=_read_stdout, daemon=True)
+    reader.start()
+
+    stats: dict = {"max_gap_s": 0.0}
+    lines = _iter_lines_with_heartbeat(proc, line_queue, stats)
+
     output_format = cli_cfg.get("output_format", "stream-json")
     chunks: list[str] = []
+    usage: dict = {}
 
     if output_format == "stream-json":
-        chunks = _read_stream_json(proc.stdout, print_stream)
+        chunks, usage = _read_stream_json(lines, print_stream)
     elif output_format == "plain":
-        for raw in proc.stdout:
+        for raw in lines:
             line = raw.decode("utf-8", errors="replace")
             if line:
                 chunks.append(line)
@@ -674,6 +814,7 @@ def _call_cli(
 
     writer.join(timeout=5)
     rc = proc.wait()
+    elapsed = time.monotonic() - t0
     if print_stream:
         print()
     if rc != 0:
@@ -681,14 +822,31 @@ def _call_cli(
         raise RuntimeError(
             f"{cli} 退出码 {rc}（stderr 已丢弃；可手工跑 `{' '.join(cmd[:6])} ...` 排查）"
         )
+    # F7 遥测：max_stdout_gap_s（G4 阈值校准数据自动积累）+ CLI usage
+    _append_token_audit("info", "llm_call", {
+        "role": role_name or "(unknown)",
+        "model": model_name or cli_cfg.get("model") or "(unknown)",
+        "input_tokens": usage.get("input_tokens", -1),
+        "output_tokens": usage.get("output_tokens", -1),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+        "elapsed_s": round(elapsed, 3),
+        "max_stdout_gap_s": round(stats.get("max_gap_s", 0.0), 3),
+        "track": "cli",
+    })
     return "".join(chunks)
 
 
-def _read_stream_json(stdout, print_stream: bool) -> list[str]:
-    """解析 Claude Code CLI 的 stream-json 输出。"""
+def _read_stream_json(lines, print_stream: bool) -> tuple[list[str], dict]:
+    """解析 Claude Code CLI 的 stream-json 输出。
+
+    lines：bytes 行迭代器（F7 后来自心跳 queue，解析逻辑不变）。
+    返回 (chunks, usage)：usage 从最终 result 事件提取（CLI telemetry）。
+    """
     chunks: list[str] = []
+    usage: dict = {}
     seen_assistant = False
-    for raw in stdout:
+    for raw in lines:
         line = raw.decode("utf-8", errors="replace").strip()
         if not line:
             continue
@@ -715,15 +873,20 @@ def _read_stream_json(stdout, print_stream: bool) -> list[str]:
                     text += blk.get("text", "")
             if text:
                 seen_assistant = True
-        elif etype == "result" and not seen_assistant:
-            # 兜底：assistant 事件未给 text 时，从最终 result 取
-            text = event.get("result", "") or ""
+        elif etype == "result":
+            # usage 提取（CLI telemetry 断点接通；字段防御性读取）
+            u = event.get("usage")
+            if isinstance(u, dict):
+                usage = u
+            if not seen_assistant:
+                # 兜底：assistant 事件未给 text 时，从最终 result 取
+                text = event.get("result", "") or ""
 
         if text:
             chunks.append(text)
             if print_stream:
                 print(text, end="", flush=True)
-    return chunks
+    return chunks, usage
 
 
 # ── 向后兼容（Phase 2b 旧接口）──────────────────────────
