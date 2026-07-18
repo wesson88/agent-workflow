@@ -284,6 +284,60 @@ class TestRejectNoDeadlock:
 
 
 # ══════════════════════════════════════════════════════════
+# 2b. halt 顶层条件路由（2026-07-18 用户拍板落地）
+# ══════════════════════════════════════════════════════════
+class TestHaltTopLevelRouting:
+    def _build_stub_graph(self, monkeypatch, executed: list, halt_at: str | None):
+        """3 步 discussion 型模板 + stub 节点：halt_at 指定哪个节点置 halted。"""
+        from engine.graph import build as build_mod
+        from engine.workflow import WorkflowStep, WorkflowTemplate
+
+        def _stub_factory(step, halt_on_failure):
+            name = step.name
+
+            def node(state):
+                executed.append(name)
+                if name == halt_at:
+                    return {"halted": True, "failed": [name]}
+                return {"succeeded": [name]}
+            node.__name__ = f"stub_{name}"
+            return node
+
+        monkeypatch.setattr(build_mod, "_make_node_for_step", _stub_factory)
+        steps = tuple(
+            WorkflowStep.from_yaml({"type": "discussion", "roles": ["x"], "name": n})
+            for n in ("s1", "s2", "s3")
+        )
+        template = WorkflowTemplate(
+            name="t", description="", domain="se", halt_on_failure=True,
+            steps=steps, note_path=Path("t.md"), body="", frontmatter={},
+        )
+        return build_mod.build_graph(template)
+
+    def test_halt_short_circuits_downstream(self, monkeypatch):
+        """首节点 halt → 下游节点函数根本不执行（不再逐个空跑）。"""
+        executed: list = []
+        graph = self._build_stub_graph(monkeypatch, executed, halt_at="s1")
+        final = graph.invoke({
+            "project": "demo", "task": "", "workflow_name": "t",
+            "succeeded": [], "failed": [], "skipped": [], "halted": False,
+        })
+        assert executed == ["s1"]
+        assert final.get("halted") is True
+        assert final.get("failed") == ["s1"]
+
+    def test_no_halt_runs_all(self, monkeypatch):
+        executed: list = []
+        graph = self._build_stub_graph(monkeypatch, executed, halt_at=None)
+        final = graph.invoke({
+            "project": "demo", "task": "", "workflow_name": "t",
+            "succeeded": [], "failed": [], "skipped": [], "halted": False,
+        })
+        assert executed == ["s1", "s2", "s3"]
+        assert final.get("succeeded") == ["s1", "s2", "s3"]
+
+
+# ══════════════════════════════════════════════════════════
 # 3. atomic_write_text Windows 锁重试
 # ══════════════════════════════════════════════════════════
 class TestAtomicWriteRetry:

@@ -146,8 +146,22 @@ def build_graph(
         node_keys.append(key)
 
     g.add_edge(START, node_keys[0])
+    # 2026-07-18 评审修复（用户拍板）：halt 传播上移为顶层条件路由。
+    # 原为纯线性边 + 每个 node 开头自检 state.halted —— halt 后 LangGraph 仍
+    # 逐个执行剩余节点（各自返回 skipped 空跑），且每个新 node 作者都必须记得
+    # 写 guard，漏写即 bug。现在任一节点置 halted=True 后图直接短路到 END。
+    # 各 node 内的 halted guard **保留**作二线防御（subgraph 复用等场景仍需）。
     for i in range(len(node_keys) - 1):
-        g.add_edge(node_keys[i], node_keys[i + 1])
+        g.add_conditional_edges(
+            node_keys[i],
+            _halt_router,
+            {"halt": END, "next": node_keys[i + 1]},
+        )
     g.add_edge(node_keys[-1], END)
 
     return g.compile()
+
+
+def _halt_router(state: ProjectState) -> str:
+    """顶层 halt 路由：halted=True → 短路到 END，否则进下一节点。"""
+    return "halt" if state.get("halted") else "next"
