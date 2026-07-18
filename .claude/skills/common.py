@@ -1008,9 +1008,12 @@ def load_skill_block(
     haystack = (task_text or "") + "\n" + (upstream_text or "")
     if haystack.strip():
         try:
+            # 2026-07-18 huashu-demo 回归跑暴露：filter 是必填回调，传 None 会
+            # TypeError → 整条 wikilink 显式路径自上线起从未生效（静默走 keyword
+            # 兜底）。"不过滤"的正确写法是恒真回调。
             result = expand_wikilinks(
                 haystack,
-                filter=None,
+                filter=lambda wl: True,
                 max_chars_per_link=3000,
                 total_char_budget=12_000,
                 max_depth=0,
