@@ -594,11 +594,14 @@ def _filter_extra_args(extra_args: list[str]) -> list[str]:
 
 
 # ── F7 心跳/超时参数（设计 [[F7-invoke_role-联合设计-2026-07-18]] §4）──
-# HEARTBEAT：拍脑袋初值 300s（正常首 token 30-60s，5-10 倍余量）；
-#   每次成功 call 落 max_stdout_gap_s 遥测到 audit.jsonl，5-10 任务后校准。
+# HEARTBEAT：600s。2026-07-18 G2 实测校准（n=13 CLI call）：成功调用
+#   max_stdout_gap 达 289.97s（sonnet-5 大任务合法长思考，首 token 150-290s
+#   常态）；初值 300s 曾误杀一次 304s 无输出的疑似合法调用（retry 自愈）。
+#   600s = 观测最大合法 gap 的 ~2 倍余量；对历史真 hang（11-25 min 静默）
+#   仍在硬超时的 1/3 处捕获。后续遥测持续积累，gap 逼近 600s 再评估。
 # HARD_TIMEOUT：1800s 有实测支撑（TL Plan+Detail 撞顶 1650s），从外层
 #   subprocess 兜底内移到 CLI 层自持（invoke_role in-process 化后外层消失）。
-_CLI_HEARTBEAT_S = 300.0
+_CLI_HEARTBEAT_S = 600.0
 _CLI_POLL_S = 10.0
 _CLI_HARD_TIMEOUT_S = 1800.0
 
