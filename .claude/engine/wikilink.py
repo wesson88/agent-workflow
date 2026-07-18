@@ -130,6 +130,12 @@ _STEM_EXCLUDED_PREFIXES = (
     "10-项目/",        # 项目产出多项目同名（PRD/系统设计/...）
     "99-临时/",        # 临时文件不参与 wikilink 命名空间
     "00-系统/.runtime-state/",   # 运行时状态
+    # 2026-07-18 ingest_check 存量扫描暴露的结构性碰撞（每新增 capability
+    # 必产生一对同名 依赖清单.md/触发规则.md）；capability 引用本就走
+    # `[[<root>/manifest]]` 完整路径约定，不依赖 bare-stem
+    "20-知识/能力注册表/",
+    # 待办系统非知识命名空间（index.md 与任意目录 index 撞）
+    "98-待办/",
 )
 
 
