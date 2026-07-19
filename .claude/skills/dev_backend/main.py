@@ -135,6 +135,24 @@ def _load_task_skills(
     return skill_block, wikilink_loaded + keyword_loaded, result.unresolved
 
 
+def _render_api_contract_mandate(project: str) -> str:
+    """最后一个 legacy task 的 API契约 必产指令。
+
+    历史教训（2026-07-19，[[产物注册表v0.4-fail全量化-2026-07-19]]）：
+    API契约 放在 render_required_outputs 示例清单里，被随后的
+    "上面是路径**示例**"整体降级——6 次真实成功跑零产出。
+    必产文件必须与示例清单分离、单独强调。
+    """
+    return (
+        f"\n**本轮必产文件（不是示例，缺失即任务不完整）**：\n"
+        f"在全部代码 FILE 块之后，追加一个 FILE 块 "
+        f"`10-项目/{project}/API契约.md`，汇总本项目后端**全部**对外接口"
+        f"（含此前任务已实现的，见指令索引/已生成文件列表）：\n"
+        f"  - 每个接口：方法 + 路径 + 请求字段 + 响应字段 + 错误码\n"
+        f"  - 鉴权方式与通用错误格式各一节\n"
+    )
+
+
 def _task_marker(project: str, task_label: str):
     """单任务完成 marker：subprocess retry 时跳过已成功 task。
 
@@ -286,8 +304,16 @@ def main() -> int:
 
         print(f"[{ROLE}] ▶ 执行任务：{task_label}")
 
-        # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）
-        context = read_input_files([task_file, tech_stack])
+        # API契约.md 只在最后一个任务写入，避免多次覆盖
+        is_last_task = (task_file == task_files[-1])
+
+        # 每个任务只加载自己的指令文件 + 技术栈（最小上下文）；
+        # 最后一个 legacy task 追加索引文件——汇总 API契约 需要全局接口视野
+        input_list: list = [task_file, tech_stack]
+        index_path = proj_dir / "指令" / "给后端-索引.md"
+        if is_last_task and not module_id and index_path.exists():
+            input_list.append(index_path)
+        context = read_input_files(input_list)
         if rule_block:
             context = context + "\n\n" + rule_block
 
@@ -316,17 +342,18 @@ def main() -> int:
                 + "\n"
             )
 
-        # API契约.md 只在最后一个任务写入，避免多次覆盖
-        is_last_task = (task_file == task_files[-1])
+        # required 清单只放 src/tests 路径示例；API契约 是必产文件，
+        # 走 _render_api_contract_mandate 单独强调（不与示例混排）
         required = [
             "src/backend/main.py",
             "src/backend/<module>.py",
             "tests/backend/test_<module>.py",
         ]
         api_hint = ""
-        if is_last_task:
-            required.append(f"10-项目/{project}/API契约.md")
-        else:
+        api_mandate = ""
+        if is_last_task and not module_id:
+            api_mandate = _render_api_contract_mandate(project)
+        elif not is_last_task:
             api_hint = f"  - **不要**输出 `10-项目/{project}/API契约.md`（留给最后一个任务统一输出）\n"
 
         # P8.6：模块化模式下加"单模块聚焦"约束段 + 追加进度流/测试报告要求
@@ -359,6 +386,7 @@ def main() -> int:
             "所有 API 必须含输入校验、鉴权、结构化日志。\n"
             + render_required_outputs(required)
             + "\n上面是路径**示例**；请根据指令清单中的实际模块产出对应文件，每个文件用一个 FILE 块。"
+            + api_mandate
             + capability_hint
         )
 
