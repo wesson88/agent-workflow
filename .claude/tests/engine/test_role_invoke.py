@@ -113,9 +113,43 @@ class TestPermanentFailures:
         assert result.status == "permanent_failed"
         assert "缺 main.py" in (result.error or "")
 
-    def test_in_process_not_implemented(self):
+    def test_in_process_rejects_parameterized_calls(self):
+        """PoC 范围：module_id / round / contract_overrides 走 subprocess。"""
+        for kwargs in (
+            {"module_id": "T01"},
+            {"round": 2},
+            {"contract_overrides": {"input_contract": {}}},
+        ):
+            with pytest.raises(NotImplementedError):
+                invoke_role(
+                    RoleInvocation(role="x", task="t", project="p", **kwargs),
+                    mode="in_process",
+                )
+
+    def test_in_process_routes_to_role_runner(self, monkeypatch):
+        from engine.role_invoke import RoleResult
+
+        calls: list[tuple] = []
+
+        def fake_run_role(role, task, project):
+            calls.append((role, task, project))
+            return RoleResult(
+                status="success", returncode=0, role=role, elapsed_s=0.1,
+                outputs=("10-项目/music/p/母带规格.md",),
+            )
+
+        monkeypatch.setattr("engine.role_runner.run_role", fake_run_role)
+        result = invoke_role(
+            RoleInvocation(role="母带工程师", task="t", project="p"),
+            mode="in_process",
+        )
+        assert result.ok
+        assert calls == [("母带工程师", "t", "p")]
+        assert result.outputs == ("10-项目/music/p/母带规格.md",)
+
+    def test_unknown_mode_not_implemented(self):
         with pytest.raises(NotImplementedError):
             invoke_role(
                 RoleInvocation(role="x", task="t", project="p"),
-                mode="in_process",
+                mode="teleport",
             )

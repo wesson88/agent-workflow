@@ -1,4 +1,4 @@
-"""
+﻿"""
 music_lyricist/main.py — 作词执行入口（音乐域 L2-B）
 
 输入（vault，来源：角色 frontmatter `inputs` 字段）：
@@ -47,7 +47,8 @@ def main() -> int:
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
     role_def = load_role(ROLE)
-    input_paths = [resolve_path(p, project) for p in role_def.inputs]
+    # {role} 在消费端绑定自身角色名（与 engine.artifact_check 同一封闭规则；v0.2 声明迁移后必需）
+    input_paths = [resolve_path(p.replace("{role}", ROLE), project) for p in role_def.inputs]
     output_rels = [p.replace("{project}", project) for p in role_def.outputs]
 
     # 上游硬约束：指令/给作词.md 必须存在（制作人扇出过）

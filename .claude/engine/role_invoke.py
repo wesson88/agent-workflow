@@ -143,39 +143,33 @@ def invoke_role(
     mode: str = "subprocess",
     log_prefix: str = "subprocess",
 ) -> RoleResult:
-    """统一角色调用入口。v1 唯一实现 = subprocess（行为等价包装现有语义）。"""
-    if mode != "subprocess":
-        raise NotImplementedError(
-            f"mode='{mode}' 未实现（in_process 留给 role_runner，"
-            f"见架构演进第 3 步）"
-        )
+    """统一角色调用入口。
 
-    from .workflow import role_to_skill_dir  # 延迟：避免 import 链提前触发 vault 扫描
+    - mode="subprocess"：行为等价包装原 main.py 调用语义（默认）
+    - mode="in_process"：engine.role_runner 声明驱动执行（架构演进第 3 步
+      PoC 起）。PoC 范围限简单同构角色——module_id / round / contract_overrides
+      参数化调用暂不支持（工程师/brainstorm 继续走 subprocess）
+    消费/产出端 artifact_check（v0.3/v0.4）两种模式共用。
+    """
+    if mode not in ("subprocess", "in_process"):
+        raise NotImplementedError(f"mode='{mode}' 未实现")
+    if mode == "in_process" and (
+        inv.module_id or inv.round is not None or inv.contract_overrides
+    ):
+        raise NotImplementedError(
+            "in_process 模式暂不支持 module_id / round / contract_overrides"
+            "（PoC 范围：music 同构角色；参数化调用走 subprocess）"
+        )
 
     t0 = time.monotonic()
-    try:
-        skill_dir = role_to_skill_dir(inv.role)
-    except Exception as e:
-        return RoleResult(
-            status="permanent_failed", returncode=-2, role=inv.role,
-            elapsed_s=time.monotonic() - t0,
-            error=f"角色解析失败：{e}",
-        )
-    main_py = PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"
-    if not main_py.is_file():
-        return RoleResult(
-            status="permanent_failed", returncode=-2, role=inv.role,
-            elapsed_s=time.monotonic() - t0,
-            error=f"skill 缺 main.py：{main_py}",
-        )
 
-    # 产物注册表 v0.3/v0.4：消费端前置检查（warn 打日志继续；fail 不起
-    # subprocess）。contract_overrides 非空 = 契约参数化已显式改写 I/O，
-    # 静态 produces/consumes 声明不适用 → 整体跳过（v0.4 封闭规则）。
+    # 产物注册表 v0.3/v0.4：消费端前置检查（warn 打日志继续；fail 直接拦）。
+    # contract_overrides 非空 = 契约参数化已显式改写 I/O，静态声明不适用
+    # → 整体跳过（v0.4 封闭规则）。
     from .artifact_check import run_check
     if not inv.contract_overrides:
-        mode, consume_issues = run_check("consume", inv.role, inv.project)
-        if consume_issues and mode == "fail":
+        check_mode, consume_issues = run_check("consume", inv.role, inv.project)
+        if consume_issues and check_mode == "fail":
             return RoleResult(
                 status="permanent_failed", returncode=-3, role=inv.role,
                 elapsed_s=time.monotonic() - t0,
@@ -183,30 +177,61 @@ def invoke_role(
                       + "；".join(consume_issues),
             )
 
-    env = _build_env(inv)
-    extra_args = ["--round", str(inv.round)] if inv.round is not None else None
-    rc = _execute_single(
-        main_py, inv.task, inv.project, env,
-        extra_args=extra_args, log_prefix=log_prefix,
-    )
-    elapsed = time.monotonic() - t0
-    if rc == 0:
-        status = "success"
-    elif rc in _PERMANENT_RC:
-        status = "permanent_failed"
+    if mode == "in_process":
+        from .role_runner import run_role
+        try:
+            result = run_role(inv.role, inv.task, inv.project)
+        except Exception as e:
+            return RoleResult(
+                status="permanent_failed", returncode=-2, role=inv.role,
+                elapsed_s=time.monotonic() - t0,
+                error=f"role_runner 异常：{e}",
+            )
+        rc, status, error = result.returncode, result.status, result.error
+        outputs = result.outputs
     else:
-        status = "failed"
-    error = None if rc == 0 else f"exit_code={rc}"
+        from .workflow import role_to_skill_dir  # 延迟：避免 import 链提前触发 vault 扫描
+        try:
+            skill_dir = role_to_skill_dir(inv.role)
+        except Exception as e:
+            return RoleResult(
+                status="permanent_failed", returncode=-2, role=inv.role,
+                elapsed_s=time.monotonic() - t0,
+                error=f"角色解析失败：{e}",
+            )
+        main_py = PROJECT_ROOT / ".claude" / "skills" / skill_dir / "main.py"
+        if not main_py.is_file():
+            return RoleResult(
+                status="permanent_failed", returncode=-2, role=inv.role,
+                elapsed_s=time.monotonic() - t0,
+                error=f"skill 缺 main.py：{main_py}",
+            )
+        env = _build_env(inv)
+        extra_args = ["--round", str(inv.round)] if inv.round is not None else None
+        rc = _execute_single(
+            main_py, inv.task, inv.project, env,
+            extra_args=extra_args, log_prefix=log_prefix,
+        )
+        if rc == 0:
+            status = "success"
+        elif rc in _PERMANENT_RC:
+            status = "permanent_failed"
+        else:
+            status = "failed"
+        error = None if rc == 0 else f"exit_code={rc}"
+        outputs = None
+
+    elapsed = time.monotonic() - t0
 
     # 产物注册表 v0.3/v0.4：产出端检查（warn 打日志；fail 降 success → failed）
     if rc == 0 and not inv.contract_overrides:
-        mode, produce_issues = run_check("produce", inv.role, inv.project)
-        if produce_issues and mode == "fail":
+        check_mode, produce_issues = run_check("produce", inv.role, inv.project)
+        if produce_issues and check_mode == "fail":
             status = "failed"
             error = ("产出端产物缺失（AGENT_ARTIFACT_CHECK=fail）："
                      + "；".join(produce_issues))
 
     return RoleResult(
         status=status, returncode=rc, role=inv.role, elapsed_s=elapsed,
-        error=error,
+        outputs=outputs, error=error,
     )
