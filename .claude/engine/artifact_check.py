@@ -6,9 +6,23 @@ engine/artifact_check.py — 产物注册表 v0.3 校验模式（运行时消费
 
 模式（env `AGENT_ARTIFACT_CHECK`，运行期读取）：
 - off  ：跳过全部检查
-- warn ：缺口打 stderr + audit.jsonl `artifact_check` 事件，不改行为（默认）
-- fail ：消费端缺口 → invoke_role 直接 permanent_failed（不起 subprocess）；
-         产出端缺口 → RoleResult 降为 failed
+- warn ：缺口打 stderr + audit.jsonl `artifact_check` 事件，不改行为
+- fail ：**默认（v0.4 全量化）**——消费端 required 缺口 → invoke_role 直接
+         permanent_failed（不起 subprocess）；产出端 required 缺口 →
+         RoleResult 降为 failed
+
+缺口分级（v0.4）——**只有 required artifact 的实例缺失是 blocking**，其余
+一律 advisory（stderr + 遥测、fail 模式也不拦）：
+- optional 声明（角色 frontmatter `"[[X]]?"` 后缀）的实例缺失——阶段性产出
+  （音乐总监步骤 1 不产 final-Suno-prompt）/ 可选消费
+- artifact_id 未注册（声明 bug，影子校验层已另有 warn）
+- 注册表缺失/加载失败（infra 异常永不拦主链）
+- lint 问题（side channel）
+
+不检查的调用（封闭规则，非角色特例）：
+- `contract_overrides` 非空的调用（invoke_role 层跳过）——契约参数化已显式
+  改写 I/O 集合，静态 produces/consumes 声明不适用（工程师 module_manifest 模式）
+- discussion 节点参与者（批判者/用户体验者）不走 invoke_role，天然不触发
 
 占位符绑定（集合封闭，规范 §2b.2——{proj_root} 由注册表解析、{project} 绑
 调用项目，此处只处理剩余两个）：
@@ -16,12 +30,8 @@ engine/artifact_check.py — 产物注册表 v0.3 校验模式（运行时消费
 - 产出端：`{role}` / `{n}` → glob `*`（扇出/任务卡产出至少一个实例即算命中）
 
 lint 分发：条目 frontmatter `lint: <名>` → `_LINTS` 查函数执行（file 内容 →
-问题列表）。未知名 → warn；lint 抛异常 → warn 不拦。当前无内置 lint，
+问题列表）。未知名 → advisory；lint 抛异常 → advisory 不拦。当前无内置 lint，
 函数按需在 `_LINTS` 注册。
-
-已知噪声（先 warn 收集信号，正是 P5a 手法的目的）：
-- 批判者 consumes PRD/系统设计，但 brainstorm 阶段 PRD 尚未产出 → 每轮 warn。
-  遥测积累后区分 required/optional 再谈 fail 全量化；fail 模式当前是显式 opt-in。
 """
 
 from __future__ import annotations
@@ -35,15 +45,16 @@ from .config import VAULT_ROOT
 
 _MODE_ENV = "AGENT_ARTIFACT_CHECK"
 _VALID_MODES = ("off", "warn", "fail")
+_DEFAULT_MODE = "fail"  # v0.4 全量化（2026-07-19）；escape hatch：warn / off
 
 # lint 名 → (内容 → 问题列表)。条目 frontmatter `lint:` 引用这里的键。
 _LINTS: dict[str, Callable[[str], list[str]]] = {}
 
 
 def check_mode() -> str:
-    """运行期读 env（不做模块级缓存——B1 原则）；非法值降级 warn。"""
-    mode = os.environ.get(_MODE_ENV, "warn").strip().lower()
-    return mode if mode in _VALID_MODES else "warn"
+    """运行期读 env（不做模块级缓存——B1 原则）；非法值降级默认模式。"""
+    mode = os.environ.get(_MODE_ENV, _DEFAULT_MODE).strip().lower()
+    return mode if mode in _VALID_MODES else _DEFAULT_MODE
 
 
 def _instance_exists(rendered: str) -> bool:
@@ -63,29 +74,32 @@ def _gaps(
     project: str,
     *,
     phase: str,
-) -> list[str]:
-    """对一组 artifact_id 做存在性 + lint 检查，返回缺口消息列表。
+    optional: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str]]:
+    """对一组 artifact_id 做存在性 + lint 检查。
 
-    注册表不可用 / 条目未注册 → 视为缺口消息（与影子校验同哲学：
-    不抛异常，消息由调用方按模式处置）。
+    返回 (blocking, advisory)：仅 **required 实例缺失**进 blocking；
+    optional 缺失 / 未注册 id / 注册表不可用 / lint 问题一律 advisory
+    （不抛异常，fail 模式也不拦——见模块 docstring 缺口分级）。
     """
     from .artifact_registry import ArtifactRegistryError, load_registry, load_config
 
     if not artifact_ids:
-        return []
+        return [], []
     try:
         registry = load_registry()
         proj_roots = load_config() if registry else {}
     except ArtifactRegistryError as e:
-        return [f"{role_name}: 注册表加载失败，{phase} 检查跳过（{e}）"]
+        return [], [f"{role_name}: 注册表加载失败，{phase} 检查跳过（{e}）"]
     if not registry:
-        return [f"{role_name}: 注册表为空/缺失，{phase} 检查跳过"]
+        return [], [f"{role_name}: 注册表为空/缺失，{phase} 检查跳过"]
 
-    issues: list[str] = []
+    blocking: list[str] = []
+    advisory: list[str] = []
     for aid in artifact_ids:
         spec = registry.get(aid)
         if spec is None:
-            issues.append(f"{role_name}.{phase}: [[{aid}]] 未注册")
+            advisory.append(f"{role_name}.{phase}: [[{aid}]] 未注册")
             continue
         rendered = spec.resolve(proj_roots, project)
         if phase == "consume":
@@ -94,13 +108,15 @@ def _gaps(
         else:
             rendered = rendered.replace("{role}", "*").replace("{n}", "*")
         if not _instance_exists(rendered):
-            issues.append(
-                f"{role_name}.{phase}: [[{aid}]] 实例缺失（期望 {rendered}）"
-            )
+            msg = f"{role_name}.{phase}: [[{aid}]] 实例缺失（期望 {rendered}）"
+            if aid in optional:
+                advisory.append(msg + "（optional，不拦）")
+            else:
+                blocking.append(msg)
             continue
         if phase == "produce" and spec.lint:
-            issues.extend(_run_lint(role_name, aid, spec.lint, rendered))
-    return issues
+            advisory.extend(_run_lint(role_name, aid, spec.lint, rendered))
+    return blocking, advisory
 
 
 def _run_lint(role_name: str, aid: str, lint_name: str, rendered: str) -> list[str]:
@@ -118,9 +134,10 @@ def _run_lint(role_name: str, aid: str, lint_name: str, rendered: str) -> list[s
 
 
 def run_check(phase: str, role_name: str, project: str) -> tuple[str, list[str]]:
-    """invoke_role 接线入口。返回 (mode, 缺口列表)；off 或角色无声明 → 空。
+    """invoke_role 接线入口。返回 (mode, blocking 缺口)；off 或角色无声明 → 空。
 
-    stderr + audit 事件在这里统一发出，调用方只按 mode 决定拦不拦。
+    advisory 缺口在这里打 stderr + 遥测后即消化，不返回给调用方
+    （fail 模式也不拦）；调用方只按 mode + blocking 决定拦不拦。
     角色解析失败等自身异常静默跳过（该失败由 invoke_role 主链自己报）。
     """
     mode = check_mode()
@@ -129,13 +146,20 @@ def run_check(phase: str, role_name: str, project: str) -> tuple[str, list[str]]
     try:
         from .role_loader import load_role
         role = load_role(role_name)
-        ids = role.consumes if phase == "consume" else role.produces
-        issues = _gaps(role.name, ids, project, phase=phase)
+        if phase == "consume":
+            ids, optional = role.consumes, role.optional_consumes
+        else:
+            ids, optional = role.produces, role.optional_produces
+        blocking, advisory = _gaps(
+            role.name, ids, project, phase=phase, optional=optional
+        )
     except Exception:
         return mode, []
-    if issues:
-        for msg in issues:
+    if blocking or advisory:
+        for msg in blocking:
             print(f"⚠️ [产物校验:{phase}:{mode}] {msg}", file=sys.stderr)
+        for msg in advisory:
+            print(f"ℹ️ [产物校验:{phase}:advisory] {msg}", file=sys.stderr)
         try:
             from .audit import append_audit, utc_now
             append_audit({
@@ -145,8 +169,9 @@ def run_check(phase: str, role_name: str, project: str) -> tuple[str, list[str]]
                 "role": role_name,
                 "project": project,
                 "mode": mode,
-                "issues": issues,
+                "blocking": blocking,
+                "advisory": advisory,
             })
         except Exception:
             pass
-    return mode, issues
+    return mode, blocking

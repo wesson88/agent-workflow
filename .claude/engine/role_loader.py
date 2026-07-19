@@ -161,9 +161,13 @@ class Role:
 
     # 产物注册表 v0.2 影子声明（artifact_id，wikilink 已剥壳）。
     # 加载时对照注册表与 inputs/outputs 做 warn 级等价校验
-    # （artifact_registry.shadow_check_role）；v0.3 起转 fail-fast。
+    # （artifact_registry.shadow_check_role）；v0.3 起 artifact_check 运行时检查。
+    # v0.4：声明可带 `?` 后缀（`"[[反馈分诊]]?"`）标记 optional——阶段性产出
+    # /可选消费缺失时只 warn 不拦（fail 模式只拦 required 缺口）。
     produces: tuple[str, ...] = ()
     consumes: tuple[str, ...] = ()
+    optional_produces: frozenset[str] = frozenset()
+    optional_consumes: frozenset[str] = frozenset()
 
     @property
     def all_names(self) -> tuple[str, ...]:
@@ -227,6 +231,25 @@ def _strip_wikilink(s: str) -> str:
     if s.startswith("[[") and s.endswith("]]"):
         return s[2:-2].strip()
     return s
+
+
+def _parse_artifact_decl(raw) -> tuple[tuple[str, ...], frozenset[str]]:
+    """解析 produces/consumes 声明列表 → (全部 id, optional id 集合)。
+
+    形态封闭（规范 §4 v0.4）：`"[[X]]"` = required / `"[[X]]?"` = optional。
+    """
+    ids: list[str] = []
+    optional: set[str] = set()
+    for item in _seq(raw):
+        s = str(item).strip()
+        is_optional = s.endswith("?")
+        if is_optional:
+            s = s[:-1].rstrip()
+        aid = _strip_wikilink(s)
+        ids.append(aid)
+        if is_optional:
+            optional.add(aid)
+    return tuple(ids), frozenset(optional)
 
 
 def _abstract_module_id(path: str) -> str:
@@ -488,8 +511,8 @@ def _build_role(
         )
 
     # 产物注册表 v0.2 影子声明（warn 级，放在契约解析后：对照最终 declared 值）
-    produces = tuple(_strip_wikilink(x) for x in _seq(fm.get("produces")))
-    consumes = tuple(_strip_wikilink(x) for x in _seq(fm.get("consumes")))
+    produces, optional_produces = _parse_artifact_decl(fm.get("produces"))
+    consumes, optional_consumes = _parse_artifact_decl(fm.get("consumes"))
     if produces or consumes:
         try:
             from .artifact_registry import shadow_check_role
@@ -539,6 +562,8 @@ def _build_role(
         resolved_input_contract=resolved_in,
         produces=produces,
         consumes=consumes,
+        optional_produces=optional_produces,
+        optional_consumes=optional_consumes,
     )
 
 

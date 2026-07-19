@@ -169,16 +169,19 @@ def invoke_role(
             error=f"skill 缺 main.py：{main_py}",
         )
 
-    # 产物注册表 v0.3：消费端前置检查（warn 打日志继续；fail 不起 subprocess）
+    # 产物注册表 v0.3/v0.4：消费端前置检查（warn 打日志继续；fail 不起
+    # subprocess）。contract_overrides 非空 = 契约参数化已显式改写 I/O，
+    # 静态 produces/consumes 声明不适用 → 整体跳过（v0.4 封闭规则）。
     from .artifact_check import run_check
-    mode, consume_issues = run_check("consume", inv.role, inv.project)
-    if consume_issues and mode == "fail":
-        return RoleResult(
-            status="permanent_failed", returncode=-3, role=inv.role,
-            elapsed_s=time.monotonic() - t0,
-            error="消费端产物缺失（AGENT_ARTIFACT_CHECK=fail）："
-                  + "；".join(consume_issues),
-        )
+    if not inv.contract_overrides:
+        mode, consume_issues = run_check("consume", inv.role, inv.project)
+        if consume_issues and mode == "fail":
+            return RoleResult(
+                status="permanent_failed", returncode=-3, role=inv.role,
+                elapsed_s=time.monotonic() - t0,
+                error="消费端产物缺失（AGENT_ARTIFACT_CHECK=fail）："
+                      + "；".join(consume_issues),
+            )
 
     env = _build_env(inv)
     extra_args = ["--round", str(inv.round)] if inv.round is not None else None
@@ -195,8 +198,8 @@ def invoke_role(
         status = "failed"
     error = None if rc == 0 else f"exit_code={rc}"
 
-    # 产物注册表 v0.3：产出端检查（warn 打日志；fail 降 success → failed）
-    if rc == 0:
+    # 产物注册表 v0.3/v0.4：产出端检查（warn 打日志；fail 降 success → failed）
+    if rc == 0 and not inv.contract_overrides:
         mode, produce_issues = run_check("produce", inv.role, inv.project)
         if produce_issues and mode == "fail":
             status = "failed"
