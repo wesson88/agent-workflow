@@ -1,11 +1,13 @@
 """
-test_artifact_registry.py — 产物注册表 v0.1 骨架
+test_artifact_registry.py — 产物注册表 v0.1 骨架 + v0.2 影子校验
 
 覆盖：
 - fail-closed 校验：artifact≠stem / domain 未声明 / 缺 {proj_root} / 非法 format / 重复注册
 - 路径解析：{proj_root} 按域展开 + {project} 替换 / 保留占位符
 - coverage_report：角色声明命中/未命中对照
 - 配置缺失 → ArtifactRegistryError；注册表目录不存在 → 空 dict
+- shadow_check_role（v0.2 影子）：命中零 warn / 未注册 id / 声明漂移 /
+  T* 抽象等价 / 注册表缺失容错 / wikilink 剥壳
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from engine.artifact_registry import (
     coverage_report,
     load_registry,
     resolve_artifact_path,
+    shadow_check_role,
 )
 
 
@@ -123,6 +126,75 @@ class TestResolve:
     def test_unknown_artifact_keyerror(self, reg_vault):
         with pytest.raises(KeyError, match="未注册"):
             resolve_artifact_path("不存在", "demo")
+
+
+class TestShadowCheck:
+    """v0.2 影子校验：warn 级消息列表，空 = 通过。"""
+
+    def test_empty_declarations_no_warns(self, reg_vault):
+        assert shadow_check_role("架构师", (), (), ("x.md",), ("y.md",)) == []
+
+    def test_hit_produces_and_consumes(self, reg_vault):
+        _write(reg_vault / "00-系统" / "产物注册表" / "se" / "PRD.md", _entry())
+        warns = shadow_check_role(
+            "产品经理",
+            produces=("PRD",),
+            consumes=(),
+            outputs=("10-项目/{project}/PRD.md",),
+            inputs=(),
+        )
+        assert warns == []
+
+    def test_unregistered_artifact_id(self, reg_vault):
+        _write(reg_vault / "00-系统" / "产物注册表" / "se" / "PRD.md", _entry())
+        warns = shadow_check_role(
+            "产品经理", ("不存在的产物",), (), ("10-项目/{project}/PRD.md",), ()
+        )
+        assert len(warns) == 1 and "未在产物注册表注册" in warns[0]
+
+    def test_declaration_drift(self, reg_vault):
+        """注册条目渲染路径不在 outputs 声明中 → 漂移 warn。"""
+        _write(reg_vault / "00-系统" / "产物注册表" / "se" / "PRD.md", _entry())
+        warns = shadow_check_role(
+            "产品经理", ("PRD",), (), ("10-项目/{project}/别的.md",), ()
+        )
+        assert len(warns) == 1 and "漂移" in warns[0]
+
+    def test_module_id_abstraction(self, reg_vault):
+        """T01 实例声明 ≡ T{n} 模板条目（T* 抽象，单一实现复用）。"""
+        _write(
+            reg_vault / "00-系统" / "产物注册表" / "se" / "给后端任务卡.md",
+            _entry(artifact="给后端任务卡", tpl="{proj_root}/指令/给后端-T{n}.md",
+                   producer="技术主管"),
+        )
+        warns = shadow_check_role(
+            "后端工程师", (), ("给后端任务卡",), (),
+            ("10-项目/{project}/指令/给后端-T01.md",),
+        )
+        assert warns == []
+
+    def test_registry_dir_absent_warns_not_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ar, "VAULT_ROOT", tmp_path)
+        ar.invalidate_cache()
+        warns = shadow_check_role("产品经理", ("PRD",), (), (), ())
+        assert len(warns) == 1 and "注册表目录缺失" in warns[0]
+        ar.invalidate_cache()
+
+    def test_broken_registry_warns_not_raises(self, reg_vault):
+        """条目 schema 违规时影子校验降级为 warn，不 raise（不拦角色加载）。"""
+        _write(reg_vault / "00-系统" / "产物注册表" / "se" / "PRD.md",
+               _entry(fmt="pdf"))
+        warns = shadow_check_role("产品经理", ("PRD",), (), (), ())
+        assert len(warns) == 1 and "注册表加载失败" in warns[0]
+
+
+class TestRoleLoaderShadowFields:
+    def test_strip_wikilink(self):
+        from engine.role_loader import _strip_wikilink
+
+        assert _strip_wikilink("[[PRD]]") == "PRD"
+        assert _strip_wikilink("  [[给后端任务卡]]  ") == "给后端任务卡"
+        assert _strip_wikilink("PRD") == "PRD"
 
 
 class TestCoverage:

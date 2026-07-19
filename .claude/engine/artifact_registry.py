@@ -173,6 +173,55 @@ def resolve_artifact_path(artifact_id: str, project: str | None = None) -> str:
     return registry[artifact_id].resolve(proj_roots, project)
 
 
+# ── v0.2 影子校验（P5a warn 级，零行为变化）───────────────
+def shadow_check_role(
+    role_name: str,
+    produces: tuple[str, ...],
+    consumes: tuple[str, ...],
+    outputs: tuple[str, ...],
+    inputs: tuple[str, ...],
+) -> list[str]:
+    """校验角色 produces/consumes 声明与注册表、inputs/outputs 三方一致。
+
+    返回 warn 消息列表（空 = 通过）。影子阶段只 warn 不 raise；
+    v0.3 起消费端 required artifact 转 fail-fast（规范 §4）。
+
+    等价判定：路径归一走 role_loader._abstract_module_id（T* 抽象，
+    单一实现，规范 §2b.4），注册条目按 domain 渲染（保留 {project}）。
+    """
+    if not (produces or consumes):
+        return []
+    from .role_loader import _abstract_module_id
+
+    try:
+        if not _registry_dir().is_dir():
+            return [f"{role_name}: 注册表目录缺失，produces/consumes 声明无法校验"]
+        proj_roots, registry = _load_registry_cached()
+    except ArtifactRegistryError as e:
+        return [f"{role_name}: 注册表加载失败，跳过影子校验（{e}）"]
+
+    warns: list[str] = []
+    for kind, ids, declared, declared_field in (
+        ("produces", produces, outputs, "outputs"),
+        ("consumes", consumes, inputs, "inputs"),
+    ):
+        declared_abstract = {_abstract_module_id(str(p).strip()) for p in declared}
+        for aid in ids:
+            spec = registry.get(aid)
+            if spec is None:
+                warns.append(
+                    f"{role_name}.{kind}: [[{aid}]] 未在产物注册表注册"
+                )
+                continue
+            rendered = spec.resolve(proj_roots)
+            if _abstract_module_id(rendered) not in declared_abstract:
+                warns.append(
+                    f"{role_name}.{kind}: [[{aid}]] 渲染路径 '{rendered}' "
+                    f"不在 {declared_field} 声明中（声明与注册表漂移）"
+                )
+    return warns
+
+
 # ── 覆盖率审计（影子模式 v0.2 前置全景，只读）─────────────
 def coverage_report() -> dict:
     """对照全部角色 inputs/outputs 声明与注册表：

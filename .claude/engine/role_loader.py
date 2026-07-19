@@ -159,6 +159,12 @@ class Role:
     # 生成 ≤ 400 chars 摘要 + 调用方式后拼进 system_prompt（规范 §5.2 关键不变量）。
     capability_refs: tuple[str, ...] = ()
 
+    # 产物注册表 v0.2 影子声明（artifact_id，wikilink 已剥壳）。
+    # 加载时对照注册表与 inputs/outputs 做 warn 级等价校验
+    # （artifact_registry.shadow_check_role）；v0.3 起转 fail-fast。
+    produces: tuple[str, ...] = ()
+    consumes: tuple[str, ...] = ()
+
     @property
     def all_names(self) -> tuple[str, ...]:
         """name + aliases 的并集，用于查找匹配。"""
@@ -213,6 +219,14 @@ _CONTRACT_BUILTIN_PLACEHOLDERS = frozenset({
     "title_slug", "ts", "role", "domain",
 })
 _PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+
+def _strip_wikilink(s: str) -> str:
+    """`[[PRD]]` → `PRD`；非 wikilink 形态原样 strip 返回。"""
+    s = str(s).strip()
+    if s.startswith("[[") and s.endswith("]]"):
+        return s[2:-2].strip()
+    return s
 
 
 def _abstract_module_id(path: str) -> str:
@@ -473,6 +487,20 @@ def _build_role(
             f"input_contract；请先按规范 §11 补契约声明或移除 overrides"
         )
 
+    # 产物注册表 v0.2 影子声明（warn 级，放在契约解析后：对照最终 declared 值）
+    produces = tuple(_strip_wikilink(x) for x in _seq(fm.get("produces")))
+    consumes = tuple(_strip_wikilink(x) for x in _seq(fm.get("consumes")))
+    if produces or consumes:
+        try:
+            from .artifact_registry import shadow_check_role
+            warns = shadow_check_role(
+                role_name, produces, consumes, declared_outputs, declared_inputs
+            )
+        except Exception as e:  # 影子阶段任何校验器异常都不拦角色加载
+            warns = [f"{role_name}: 影子校验器异常已忽略（{e}）"]
+        for w in warns:
+            print(f"⚠️ [产物注册表影子校验] {w}", file=sys.stderr)
+
     return Role(
         name=role_name,
         aliases=_seq(fm.get("aliases")),
@@ -498,6 +526,8 @@ def _build_role(
                              if fm.get("budget_input_tokens") else None),
         resolved_output_contract=resolved_out,
         resolved_input_contract=resolved_in,
+        produces=produces,
+        consumes=consumes,
     )
 
 

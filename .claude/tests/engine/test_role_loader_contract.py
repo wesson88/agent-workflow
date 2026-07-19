@@ -1,4 +1,4 @@
-"""
+﻿"""
 test_role_loader_contract.py — P5a 契约解析（影子模式）单元测试
 
 覆盖：
@@ -569,7 +569,7 @@ class TestBackendFrontendInputContractOverrides:
     def test_backend_no_overrides_baseline(self):
         """无 overrides → 影子模式，inputs 保持硬编码字段值。"""
         role = load_role("后端工程师")
-        assert "10-项目/{project}/指令/给后端-T01.md" in role.inputs
+        assert "10-项目/{project}/指令/给后端-T{n}.md" in role.inputs
         assert "10-项目/{project}/指令/给后端-索引.md" in role.inputs
         assert not any("模块清单.md" in p for p in role.inputs)
 
