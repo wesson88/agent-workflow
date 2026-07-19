@@ -498,8 +498,19 @@ def _build_role(
             )
         except Exception as e:  # 影子阶段任何校验器异常都不拦角色加载
             warns = [f"{role_name}: 影子校验器异常已忽略（{e}）"]
-        for w in warns:
-            print(f"⚠️ [产物注册表影子校验] {w}", file=sys.stderr)
+        if warns:
+            for w in warns:
+                print(f"⚠️ [产物注册表影子校验] {w}", file=sys.stderr)
+            try:  # warn 双写 audit.jsonl 遥测通道（v0.3 起，side channel 不拦主链）
+                from .audit import append_audit, utc_now
+                append_audit({
+                    "timestamp": utc_now(),
+                    "type": "artifact_shadow_warn",
+                    "role": role_name,
+                    "warns": warns,
+                })
+            except Exception:
+                pass
 
     return Role(
         name=role_name,

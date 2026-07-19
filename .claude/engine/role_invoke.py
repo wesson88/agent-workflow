@@ -169,6 +169,17 @@ def invoke_role(
             error=f"skill 缺 main.py：{main_py}",
         )
 
+    # 产物注册表 v0.3：消费端前置检查（warn 打日志继续；fail 不起 subprocess）
+    from .artifact_check import run_check
+    mode, consume_issues = run_check("consume", inv.role, inv.project)
+    if consume_issues and mode == "fail":
+        return RoleResult(
+            status="permanent_failed", returncode=-3, role=inv.role,
+            elapsed_s=time.monotonic() - t0,
+            error="消费端产物缺失（AGENT_ARTIFACT_CHECK=fail）："
+                  + "；".join(consume_issues),
+        )
+
     env = _build_env(inv)
     extra_args = ["--round", str(inv.round)] if inv.round is not None else None
     rc = _execute_single(
@@ -182,7 +193,17 @@ def invoke_role(
         status = "permanent_failed"
     else:
         status = "failed"
+    error = None if rc == 0 else f"exit_code={rc}"
+
+    # 产物注册表 v0.3：产出端检查（warn 打日志；fail 降 success → failed）
+    if rc == 0:
+        mode, produce_issues = run_check("produce", inv.role, inv.project)
+        if produce_issues and mode == "fail":
+            status = "failed"
+            error = ("产出端产物缺失（AGENT_ARTIFACT_CHECK=fail）："
+                     + "；".join(produce_issues))
+
     return RoleResult(
         status=status, returncode=rc, role=inv.role, elapsed_s=elapsed,
-        error=None if rc == 0 else f"exit_code={rc}",
+        error=error,
     )
