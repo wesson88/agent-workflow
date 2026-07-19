@@ -131,7 +131,7 @@ class TestPermanentFailures:
 
         calls: list[tuple] = []
 
-        def fake_run_role(role, task, project):
+        def fake_run_role(role, task, project, *, domain=None):
             calls.append((role, task, project))
             return RoleResult(
                 status="success", returncode=0, role=role, elapsed_s=0.1,

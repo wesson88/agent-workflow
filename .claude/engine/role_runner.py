@@ -46,13 +46,13 @@ from common import (  # noqa: E402
     append_audit,
     build_system_prompt,
     call_claude,
-    load_genre_skill_block,
-    load_rule_block,
     parse_claude_output_to_files,
     read_input_files,
     render_required_outputs,
     utc_now,
 )
+
+from .ability_loader import assemble_user_context  # noqa: E402
 
 # music 扇出 dormant 约定（原 music_mastering_engineer/main.py，收编为通用规则）
 _DORMANT_KEYWORDS = ("dormant", "本项目状态：dormant", "不启动")
@@ -147,9 +147,13 @@ def run_role(
     role_name: str,
     task: str,
     project: str,
+    *,
+    domain: str | None = None,
 ) -> RoleResult:
     """进程内执行一个声明驱动角色。invoke_role(mode="in_process") 的实现体。
 
+    domain：workflow 声明的域（如 "music"）——非空时 ability_loader 自动注入
+    `00-系统/规则/{domain}/{角色}-视角.md`（存在才注入，缺口 5 域 adapter）。
     返回 RoleResult：outputs 直接携带（写盘的 vault 相对路径），
     returncode 沿用 main.py 约定（0 成功 / 1 可重试 / 2 永久）。
     """
@@ -207,17 +211,15 @@ def run_role(
     )
 
     system_prompt = build_system_prompt(role.name, project=project)
-    context = read_input_files(input_paths)
+    base_context = read_input_files(input_paths)
 
-    rule_block, rule_hint = load_rule_block(role.rule_refs)
-    print(f"[{role.name}] rule_refs 注入：{rule_hint}")
-    if rule_block:
-        context = context + "\n\n" + rule_block
-
-    skill_block, skill_hint = load_genre_skill_block(role.name, task, context)
-    print(f"[{role.name}] skill_trigger：{skill_hint}")
-    if skill_block:
-        context = context + "\n\n" + skill_block
+    context, ability_hints = assemble_user_context(
+        role, task, base_context, domain=domain,
+    )
+    print(f"[{role.name}] rule_refs 注入：{ability_hints['rule_refs']}")
+    print(f"[{role.name}] skill_trigger：{ability_hints['skill']}")
+    if domain:
+        print(f"[{role.name}] 域 adapter：{ability_hints['domain_adapter']}")
 
     user_prompt = _build_user_prompt(
         role, project, task, context, output_rels, is_dormant,

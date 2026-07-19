@@ -47,6 +47,8 @@ class RoleInvocation:
     module_id: str | None = None             # 单模块聚焦（原 env AGENT_SELECTED_MODULE_ID）
     contract_overrides: dict | None = None   # 原 env AGENT_CONTRACT_OVERRIDES(JSON)
     round: int | None = None                 # brainstorm 轮次（原 CLI --round）
+    domain: str | None = None                # workflow 声明域 → 域 adapter 注入
+                                             # （第 4 步；当前仅 in_process 消费）
     extra_env: dict[str, str] = field(default_factory=dict)  # 逃生口
 
 
@@ -180,7 +182,7 @@ def invoke_role(
     if mode == "in_process":
         from .role_runner import run_role
         try:
-            result = run_role(inv.role, inv.task, inv.project)
+            result = run_role(inv.role, inv.task, inv.project, domain=inv.domain)
         except Exception as e:
             return RoleResult(
                 status="permanent_failed", returncode=-2, role=inv.role,
