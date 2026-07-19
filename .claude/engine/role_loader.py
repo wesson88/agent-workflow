@@ -169,6 +169,11 @@ class Role:
     optional_produces: frozenset[str] = frozenset()
     optional_consumes: frozenset[str] = frozenset()
 
+    # 执行路由声明（架构演进第 3 步批量收编）：subprocess（默认，走 main.py）
+    # / in_process（走 engine.role_runner）。invoke_role(mode="auto") 按此路由；
+    # 集合封闭，非法值降级 subprocess + warn。
+    executor: str = "subprocess"
+
     @property
     def all_names(self) -> tuple[str, ...]:
         """name + aliases 的并集，用于查找匹配。"""
@@ -535,6 +540,15 @@ def _build_role(
             except Exception:
                 pass
 
+    executor = str(fm.get("executor", "subprocess")).strip() or "subprocess"
+    if executor not in ("subprocess", "in_process"):
+        print(
+            f"⚠️ {role_name}: executor='{executor}' 非法（允许 subprocess/"
+            f"in_process），降级 subprocess",
+            file=sys.stderr,
+        )
+        executor = "subprocess"
+
     return Role(
         name=role_name,
         aliases=_seq(fm.get("aliases")),
@@ -564,6 +578,7 @@ def _build_role(
         consumes=consumes,
         optional_produces=optional_produces,
         optional_consumes=optional_consumes,
+        executor=executor,
     )
 
 

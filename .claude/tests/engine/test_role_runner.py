@@ -112,6 +112,35 @@ class TestRunRole:
         assert result.status == "failed" and result.returncode == 1
         assert "blocked" in (result.error or "")
 
+    def test_fanout_expansion_and_dormant_filter(self):
+        from engine.role_runner import _expand_fanout_outputs, _parse_dormant_roles
+
+        text = (
+            "| 角色 | 决策 | 依据 |\n"
+            "| **混音师** | **dormant** | Suno 一体出 |\n"
+            "| 母带工程师 | dormant | 同上 |\n"
+            "| 作词 | active | - |\n"
+        )
+        assert _parse_dormant_roles(
+            text, ["作词", "混音师", "母带工程师"]
+        ) == {"混音师", "母带工程师"}
+
+        class FanRole:
+            name = "制作人"
+            downstream = ("作词", "作曲", "混音师")
+            outputs = ("x/制作计划.md", "x/指令/给{role}.md")
+
+        import tempfile
+        from pathlib import Path as P
+        with tempfile.TemporaryDirectory() as d:
+            f = P(d) / "vision.md"
+            f.write_text(text, encoding="utf-8")
+            rels, dormant = _expand_fanout_outputs(
+                FanRole(), ["x/制作计划.md", "x/指令/给{role}.md"], [f],
+            )
+        assert dormant == {"混音师"}
+        assert rels == ["x/制作计划.md", "x/指令/给作词.md", "x/指令/给作曲.md"]
+
     def test_no_file_blocks_fails(self, runner_env, monkeypatch):
         import engine.role_runner as rr
         from engine.role_runner import run_role

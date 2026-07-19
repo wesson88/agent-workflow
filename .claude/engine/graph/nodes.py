@@ -328,7 +328,9 @@ def make_role_node(
             print(f"\n✂️  拆分为 {len(sub_tasks_to_run)} 个子任务执行")
             rc = _execute_with_subtasks(inv, sub_tasks_to_run)
         else:
-            rc = invoke_role(inv).returncode
+            # mode="auto"：按角色基因 executor 声明路由（in_process 收编角色
+            # 走 role_runner；默认/参数化调用仍 subprocess）
+            rc = invoke_role(inv, mode="auto").returncode
 
         if rc != 0:
             print(f"\n❌ {role_name} 失败（exit={rc}）")

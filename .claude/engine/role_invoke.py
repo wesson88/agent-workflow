@@ -148,19 +148,31 @@ def invoke_role(
     """统一角色调用入口。
 
     - mode="subprocess"：行为等价包装原 main.py 调用语义（默认）
-    - mode="in_process"：engine.role_runner 声明驱动执行（架构演进第 3 步
-      PoC 起）。PoC 范围限简单同构角色——module_id / round / contract_overrides
-      参数化调用暂不支持（工程师/brainstorm 继续走 subprocess）
-    消费/产出端 artifact_check（v0.3/v0.4）两种模式共用。
+    - mode="in_process"：engine.role_runner 声明驱动执行（架构演进第 3 步）。
+      module_id / round / contract_overrides 参数化调用不支持
+      （工程师/brainstorm 继续走 subprocess）
+    - mode="auto"：按角色基因 frontmatter `executor` 声明路由（批量收编的
+      生产切换通道）；参数化调用强制降回 subprocess（封闭规则，非角色特例）
+    消费/产出端 artifact_check（v0.3/v0.4）三种模式共用。
     """
-    if mode not in ("subprocess", "in_process"):
+    if mode not in ("subprocess", "in_process", "auto"):
         raise NotImplementedError(f"mode='{mode}' 未实现")
-    if mode == "in_process" and (
+    parameterized = bool(
         inv.module_id or inv.round is not None or inv.contract_overrides
-    ):
+    )
+    if mode == "auto":
+        if parameterized:
+            mode = "subprocess"
+        else:
+            try:
+                from .role_loader import load_role
+                mode = load_role(inv.role).executor
+            except Exception:
+                mode = "subprocess"
+    if mode == "in_process" and parameterized:
         raise NotImplementedError(
             "in_process 模式暂不支持 module_id / round / contract_overrides"
-            "（PoC 范围：music 同构角色；参数化调用走 subprocess）"
+            "（参数化调用走 subprocess）"
         )
 
     t0 = time.monotonic()

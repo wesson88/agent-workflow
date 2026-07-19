@@ -147,6 +147,48 @@ class TestPermanentFailures:
         assert calls == [("母带工程师", "t", "p")]
         assert result.outputs == ("10-项目/music/p/母带规格.md",)
 
+    def test_auto_mode_routes_by_gene_executor(self, monkeypatch):
+        """mode=auto：按角色基因 executor 声明路由（批量收编生产切换通道）。"""
+        from engine.role_invoke import RoleResult
+
+        class InProcRole:
+            executor = "in_process"
+
+        monkeypatch.setattr("engine.role_loader.load_role", lambda n: InProcRole())
+        calls = []
+        monkeypatch.setattr(
+            "engine.role_runner.run_role",
+            lambda role, task, project, *, domain=None: (
+                calls.append(role),
+                RoleResult(status="success", returncode=0, role=role, elapsed_s=0.1),
+            )[1],
+        )
+        result = invoke_role(
+            RoleInvocation(role="作曲", task="t", project="p"), mode="auto",
+        )
+        assert result.ok and calls == ["作曲"]
+
+    def test_auto_mode_parameterized_forces_subprocess(self, fake_skill, monkeypatch):
+        """auto + 参数化调用 → 强制 subprocess（封闭规则）。"""
+        def boom(*a, **kw):
+            raise AssertionError("参数化调用不应进 runner")
+
+        monkeypatch.setattr("engine.role_runner.run_role", boom)
+        result = invoke_role(
+            RoleInvocation(role="后端工程师", task="t", project="p", module_id="T01"),
+            mode="auto",
+        )
+        assert result.ok and len(fake_skill) == 1
+
+    def test_real_gene_executor_declarations(self):
+        """真实 vault：收编 7 角色 in_process、未收编默认 subprocess。"""
+        from engine.role_loader import load_role
+
+        assert load_role("作曲").executor == "in_process"
+        assert load_role("制作人").executor == "in_process"
+        assert load_role("音乐总监").executor == "subprocess"  # 双模式特例保留
+        assert load_role("后端工程师").executor == "subprocess"
+
     def test_unknown_mode_not_implemented(self):
         with pytest.raises(NotImplementedError):
             invoke_role(
