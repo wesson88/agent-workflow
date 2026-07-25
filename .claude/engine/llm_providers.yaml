@@ -48,7 +48,20 @@ claude-fable-5:
     path: claude
     model: claude-fable-5
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--disallowed-tools", "Bash,Read,Write,Edit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate"]
+    # --disallowed-tools 治理依据：engine 产出单通道（FILE 块沙箱 + 产物注册表），
+    # 子进程一律禁用文件/网络/任务/会话类工具。
+    # mcpvault 写类 7 工具 2026-07-25 封禁（huashu-demo T06 侧写绕过沙箱实证，
+    # 决策"封不纳管"，见 vault [[后端API契约使命行为漂移-2026-07-19]]）；
+    # 读类（read_note / wiki_link 等）保留。工具名须精确枚举（server 级
+    # mcp__mcpvault 会连读一起封）。5 个 Claude model 经 anchor 共用本清单。
+    # 2026-05-24 P2 补全实测（2026-07-25）：SlashCommand/McpInputContext 已非
+    # 现行 CLI 工具名（deny 规则报 "matches no known tool" 警告），不列入，
+    # 防未来 CLI 把 unknown 规则升级为硬错误。
+    extra_args: &claude_cli_extra_args [
+      "--print", "--verbose", "--output-format", "stream-json",
+      "--disallowed-tools",
+      "Bash,Read,Write,Edit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate,Skill,SendMessage,KillShell,mcp__mcpvault__write_note,mcp__mcpvault__patch_note,mcp__mcpvault__update_frontmatter,mcp__mcpvault__manage_tags,mcp__mcpvault__move_note,mcp__mcpvault__move_file,mcp__mcpvault__delete_note",
+    ]
     use_system_prompt_flag: true
 
 claude-sonnet-5:
@@ -64,7 +77,7 @@ claude-sonnet-5:
     path: claude
     model: claude-sonnet-5
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--disallowed-tools", "Bash,Read,Write,Edit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate"]
+    extra_args: *claude_cli_extra_args  # 共用 claude-fable-5 处定义的清单（含依据注释）
     use_system_prompt_flag: true
 
 claude-sonnet-4-6:
@@ -80,7 +93,7 @@ claude-sonnet-4-6:
     path: claude
     model: claude-sonnet-4-6
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--disallowed-tools", "Bash,Read,Write,Edit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate"]
+    extra_args: *claude_cli_extra_args  # 共用 claude-fable-5 处定义的清单（含依据注释）
     use_system_prompt_flag: true
 
 claude-opus-4-7:
@@ -96,7 +109,7 @@ claude-opus-4-7:
     path: claude
     model: claude-opus-4-7
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--disallowed-tools", "Bash,Read,Write,Edit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate"]
+    extra_args: *claude_cli_extra_args  # 共用 claude-fable-5 处定义的清单（含依据注释）
     use_system_prompt_flag: true
 
 claude-haiku-4-5:
@@ -112,7 +125,7 @@ claude-haiku-4-5:
     path: claude
     model: claude-haiku-4-5
     output_format: stream-json
-    extra_args: ["--print", "--verbose", "--output-format", "stream-json", "--disallowed-tools", "Bash,Read,Write,Edit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskUpdate"]
+    extra_args: *claude_cli_extra_args  # 共用 claude-fable-5 处定义的清单（含依据注释）
     use_system_prompt_flag: true
 
 # ── DeepSeek（OpenAI 兼容）────────────────────────────────
