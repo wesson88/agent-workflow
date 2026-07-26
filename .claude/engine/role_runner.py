@@ -30,6 +30,7 @@ PoC 范围：music 域同构角色（首个收编：母带工程师）。SE 工�
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -67,6 +68,28 @@ def _detect_dormant(instruction_path: Path | None) -> bool:
     except Exception:
         return False
     return any(kw in head for kw in _DORMANT_KEYWORDS)
+
+
+# Suno Style 段实测（原 music_composer/main.py post-write 兜底，随 CLI 壳瘦身
+# 收编为通用规则；凌晨四点 2026-07-25 实跑证实 runner 路径曾丢失该 audit 字段）。
+# Style 段约定 = Suno-prompt.md 首个 ``` 三反引号代码块。
+# 依据：Suno v4.5 Style 字段按 JavaScript String.length 计数（= Python len()），
+# 硬上限 1000；LLM 自估不可靠（W5 L2-B 实测自报 1090 实际 1507，偏差 +38%），
+# 必须工程层实测落 audit（[[Style字符数偏差-LLM自估vs工程层兜底]]）。
+_STYLE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+_SUNO_STYLE_HARD_LIMIT = 1000
+
+
+def _measure_suno_style_chars(output_files: dict[str, str]) -> int | None:
+    """从 Suno-prompt.md 抽 Style 段，返回 Python len()；无该产物/无代码块返回 None。"""
+    for rel_path, content in output_files.items():
+        if Path(rel_path).name != "Suno-prompt.md":
+            continue
+        m = _STYLE_BLOCK_RE.search(content)
+        if not m:
+            return None
+        return len(m.group(1))
+    return None
 
 
 def _artifact_guidance(output_rels: list[str], project: str) -> dict[str, str]:
@@ -347,12 +370,40 @@ def run_role(
         print(f"[{role.name}] 写入: {dest}")
         written.append(rel_resolved)
 
+    # Suno-prompt 必产角色（作曲）：has_suno_prompt 软告警 + Style 段字符实测
+    suno_audit: dict = {}
+    if any(Path(r).name == "Suno-prompt.md" for r in output_rels):
+        has_suno_prompt = any(Path(w).name == "Suno-prompt.md" for w in written)
+        if not has_suno_prompt:
+            print(
+                f"[{role.name}] ⚠️ 未产出 Suno-prompt.md（必产产物缺失）。"
+                f"实际 outputs: {written}",
+                file=sys.stderr,
+            )
+        style_char_count = _measure_suno_style_chars(output_files)
+        style_oversized = (
+            style_char_count is not None
+            and style_char_count > _SUNO_STYLE_HARD_LIMIT
+        )
+        if style_char_count is not None:
+            marker = "⚠️ 超 1000" if style_oversized else "✅"
+            print(
+                f"[{role.name}] Suno Style 段字符数（Python len()）: "
+                f"{style_char_count} {marker}"
+            )
+        suno_audit = {
+            "has_suno_prompt": has_suno_prompt,
+            "style_char_count": style_char_count,
+            "style_oversized": style_oversized,
+        }
+
     set_role_status(role.name, status="success", reset_counters=True)
     set_role_status(role.name, status="idle")
     append_audit({
         "timestamp": utc_now(), "role": role.name, "project": project,
         "task": task, "result": "success", "outputs": written,
         "is_dormant": is_dormant, "runner": "in_process",
+        **suno_audit,
     })
     print(
         f"[{role.name}] 完成（{'dormant 降级' if is_dormant else '正常'}，"

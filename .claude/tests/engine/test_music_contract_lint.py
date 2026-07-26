@@ -251,6 +251,12 @@ class TestRuleRefsConsumption:
       1. import 了 `load_rule_block`（from common import ... load_rule_block ...）
       2. 调用了 `load_rule_block(role_def.rule_refs)` 或等价 pattern
 
+    2026-07-26 CLI 壳瘦身后的边界：`executor: in_process` 角色的 main.py 已
+    瘦为 invoke_role 薄壳，rule_refs 消费单点在 engine.role_runner（run_role →
+    ability_loader.assemble_user_context 无条件注入，engine 侧测试覆盖），
+    main.py 文本扫描对这类角色不再适用 → 跳过。仍走 subprocess 的角色
+    （音乐总监）继续受本 lint 约束。
+
     架构师（chief_architect）有自己的本地 `_load_rule_block`（实战 5+ 项目稳定），
     本测试不覆盖 SE 域；后续 SE 域产物 schema 化时另写 test_se_contract_lint。
     """
@@ -284,6 +290,9 @@ class TestRuleRefsConsumption:
             if not data["role"].rule_refs:
                 # 角色 frontmatter 无 rule_refs → 不强制 import（W3 P0c 后 8 ship 全有）
                 continue
+            if data["role"].executor == "in_process":
+                # rule_refs 消费单点在 engine.role_runner（见类 docstring）
+                continue
             skill_dir = SHIP_ROLE_TO_SKILL.get(name)
             if not skill_dir:
                 continue
@@ -307,6 +316,9 @@ class TestRuleRefsConsumption:
         not_invoked: list[str] = []
         for name, data in ship_roles.items():
             if not data["role"].rule_refs:
+                continue
+            if data["role"].executor == "in_process":
+                # rule_refs 消费单点在 engine.role_runner（见类 docstring）
                 continue
             skill_dir = SHIP_ROLE_TO_SKILL.get(name)
             if not skill_dir:

@@ -151,3 +151,65 @@ class TestRunRole:
         assert "no_file_blocks" in (result.error or "")
         audit = runner_env["audit"][-1]
         assert audit["result"] == "failed"
+
+
+class TestSunoStyleMeasurement:
+    """Style 段实测收编回归锁。
+
+    历史背景（2026-07-26 CLI 壳瘦身时发现）：该实测原来只在
+    music_composer/main.py（post-write 兜底），批量收编切 runner 后
+    生产路径 audit 静默丢失 style_char_count / style_oversized 字段
+    （凌晨四点 2026-07-25 实跑作曲 audit 实证）。本类锁定收编版行为。
+    """
+
+    def test_measure_helper(self):
+        from engine.role_runner import _measure_suno_style_chars
+
+        style = "acoustic folk, warm male smoky vocal, reggae offbeat"
+        files = {
+            "10-项目/music/x/曲作.md": "# 曲作\n正文",
+            "10-项目/music/x/Suno-prompt.md": f"# Suno\n```\n{style}\n```\n尾注",
+        }
+        assert _measure_suno_style_chars(files) == len(style)
+        # Suno-prompt.md 无 ``` 代码块 → None（不误报 0）
+        assert _measure_suno_style_chars(
+            {"10-项目/music/x/Suno-prompt.md": "没有代码块"}
+        ) is None
+        # 仅按文件名精确匹配：final-Suno-prompt.md（总监汇编产物）不在测量范围
+        assert _measure_suno_style_chars(
+            {"10-项目/music/x/final-Suno-prompt.md": "```\nabc\n```"}
+        ) is None
+
+    def test_composer_audit_carries_style_fields(self, monkeypatch):
+        """作曲（outputs 声明含 Suno-prompt.md）经 runner 跑完，audit 必须带
+        has_suno_prompt / style_char_count / style_oversized 三字段。"""
+        import shutil as _shutil
+
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        proj = VAULT_ROOT / "10-项目" / "music" / PROJECT
+        (proj / "指令").mkdir(parents=True, exist_ok=True)
+        (proj / "指令" / "给作曲.md").write_text("# 给作曲\n写一首民谣", encoding="utf-8")
+        (proj / "词作.md").write_text("# 词作\n歌词正文", encoding="utf-8")
+
+        captured: dict = {"audit": []}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", captured["audit"].append)
+        style = "warm folk ballad, male vocal, fingerpicked guitar"
+        canned = (
+            "<!-- FILE: 10-项目/music/{project}/曲作.md -->\n# 曲作\n<!-- /FILE -->\n"
+            "<!-- FILE: 10-项目/music/{project}/Suno-prompt.md -->\n"
+            f"# Suno\n```\n{style}\n```\n<!-- /FILE -->\n"
+        )
+        monkeypatch.setattr(rr, "call_claude", lambda s, u, r: canned)
+        try:
+            result = run_role("作曲", "写歌", PROJECT)
+            assert result.ok
+            audit = captured["audit"][-1]
+            assert audit["has_suno_prompt"] is True
+            assert audit["style_char_count"] == len(style)
+            assert audit["style_oversized"] is False
+        finally:
+            _shutil.rmtree(proj, ignore_errors=True)
