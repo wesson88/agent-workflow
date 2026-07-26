@@ -94,7 +94,20 @@ def _slice_steps(
     return out
 
 
-def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool):
+# 模板 domain → 域 adapter 目录名归一化：工作流模板 frontmatter 沿用中文域名
+# （"技术开发"，与角色基因 domain 字段同口径），而域 adapter 路径是
+# `00-系统/规则/{se,music}/{角色}-视角.md`——引擎侧映射，不改模板/角色声明。
+_ADAPTER_DOMAIN_ALIASES = {"技术开发": "se"}
+
+
+def _adapter_domain(template_domain: str) -> str | None:
+    d = (template_domain or "").strip()
+    if not d:
+        return None
+    return _ADAPTER_DOMAIN_ALIASES.get(d, d)
+
+
+def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool, domain: str | None = None):
     if step.type == "linear":
         return make_role_node(
             _normalize(step.role),
@@ -103,6 +116,7 @@ def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool):
             pre_flight=step.pre_flight if (step.pre_flight or step.auto_split) else None,
             skip_if=step.skip_if,
             contract_overrides=step.contract_overrides,
+            domain=domain,
         )
     if step.type == "discussion":
         return make_discussion_node(step, halt_on_failure)
@@ -142,7 +156,13 @@ def build_graph(
                 f"工作流 '{template.name}' 存在重名步骤节点 '{key}'"
                 f"（第 {idx + 1} 步）。同类型多个 step 请用不同 name 区分。"
             )
-        g.add_node(key, _make_node_for_step(step, template.halt_on_failure))
+        g.add_node(
+            key,
+            _make_node_for_step(
+                step, template.halt_on_failure,
+                domain=_adapter_domain(template.domain),
+            ),
+        )
         node_keys.append(key)
 
     g.add_edge(START, node_keys[0])

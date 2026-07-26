@@ -213,3 +213,114 @@ class TestSunoStyleMeasurement:
             assert audit["style_oversized"] is False
         finally:
             _shutil.rmtree(proj, ignore_errors=True)
+
+
+class TestMaterialDirScan:
+    """素材目录扫描输入源（SE 收编批 1 · 原 PM collect_input_docs 收编）。"""
+
+    def test_material_dir_scan_rules(self, tmp_path):
+        """素材目录扫描约定（原 PM collect_input_docs）：排除 + 置顶排序。"""
+        from engine.role_runner import _scan_material_dir
+
+        (tmp_path / "zeta.md").write_text("z", encoding="utf-8")
+        (tmp_path / "business_brief.md").write_text("brief", encoding="utf-8")
+        (tmp_path / "alpha.md").write_text("a", encoding="utf-8")
+        (tmp_path / "README.md").write_text("readme", encoding="utf-8")
+        (tmp_path / "x.example.md").write_text("ex", encoding="utf-8")
+        (tmp_path / ".hidden.md").write_text("h", encoding="utf-8")
+        (tmp_path / "empty.md").write_text("  \n", encoding="utf-8")
+
+        names = [p.name for p in _scan_material_dir(tmp_path)]
+        assert names == ["business_brief.md", "alpha.md", "zeta.md"]
+        assert _scan_material_dir(tmp_path / "不存在") == []
+
+    def test_pm_e2e_material_scan_and_declared_inputs(self, monkeypatch):
+        """PM（SE 收编批 1）经 runner：素材扫描进 context + 参考资料强制段 +
+        声明 inputs（技术栈/PRD-输出模板）真被消费（修 T2.7 起两处声明-实施漂移）。"""
+        import shutil as _shutil
+
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        pm_project = "_runner-pm-unit-test"
+        proj = VAULT_ROOT / "10-项目" / pm_project
+        (proj / "inputs").mkdir(parents=True, exist_ok=True)
+        (proj / "inputs" / "business_brief.md").write_text(
+            "# 业务简报\n做一个待办清单 API", encoding="utf-8",
+        )
+        (proj / "inputs" / "会议纪要.md").write_text(
+            "# 纪要\n优先做增删改查", encoding="utf-8",
+        )
+
+        captured: dict = {"audit": []}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", captured["audit"].append)
+        canned = (
+            "<!-- FILE: 10-项目/{project}/PRD.md -->\n# PRD\n正文\n<!-- /FILE -->\n"
+        )
+
+        def fake_call(system_prompt, user_prompt, role_name):
+            captured["user"] = user_prompt
+            return canned
+
+        monkeypatch.setattr(rr, "call_claude", fake_call)
+        try:
+            result = run_role("产品经理", "做待办 API", pm_project, domain="se")
+            assert result.ok
+            user = captured["user"]
+            # 素材扫描进 context（business_brief 置顶由扫描顺序保证）
+            assert "做一个待办清单 API" in user
+            assert "优先做增删改查" in user
+            # 参考资料章节强制段 + 相对链接（原 PM source_list 语义）
+            assert "参考资料（Source Materials）" in user
+            assert "- `business_brief.md` → `inputs/business_brief.md`" in user
+            # 声明 inputs 真被消费：技术栈 + PRD-输出模板（旧 main.py 两处漂移的修复守卫）
+            assert "=== 技术栈.md ===" in user
+            assert "=== PRD-输出模板.md ===" in user
+            audit = captured["audit"][-1]
+            assert audit["result"] == "success"
+            assert audit["outputs"] == [f"10-项目/{pm_project}/PRD.md"]
+            assert audit["runner"] == "in_process"
+        finally:
+            _shutil.rmtree(proj, ignore_errors=True)
+
+    def test_pm_missing_input_permanent_fail(self, monkeypatch):
+        """素材目录空 + task 无效（占位值）→ rc=2 permanent（原 PM missing_input 语义）。"""
+        import shutil as _shutil
+
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        pm_project = "_runner-pm-unit-test"
+        proj = VAULT_ROOT / "10-项目" / pm_project
+        (proj / "inputs").mkdir(parents=True, exist_ok=True)
+
+        captured: dict = {"audit": []}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", captured["audit"].append)
+        monkeypatch.setattr(
+            rr, "call_claude",
+            lambda *a: (_ for _ in ()).throw(AssertionError("不应触发 LLM 调用")),
+        )
+        try:
+            result = run_role("产品经理", "", pm_project)
+            assert result.returncode == 2 and result.status == "permanent_failed"
+            assert "missing_input" in (result.error or "")
+            assert captured["audit"][-1]["error"] == "missing_input"
+        finally:
+            _shutil.rmtree(proj, ignore_errors=True)
+
+
+class TestAdapterDomainWiring:
+    """域 adapter 生产接线（批 1 捆绑项）：模板 domain → adapter 目录名归一化。"""
+
+    def test_adapter_domain_normalization(self):
+        from engine.graph.build import _adapter_domain
+
+        assert _adapter_domain("技术开发") == "se"   # SE 模板沿用中文域名
+        assert _adapter_domain("music") == "music"
+        assert _adapter_domain("se") == "se"
+        assert _adapter_domain("") is None
+        assert _adapter_domain("  ") is None

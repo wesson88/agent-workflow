@@ -187,6 +187,11 @@ class TestRuleRefsConsumption:
         for name, data in ship_roles.items():
             if not data["role"].rule_refs:
                 continue
+            if data["role"].executor == "in_process":
+                # SE 收编批 1（2026-07-26）：main.py 已瘦为 invoke_role 壳，
+                # rule_refs 消费单点在 engine.role_runner（assemble_user_context
+                # 无条件注入，engine 侧测试覆盖）——文本扫描不再适用
+                continue
             skill_dir = SHIP_ROLE_TO_SKILL[name]
             text = self._skill_main_text(skill_dir) or ""
             if not any(p in text for p in _LOAD_RULE_BLOCK_PATTERNS):
@@ -206,6 +211,9 @@ class TestRuleRefsConsumption:
         not_invoked: list[str] = []
         for name, data in ship_roles.items():
             if not data["role"].rule_refs:
+                continue
+            if data["role"].executor == "in_process":
+                # 同上：in_process 角色消费单点在 role_runner
                 continue
             skill_dir = SHIP_ROLE_TO_SKILL[name]
             text = self._skill_main_text(skill_dir) or ""

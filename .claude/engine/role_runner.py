@@ -92,6 +92,52 @@ def _measure_suno_style_chars(output_files: dict[str, str]) -> int | None:
     return None
 
 
+# 素材目录扫描约定（原 product_manager/main.py collect_input_docs，收编为通用
+# 规则）：inputs 声明以 `/` 结尾 = 素材目录，运行时扫描其中 .md 文件，排除
+# README.md / *.example.* / 隐藏文件 / 空文件；business_brief.md 置顶（事实
+# 基线），其余字典序。
+_PLACEHOLDER_TASKS = {"", "处理数学分析"}  # 原 PM main.py：run_chain 历史默认 task 占位值
+
+
+def _scan_material_dir(dir_path: Path) -> list[Path]:
+    if not dir_path.exists():
+        return []
+    docs: list[Path] = []
+    for p in sorted(dir_path.glob("*.md")):
+        name = p.name
+        if name == "README.md" or ".example." in name or name.startswith("."):
+            continue
+        try:
+            if not p.read_text(encoding="utf-8").strip():
+                continue
+        except Exception:
+            continue
+        docs.append(p)
+    docs.sort(key=lambda p: (0 if p.name == "business_brief.md" else 1, p.name))
+    return docs
+
+
+def _material_note(material_entries: list[tuple[str, Path]], project: str) -> str:
+    """素材目录角色的 user_prompt 附加段（原 PM 素材综合 + 参考资料章节强制）。"""
+    if not material_entries:
+        return ""
+    lines = []
+    for entry, p in material_entries:
+        resolved = entry.replace("{project}", project)
+        marker = f"{project}/"
+        tail = resolved.split(marker, 1)[-1] if marker in resolved else ""
+        lines.append(f"- `{p.name}` → `{tail}{p.name}`")
+    return (
+        "以上 `=== 文件名 ===` 素材块可能同时包含业务简报、脑暴产出、会议纪要、"
+        "用户/竞品调研、其他模型的 specs/plans 等。请综合所有输入，识别其中"
+        "一致与冲突的部分，冲突项放入产物的『待确认项』章节；所有无法从输入中"
+        "确定的事实必须放入『待确认项』，不要编造。\n\n"
+        "产物末尾必须包含『参考资料（Source Materials）』章节，列出本次综合"
+        "用到的每份素材，使用以下相对链接（产物位于项目目录，素材目录是其子目录）：\n"
+        + "\n".join(lines) + "\n\n"
+    )
+
+
 def _artifact_guidance(output_rels: list[str], project: str) -> dict[str, str]:
     """产出路径 → 注册表条目正文（产出指引全文，≤2000 char）。
 
@@ -196,6 +242,7 @@ def _build_user_prompt(
     role, project: str, task: str, context: str,
     output_rels: list[str], is_dormant: bool,
     fanout_dormant: set[str] = frozenset(),
+    material_note: str = "",
 ) -> str:
     """通用 user_prompt 组装（原各 main.py 手写段落的声明驱动形态）。"""
     n = len(output_rels)
@@ -244,6 +291,7 @@ def _build_user_prompt(
         f"项目名：`{project}`（写文件时把路径里的 `{{project}}` 占位符替换为本值）\n\n"
         f"{context}\n\n---\n"
         f"本轮任务：{task or '（未提供，请基于上游输入综合推导）'}\n\n"
+        f"{material_note}"
         f"{scenario}\n"
         f"{render_required_outputs(output_rels)}"
     )
@@ -295,11 +343,34 @@ def run_role(
     from .role_loader import load_role
     role = load_role(role_name)
 
-    # {role} 消费端绑定自身角色名（与 artifact_check / music main.py 同一规则）
-    input_paths = [
-        resolve_path(p.replace("{role}", role.name), project)
-        for p in role.inputs
-    ]
+    # {role} 消费端绑定自身角色名（与 artifact_check / music main.py 同一规则）；
+    # `/` 结尾条目 = 素材目录扫描（见 _scan_material_dir 约定）
+    input_paths: list[Path] = []
+    material_entries: list[tuple[str, Path]] = []
+    has_material_dir = False
+    for raw in role.inputs:
+        entry = raw.replace("{role}", role.name)
+        if entry.endswith("/"):
+            has_material_dir = True
+            scanned = _scan_material_dir(resolve_path(entry, project))
+            input_paths.extend(scanned)
+            material_entries.extend((entry, p) for p in scanned)
+        else:
+            input_paths.append(resolve_path(entry, project))
+    if has_material_dir:
+        print(
+            f"[{role.name}] 素材目录扫描：{len(material_entries)} 份"
+            f"{[p.name for _, p in material_entries]}",
+            flush=True,
+        )
+        # 素材目录角色的输入底线（原 PM missing_input 语义）：
+        # 素材空 + task 无效 → 永久失败，不空跑 LLM 编造产物
+        if not material_entries and task.strip() in _PLACEHOLDER_TASKS:
+            print(
+                f"[{role.name}] 输入缺失：素材目录为空，且无有效 task。",
+                file=sys.stderr,
+            )
+            return _fail(2, "missing_input")
     output_rels = [p.replace("{project}", project) for p in role.outputs]
     # 产出端 {role} 模板 = 扇出（制作人语义，按 downstream − dormant 展开）
     output_rels, fanout_dormant = _expand_fanout_outputs(
@@ -345,6 +416,7 @@ def run_role(
     user_prompt = _build_user_prompt(
         role, project, task, context, output_rels, is_dormant,
         fanout_dormant=fanout_dormant,
+        material_note=_material_note(material_entries, project),
     )
 
     try:

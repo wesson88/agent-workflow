@@ -271,6 +271,7 @@ def make_role_node(
     pre_flight: dict | None = None,
     skip_if: dict | None = None,
     contract_overrides: dict | None = None,
+    domain: str | None = None,
 ):
     """工厂函数：返回一个 LangGraph node 函数。
     role_name 是 vault 角色 frontmatter 的 role 字段（中文名）。
@@ -323,6 +324,7 @@ def make_role_node(
             task=state["task"],
             project=state["project"],
             contract_overrides=contract_overrides,
+            domain=domain,
         )
         if sub_tasks_to_run:
             print(f"\n✂️  拆分为 {len(sub_tasks_to_run)} 个子任务执行")
