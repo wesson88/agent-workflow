@@ -5,7 +5,7 @@ dev_backend/main.py — 后端工程师执行入口（Phase 2b vault-based）
   - 10-项目/{project}/指令/给后端.md   技术主管下发的任务
   - 10-项目/{project}/系统设计.md       系统设计
   - 10-项目/{project}/PRD.md            产品需求
-  - 00-系统/规则/技术栈.md               技术栈
+  - 00-系统/规则/se/技术栈.md               技术栈
 
 输出：
   - src/backend/                  ← 项目仓内（不进 vault）
@@ -210,7 +210,7 @@ def main() -> int:
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
     proj_dir = project_dir(project)
-    tech_stack = rules_dir() / "技术栈.md"
+    tech_stack = rules_dir() / "se" / "技术栈.md"
 
     if module_id:
         # P8.7：模块化模式输入源改为 `模块/{module_id}-*.md`（TL 走 module_manifest
@@ -382,7 +382,7 @@ def main() -> int:
             "  - 后端代码：路径以 `src/backend/...` 开头（项目仓内）\n"
             "  - 测试代码：路径以 `tests/backend/...` 开头\n"
             f"{api_hint}"
-            "技术栈严格按 `00-系统/规则/技术栈.md`，禁止引入未授权依赖。\n"
+            "技术栈严格按 `00-系统/规则/se/技术栈.md`，禁止引入未授权依赖。\n"
             "所有 API 必须含输入校验、鉴权、结构化日志。\n"
             + render_required_outputs(required)
             + "\n上面是路径**示例**；请根据指令清单中的实际模块产出对应文件，每个文件用一个 FILE 块。"

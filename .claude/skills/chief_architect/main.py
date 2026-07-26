@@ -3,7 +3,7 @@ chief_architect/main.py — 首席架构师执行入口（Phase 2b vault-based�
 
 输入（vault）：
   - 10-项目/{project}/PRD.md          产品需求文档
-  - 00-系统/规则/技术栈.md             技术栈约束
+  - 00-系统/规则/se/技术栈.md             技术栈约束
   - 00-系统/规则/架构分解规则.md       分解方法论
 
 输出（vault）：
@@ -49,8 +49,8 @@ def main() -> int:
 
     proj_dir = project_dir(project)
     prd = proj_dir / "PRD.md"
-    tech_stack = rules_dir() / "技术栈.md"
-    decomp_rules = rules_dir() / "架构分解规则.md"
+    tech_stack = rules_dir() / "se" / "技术栈.md"
+    decomp_rules = rules_dir() / "se" / "架构分解规则.md"
     role_def = load_role(ROLE)
 
     if not prd.exists():
@@ -96,7 +96,7 @@ def main() -> int:
         f"项目名：`{project}`\n\n"
         f"{context}\n\n---\n"
         f"本轮任务：{task or '按 PRD 完成架构分解'}\n\n"
-        "技术栈约束严格按 `00-系统/规则/技术栈.md`，禁止引入未授权的库。\n"
+        "技术栈约束严格按 `00-系统/规则/se/技术栈.md`，禁止引入未授权的库。\n"
     )
 
     design_prompt = base_prompt + (

@@ -4,7 +4,7 @@ technical_lead/main.py — 技术主管执行入口（Phase 2b vault-based）
 输入（vault）：
   - 10-项目/{project}/指令/给技术主管.md   架构师下发的任务
   - 10-项目/{project}/系统设计.md          系统设计
-  - 00-系统/规则/技术栈.md                  技术栈
+  - 00-系统/规则/se/技术栈.md                  技术栈
 
 输出（vault）：
   - 10-项目/{project}/指令/给后端.md
@@ -809,7 +809,7 @@ def main() -> int:
     proj_dir = project_dir(project)
     to_lead = proj_dir / "指令" / "给技术主管.md"
     sys_design = proj_dir / "系统设计.md"
-    tech_stack = rules_dir() / "技术栈.md"
+    tech_stack = rules_dir() / "se" / "技术栈.md"
 
     missing = [p for p in (to_lead, sys_design) if not p.exists()]
     if missing:

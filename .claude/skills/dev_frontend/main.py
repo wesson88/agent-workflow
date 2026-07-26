@@ -6,7 +6,7 @@ dev_frontend/main.py — 前端工程师执行入口（Phase 2b vault-based）
   - 10-项目/{project}/PRD.md            产品需求
   - 10-项目/{project}/系统设计.md       系统设计
   - 10-项目/{project}/API契约.md        后端 API（若已有）
-  - 00-系统/规则/技术栈.md               技术栈
+  - 00-系统/规则/se/技术栈.md               技术栈
 
 输出：
   - src/frontend/                 ← 项目仓内（不进 vault）
@@ -142,7 +142,7 @@ def main() -> int:
     set_role_status(ROLE, status="busy", enforce_transition=False)
 
     proj_dir = project_dir(project)
-    tech_stack = rules_dir() / "技术栈.md"
+    tech_stack = rules_dir() / "se" / "技术栈.md"
 
     if module_id:
         # P8.7：模块化模式输入源改为 `模块/{module_id}-*.md`（TL 走 module_manifest
@@ -300,7 +300,7 @@ def main() -> int:
             "  - 状态管理：`src/frontend/store/...`\n"
             "  - 样式：`src/frontend/styles/...`\n"
             "  - 测试：`tests/frontend/...`\n\n"
-            "技术栈严格按 `00-系统/规则/技术栈.md`；需含全局 Error Boundary、"
+            "技术栈严格按 `00-系统/规则/se/技术栈.md`；需含全局 Error Boundary、"
             "loading/error 状态、响应式适配。\n"
             + render_required_outputs(base_required)
             + "\n上面是路径**示例**；请根据指令清单中的实际功能划分产出对应文件，每个文件用一个 FILE 块。"

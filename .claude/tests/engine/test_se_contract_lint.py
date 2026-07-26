@@ -228,6 +228,57 @@ class TestRuleRefsConsumption:
         )
 
 
+class TestVaultPathSync:
+    """代码/声明里的 vault 静态路径必须真实存在——防"vault 目录重组、代码未同步"。
+
+    历史背景（2026-07-26 SE 收编批 1 recon 发现）：vault commit 9369f67
+    （2026-06-01 SE 域目录对齐 music）把 技术栈.md / 架构分解规则.md 移入
+    `00-系统/规则/se/`，但 5 个 SE skill main.py 的 `rules_dir()/技术栈.md`
+    硬编码路径未同步 → read_input_files 静默降级"（文件不存在或为空）"，
+    SE 全链在无技术栈约束注入状态下跑了近 8 周，无任何告警。
+
+    本 lint 双向守卫：
+      1. skill main.py 里 rules_dir() 字面路径链必须解析到存在的文件
+      2. ship 角色 frontmatter 静态 inputs（不含 {project} 占位）必须存在
+    """
+
+    _RULES_CHAIN_RE = re.compile(r'rules_dir\(\)((?:\s*/\s*"[^"]+")+)')
+    _PART_RE = re.compile(r'"([^"]+)"')
+
+    def test_rules_dir_literals_resolve(self):
+        broken: list[str] = []
+        for main_py in sorted((PROJECT_ROOT / ".claude" / "skills").glob("*/main.py")):
+            text = main_py.read_text(encoding="utf-8")
+            for m in self._RULES_CHAIN_RE.finditer(text):
+                parts = self._PART_RE.findall(m.group(1))
+                path = VAULT_ROOT / "00-系统" / "规则"
+                for part in parts:
+                    path = path / part
+                if not path.exists():
+                    broken.append(
+                        f"  {main_py.parent.name}/main.py: rules_dir()/"
+                        + "/".join(parts) + f" → {path} 不存在"
+                    )
+        assert not broken, (
+            "skill main.py 引用的规则文件路径在 vault 不存在（目录重组未同步代码？）：\n"
+            + "\n".join(broken)
+        )
+
+    def test_ship_roles_static_inputs_exist(self, ship_roles):
+        broken: list[str] = []
+        for name, data in ship_roles.items():
+            for inp in data["role"].inputs:
+                if "{project}" in inp or "{role}" in inp:
+                    continue  # 项目态/占位路径运行时才产生，不在本 lint 范围
+                path = VAULT_ROOT / inp.rstrip("/")
+                if not path.exists():
+                    broken.append(f"  {name}: inputs 声明 `{inp}` 在 vault 不存在")
+        assert not broken, (
+            "ship 角色 frontmatter 静态 inputs 路径在 vault 不存在：\n"
+            + "\n".join(broken)
+        )
+
+
 class TestSkillRefsConsistency:
     """skill_refs 路径必须真实存在于 vault（防止 frontmatter 写错路径）。"""
 
