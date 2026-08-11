@@ -163,6 +163,22 @@ class TestResolve:
         _write(tmp_vault / "99-临时/draft.md")
         assert resolve_target("draft") is None
 
+    def test_claude_code_skills_excluded_from_stem_index(self, tmp_vault: Path):
+        """`00-系统/可执行技能/<名>/SKILL.md` 的 stem 不进索引，必须用完整路径。
+
+        文件名 `SKILL.md` 由 Claude Code 强制、不可改，故每新增一个技能必然
+        产生一次 stem 碰撞（与 `10-项目/*/PRD.md` 同形）。
+        与 vault 规则 `vault命名规则.md` §2.12 成对。
+        """
+        _write(tmp_vault / "00-系统/可执行技能/拆分审计/SKILL.md")
+        _write(tmp_vault / "00-系统/可执行技能/另一个技能/SKILL.md")
+        # 两个 SKILL 都没进 stem 索引：返回 None，而不是 raise DuplicateStemError
+        assert resolve_target("SKILL") is None
+        # 完整路径可解析
+        p = resolve_target("00-系统/可执行技能/拆分审计/SKILL")
+        assert p is not None
+        assert p.parent.name == "拆分审计"
+
     def test_single_domain_rule_kept_in_stem_index(self, tmp_vault: Path):
         """P0 修：`00-系统/规则/<domain>/<x>.md` 若无跨域同名，bare stem 可解析。
 
