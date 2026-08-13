@@ -112,6 +112,25 @@ claude-opus-4-7:
     extra_args: *claude_cli_extra_args  # 共用 claude-fable-5 处定义的清单（含依据注释）
     use_system_prompt_flag: true
 
+# Opus 5（2026-08-13 新增）：Claude 5 代旗舰。与 Fable 5 / Sonnet 5 同代，
+# 沿用 Opus 4.7 引入的新 tokenizer（tiktoken 不支持，cl100k_base 近似，估算偏低）。
+# 1M extended context。加入原因：角色审计器等重推理元角色需要 Opus 档。
+claude-opus-5:
+  mode: dual_track
+  prefer: auto
+  tokenizer: cl100k_base
+  context_window: 1000000
+  api:
+    kind: anthropic
+    key_env: ANTHROPIC_API_KEY
+    model: claude-opus-5
+  cli:
+    path: claude
+    model: claude-opus-5
+    output_format: stream-json
+    extra_args: *claude_cli_extra_args  # 共用 claude-fable-5 处定义的清单（含依据注释）
+    use_system_prompt_flag: true
+
 claude-haiku-4-5:
   mode: dual_track
   prefer: auto
