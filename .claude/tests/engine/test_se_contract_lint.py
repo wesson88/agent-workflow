@@ -38,6 +38,18 @@ SHIP_ROLE_TO_SKILL = {
     "前端工程师": "dev_frontend",
 }
 
+# 待 ship：角色基因已在 vault 落地，但引擎侧 skill 目录尚未开发。
+# 这些角色不能进 SHIP_ROLE_TO_SKILL（会让 test_skill_dirs_exist 失败），
+# 但它们的 outputs 必须计入 producer 索引，否则已接入的下游角色会被判
+# 「编造假上游」。
+#
+# UX设计师 / UI设计师：2026-08-12 建基因（见 [[UXUI设计师角色引入设计-2026-08-12]]），
+# 产 UX设计.md / UI设计规格.md 供前端工程师 optional 消费；工作流模板按决策
+# 推迟到与 agent-workflow 协同开发时一并搭建。
+# **skill 落地后必须从本表移入 SHIP_ROLE_TO_SKILL**，否则 skill 目录缺失
+# 这一项就永远检不出来。
+PENDING_SHIP_ROLES = {"UX设计师", "UI设计师"}
+
 # 架构师有本地 _load_rule_block（已实战 5+ 项目稳定，2026-05-30 commit 20f2fba
 # 切到 common.load_rule_block 统一维护）。本 lint 既接受 common 路径也接受本地路径。
 _LOAD_RULE_BLOCK_PATTERNS = (
@@ -75,9 +87,17 @@ def _normalize_path(path: str) -> str:
     return _abstract_module_id(path.replace("\\", "/"))
 
 
-def _build_producer_index(ship_roles: dict[str, dict]) -> dict[str, str]:
+def _build_producer_index(ship_roles: dict[str, dict], se_roles: dict[str, dict] | None = None) -> dict[str, str]:
     producers: dict[str, str] = {}
     for name, data in ship_roles.items():
+        for out in data["role"].outputs:
+            producers.setdefault(_normalize_path(out), name)
+    # 待 ship 角色：角色基因已落地、引擎 skill 尚未开发。它们的 outputs 也计入
+    # producer 索引，否则下游角色一声明消费就会被判「编造假上游」。
+    for name in PENDING_SHIP_ROLES:
+        data = (se_roles or {}).get(name)
+        if not data:
+            continue
         for out in data["role"].outputs:
             producers.setdefault(_normalize_path(out), name)
     return producers
@@ -113,8 +133,8 @@ class TestRoleInventory:
 class TestInputsProducerChain:
     """ship 角色 inputs 中的每个产物必须有 ship 上游 outputs 声明（除源输入）。"""
 
-    def test_all_inputs_have_producer(self, ship_roles):
-        producers = _build_producer_index(ship_roles)
+    def test_all_inputs_have_producer(self, ship_roles, se_roles):
+        producers = _build_producer_index(ship_roles, se_roles)
         broken: list[str] = []
         for name, data in ship_roles.items():
             for inp in data["role"].inputs:
@@ -135,8 +155,8 @@ class TestUpstreamFieldConsistency:
     与音乐域 [[test_music_contract_lint]] 同语义：declared ⊆ inputs producer 集合。
     """
 
-    def test_declared_upstream_all_have_producer(self, ship_roles):
-        producers = _build_producer_index(ship_roles)
+    def test_declared_upstream_all_have_producer(self, ship_roles, se_roles):
+        producers = _build_producer_index(ship_roles, se_roles)
         invalid: list[str] = []
         for name, data in ship_roles.items():
             role = data["role"]

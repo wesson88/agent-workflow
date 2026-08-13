@@ -387,3 +387,160 @@ class TestMeasureRoleSkillRefs:
         report = ra_mod._format_measurements([m])
         assert "[SHRINK?]" in report
         assert "skill_refs 数量 6" in report
+
+
+# ── 2026-08-13 新增三条 lint 的正控 ────────────────────────────────────
+# 缘由：2026-08-13 审计报告的 4 个严重问题里，3 个空壳角色 + 产品经理
+# upstream: null 全部逃过了程序层检测（章节标题存在即算数 / null 被当作
+# 「字段存在」）。这三条 lint 就是堵这两类盲区的，必须有正控。
+
+_BIZ_FM = (
+    "role: {role}\ndomain: music\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\n"
+    "style: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\n"
+    "inputs: []\noutputs: []\ntools: []\nversion: {version}"
+)
+
+
+def _biz_body(sections: dict[int, str]) -> str:
+    """按 {章节号: 正文} 生成业务角色 §1-§8 正文。"""
+    titles = {
+        1: "核心使命", 2: "输入与输出", 3: "职责范围",
+        4: "职责边界", 5: "执行工作流", 6: "质量原则",
+    }
+    out = ["# 角色：测试"]
+    for n in range(1, 7):
+        # 默认填充必须明显超过 LIMITS["min_section_chars"]（40），否则合规样本
+        # 会被自己的阈值判成空壳 —— 这里给到 60+ chars 留足余量
+        filler = "这里是一段足够长的正文内容，用来确保本章节在剥离全部空白与 HTML 注释之后，有效字符数仍然明显超过空壳判定的下限要求。"
+        out.append(f"\n## {n}. {titles[n]}\n\n{sections.get(n, filler)}")
+    out.append("\n## 7. 运行时补丁（控制区）")
+    return "\n".join(out)
+
+
+class TestLintSectionNonEmpty:
+    """业务角色 §1-§6 有效正文不足 min_section_chars → ERROR_HOLLOW。"""
+
+    def test_html_comment_only_section_is_hollow(self, tmp_vault):
+        body = _biz_body({3: "<!-- W2-W3 起草 -->"})
+        role_path = _write_role(
+            tmp_vault.path, "角色-空壳.md",
+            _BIZ_FM.format(role="空壳", version="1.0.0"), body,
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["prompt_whitelist_level"] == "ERROR_HOLLOW"
+        assert "§3(0 chars)" in "; ".join(m["prompt_whitelist_issues"])
+
+    def test_full_sections_not_hollow(self, tmp_vault):
+        role_path = _write_role(
+            tmp_vault.path, "角色-完整.md",
+            _BIZ_FM.format(role="完整", version="1.0.0"), _biz_body({}),
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["prompt_whitelist_level"] == "OK"
+
+    def test_meta_role_exempt_from_hollow(self, tmp_vault):
+        """元角色不受 §1-§6 白名单约束（规范 §3.5.2），不应判 ERROR_HOLLOW。"""
+        fm = _BIZ_FM.format(role="元空", version="1.0.0").replace(
+            "domain: music", "domain: 元")
+        role_path = _write_role(
+            tmp_vault.path, "角色-元空.md", fm,
+            _biz_body({3: "<!-- 待起草 -->"}) + "\n\n## 8. 版本历史\n- v1.0.0 (2026-01-01): 初版",
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["prompt_whitelist_level"] != "ERROR_HOLLOW"
+
+
+class TestLintListFieldType:
+    """规范 §2.2：声明为 list 的字段值为 null / 标量 → 报违规。"""
+
+    def test_null_upstream_flagged(self, tmp_vault):
+        fm = _BIZ_FM.format(role="空上游", version="1.0.0").replace(
+            "upstream: []", "upstream: null")
+        role_path = _write_role(tmp_vault.path, "角色-空上游.md", fm, _biz_body({}))
+        m = ra_mod._measure_role(role_path)
+        assert any("upstream" in v and "null" in v for v in m["list_field_violations"])
+        # null 不是「缺字段」，旧检测确实看不见 —— 正是本 lint 要堵的盲区
+        assert "upstream" not in m["missing_required"]
+        assert "list 字段类型违规" in ra_mod._format_measurements([m])
+
+    def test_scalar_instead_of_list_flagged(self, tmp_vault):
+        fm = _BIZ_FM.format(role="标量", version="1.0.0").replace(
+            "tools: []", "tools: obsidian_read")
+        role_path = _write_role(tmp_vault.path, "角色-标量.md", fm, _biz_body({}))
+        m = ra_mod._measure_role(role_path)
+        assert any("tools" in v and "不是 list" in v for v in m["list_field_violations"])
+
+    def test_proper_lists_clean(self, tmp_vault):
+        role_path = _write_role(
+            tmp_vault.path, "角色-干净.md",
+            _BIZ_FM.format(role="干净", version="1.0.0"), _biz_body({}),
+        )
+        assert ra_mod._measure_role(role_path)["list_field_violations"] == []
+
+
+class TestLintVersionConsistency:
+    """规范 §3.4a：frontmatter version 必须等于 §8 里的 semver 最大值。"""
+
+    def _with_v8(self, body: str, entries: str) -> str:
+        return body + "\n\n## 8. 版本历史\n" + entries
+
+    def test_drift_flagged(self, tmp_vault):
+        body = self._with_v8(_biz_body({}), "- v0.3.0 (2026-07-11): 改 model\n- v0.2.0 (2026-05-25): 初版")
+        role_path = _write_role(
+            tmp_vault.path, "角色-漂移.md",
+            _BIZ_FM.format(role="漂移", version="0.2.0"), body,
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["version_mismatch"] is True
+        assert m["section8_max_version"] == "0.3.0"
+        assert "版本漂移" in ra_mod._format_measurements([m])
+
+    def test_consistent_not_flagged(self, tmp_vault):
+        body = self._with_v8(_biz_body({}), "- v0.3.0 (2026-07-11): 改 model\n- v0.2.0 (2026-05-25): 初版")
+        role_path = _write_role(
+            tmp_vault.path, "角色-一致.md",
+            _BIZ_FM.format(role="一致", version="0.3.0"), body,
+        )
+        assert ra_mod._measure_role(role_path)["version_mismatch"] is False
+
+    def test_ascending_and_descending_both_work(self, tmp_vault):
+        """取最大值判定，与排列方向无关（旧文件可能仍是升序）。"""
+        asc = self._with_v8(_biz_body({}), "- v0.2.0 (2026-05-25): 初版\n- v0.3.0 (2026-07-11): 改 model")
+        role_path = _write_role(
+            tmp_vault.path, "角色-升序.md",
+            _BIZ_FM.format(role="升序", version="0.3.0"), asc,
+        )
+        assert ra_mod._measure_role(role_path)["version_mismatch"] is False
+
+    def test_table_format_works(self, tmp_vault):
+        body = self._with_v8(
+            _biz_body({}),
+            "| 版本 | 日期 | 说明 |\n|---|---|---|\n| 1.2.0 | 2026-08-01 | 新 |\n| 1.1.0 | 2026-07-01 | 旧 |",
+        )
+        role_path = _write_role(
+            tmp_vault.path, "角色-表格.md",
+            _BIZ_FM.format(role="表格", version="1.1.0"), body,
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["version_mismatch"] is True
+        assert m["section8_max_version"] == "1.2.0"
+
+
+class TestSectionSplitSkipsCodeFence:
+    """_split_sections 必须跳过 fenced code block。
+
+    回归：创意发散者 §3 内嵌产物模板，模板自身用 `## 1.` ~ `## 6.` 当标题。
+    不跳围栏时模板会覆盖外层同号章节，实测 §1 的 180 chars 被误记为 21。
+    """
+
+    def test_embedded_template_does_not_clobber_sections(self):
+        body = (
+            "## 1. 核心使命\n\n" + "真实内容" * 30 + "\n\n"
+            "## 3. 职责范围\n\n产出模板如下：\n\n"
+            "```markdown\n## 1. 核心机会点\n{占位}\n\n## 2. 目标用户\n{占位}\n```\n\n"
+            "## 4. 职责边界\n\n边界内容\n"
+        )
+        counts = ra_mod._section_char_counts(body)
+        assert counts["1"] > 100, "§1 被围栏内的 `## 1.` 覆盖了"
+        assert "2" not in counts, "围栏内的 `## 2.` 不应产生章节"
+        assert counts["3"] > 50

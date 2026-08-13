@@ -60,6 +60,15 @@ REQUIRED_FIELDS = {
     "inputs", "outputs", "tools",
 }
 
+# 规范 §2.2 声明为 list[str] 的字段。"值可为空但必须列出" —— 空写 `[]`，不写 YAML `null`。
+# `null` 反序列化成 Python None，任何迭代它的关系图构建 / load_role 路径都会抛
+# TypeError，而"缺必填"检测把 null 视为"字段存在"因此不报警（2026-08-13 审计在
+# 产品经理 upstream: null 上实证了这个盲区）。
+LIST_FIELDS = {
+    "aliases", "upstream", "downstream", "monitors",
+    "inputs", "outputs", "tools", "skills", "skill_refs",
+}
+
 # frontmatter 禁止字段（来自规范 §2.4）
 FORBIDDEN_FIELDS = {
     "responsibilities", "职责", "forbidden", "禁止事项",
@@ -77,6 +86,17 @@ LIMITS = {
     "single_section": 1500,
     "dynamic": 5000,
     "single_patch": 1200,
+    # 2026-08-13 新增：业务角色 §1-§6 单章节最小有效正文（剥离 HTML 注释与空白后）
+    # 依据：**实测断层**。2026-08-13 全量测了本库 22 个业务角色的 §1-§6 有效字符
+    # （剥离 HTML 注释与全部空白后）：已知空壳章节最大 32（三个空壳角色的
+    # §5「参见 frontmatter inputs / outputs。」），真实内容章节最小 51
+    # （批判者 §6）。40 落在 (32, 51) 断层正中，两侧各留 8 chars 余量。
+    # ⚠️ 口径必须是「剥离空白后」——若按原始字符计，两类分布重叠，无阈值可分。
+    # 缘由：2026-08-13 审计发现 A&R / MIDI编程 / 录音师 三个角色的 §1/§3/§4/§6
+    # 正文全是 `<!-- W2-W3 起草 -->` HTML 注释，实质内容为零，但因章节标题存在，
+    # _extract_role_prompt_sections 不 raise、T2.7 lint 全绿 —— 空壳角色若被调度，
+    # 注入的是一个无使命、无职责、无边界的自由裁量 agent。
+    "min_section_chars": 40,
     # P6 新增：角色 skill_refs 数量软上限（触发 [SHRINK?]）
     # 依据：**推导逻辑 + 实测参考**。当前实测：架构师 5 skill / 后端 4 / TL 2 / 前端 1，
     # 上限 = 现最高值（架构师 5），高于此值提示治理域过宽应拆分。
@@ -305,19 +325,76 @@ def _last_dynamic_body(text: str) -> str:
     return ms[-1].group(1) if ms else ""
 
 
-def _section_char_counts(body: str) -> dict[str, int]:
-    """切 §1-§N 章节，返回每章字符数（不含标题行本身）。"""
-    lines = body.split("\n")
+def _split_sections(body: str) -> dict[str, list[str]]:
+    """切 §1-§N 章节，返回 {章节号: 该章内容行列表}（不含标题行本身）。
+
+    **跳过 fenced code block**：角色正文里常内嵌产物 markdown 模板，模板自身
+    也用 `## 1.` / `## 2.` 当标题（如创意发散者 §3 内嵌「创意发散-R{n}.md」模板）。
+    不跳围栏的话，模板里的 `## 1.` 会被当成外层章节，把真正的 §1 内容整个覆盖掉
+    —— 创意发散者 §1 实测 180 chars 被误记为 21 chars。
+    2026-08-13 修复；此前所有涉及内嵌模板角色的章节长度测量都是错的。
+    """
     sections: dict[str, list[str]] = {}
     current = None
-    for line in lines:
+    in_fence = False
+    for line in body.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            if current is not None:
+                sections[current].append(line)
+            continue
+        if in_fence:
+            if current is not None:
+                sections[current].append(line)
+            continue
         m = _SECTION_RE.match(line)
         if m:
             current = m.group(1)
             sections[current] = []
         elif current is not None:
             sections[current].append(line)
-    return {k: len("\n".join(v)) for k, v in sections.items()}
+    return sections
+
+
+def _section_char_counts(body: str) -> dict[str, int]:
+    """切 §1-§N 章节，返回每章字符数（不含标题行本身）。"""
+    return {k: len("\n".join(v)) for k, v in _split_sections(body).items()}
+
+
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+
+
+def _section_effective_chars(body: str) -> dict[str, int]:
+    """切 §1-§N 章节，返回每章**剥离 HTML 注释与空白后**的有效正文字符数。
+
+    与 _section_char_counts 的区别：那个量的是原始体积（用于超上限判定），
+    这个量的是"LLM 真正读到多少内容"（用于空壳判定）。
+    HTML 注释不进渲染正文，也不进 system prompt —— 一章只有 `<!-- 待起草 -->`
+    等价于该章缺失。
+    """
+    out: dict[str, int] = {}
+    for k, v in _split_sections(body).items():
+        text = _HTML_COMMENT_RE.sub("", "\n".join(v))
+        out[k] = len("".join(text.split()))
+    return out
+
+
+def _max_version_in_section8(body: str) -> str | None:
+    """取 §8 版本历史里全部版本号的 semver 最大值。
+
+    全库 §8 有表格 / bullet 两种格式，且历史上升序降序并存（规范 §3.4a 已统一为
+    降序，但校验按"取最大值"判定，与格式和排列方向都无关，向后兼容旧文件）。
+    """
+    m8 = re.search(r"^##\s+8\.", body, re.M)
+    if not m8:
+        return None
+    sec = body[m8.end():]
+    found = (re.findall(r"^\|\s*(\d+\.\d+\.\d+)\s*\|", sec, re.M)
+             + re.findall(r"^-\s*\*?\*?v(\d+\.\d+\.\d+)", sec, re.M))
+    if not found:
+        return None
+    return max(found, key=lambda v: tuple(int(x) for x in v.split(".")))
 
 
 def _split_patches(dynamic_body: str) -> list[str]:
@@ -384,6 +461,24 @@ def _measure_role(path: Path) -> dict:
     missing_required = REQUIRED_FIELDS - present
     present_forbidden = FORBIDDEN_FIELDS & present
 
+    # list 字段类型校验（规范 §2.2）：null 与标量都判违规
+    list_field_violations: list[str] = []
+    for k in sorted(LIST_FIELDS & present):
+        v = fm.get(k)
+        if v is None:
+            list_field_violations.append(f"`{k}` 是 null（应写 `[]`）")
+        elif not isinstance(v, list):
+            list_field_violations.append(
+                f"`{k}` 不是 list（实为 {type(v).__name__}）"
+            )
+
+    # version 与 §8 版本历史一致性（规范 §3.4a）
+    fm_version = str(fm.get("version", "")).strip()
+    section8_max = _max_version_in_section8(body)
+    version_mismatch = (
+        bool(fm_version) and section8_max is not None and fm_version != section8_max
+    )
+
     # P6：skill_refs 数量 + 引用 skill 文件的 trigger 完整性
     # skill_refs 列表本身长度（软上限 LIMITS["skill_refs_max"]）
     skill_refs_raw = fm.get("skill_refs") if isinstance(fm, dict) else None
@@ -431,11 +526,21 @@ def _measure_role(path: Path) -> dict:
     # 元角色仅检查 DYNAMIC marker + 版本历史段存在
     # ⚠️ 直接扫原 body（不依赖 body_no_dynamic），避免 §6.4 DYNAMIC marker 滥用
     # 反模式（字面引用 marker 让 _DYNAMIC_RE 非贪婪匹配吞掉中间章节）干扰本 lint
-    import re as _re
-    _TOP_SECTION_RE = _re.compile(r"^##\s+(\d+)\.\s+(.+)$", _re.MULTILINE)
+    # 与 _split_sections 同样跳 fenced code block，否则内嵌产物模板里的
+    # `## 1.` / `## 8.` 会污染章节表（见 _split_sections docstring）
+    _TOP_SECTION_RE = re.compile(r"^##\s+(\d+)\.\s+(.+)$")
     top_sections: dict[int, str] = {}
-    for m in _TOP_SECTION_RE.finditer(body):
-        top_sections[int(m.group(1))] = m.group(2).strip()
+    _in_fence = False
+    for _line in body.split("\n"):
+        _s = _line.lstrip()
+        if _s.startswith("```") or _s.startswith("~~~"):
+            _in_fence = not _in_fence
+            continue
+        if _in_fence:
+            continue
+        _m = _TOP_SECTION_RE.match(_line)
+        if _m:
+            top_sections[int(_m.group(1))] = _m.group(2).strip()
 
     prompt_whitelist_issues: list[str] = []
     if is_meta:
@@ -462,6 +567,20 @@ def _measure_role(path: Path) -> dict:
             prompt_whitelist_issues.append(
                 f"业务角色 §8 标题应为『版本历史』，实际：『{s8_title}』"
             )
+        # lint_section_non_empty：§1-§6 每章有效正文须 ≥ min_section_chars。
+        # 只对存在的章节判；缺章由上面的"缺章"检查负责，不重复报。
+        eff = _section_effective_chars(body_no_dynamic)
+        hollow = [
+            (n, eff.get(str(n), 0))
+            for n in range(1, 7)
+            if n in top_sections and eff.get(str(n), 0) < LIMITS["min_section_chars"]
+        ]
+        if hollow:
+            detail = "、".join(f"§{n}({c} chars)" for n, c in hollow)
+            prompt_whitelist_issues.append(
+                f"业务角色章节空壳：{detail} 剥离 HTML 注释与空白后不足 "
+                f"{LIMITS['min_section_chars']} chars —— 标题存在但注入 system prompt 的实质内容近乎为零"
+            )
 
     # 新业务角色更严格：agent_generated=true 不允许 prompt_whitelist 任何不合规
     prompt_whitelist_level = "OK"
@@ -472,6 +591,10 @@ def _measure_role(path: Path) -> dict:
             prompt_whitelist_level = "WARN_NORMALIZE"
         else:
             prompt_whitelist_level = "WARN_META"
+    # 空壳章节无条件升 ERROR：一个无使命 / 无职责 / 无边界的 agent 被调度，
+    # 危害与"缺章"等同，不因角色是人写的（agent_generated=false）而降级。
+    if not is_meta and any("章节空壳" in i for i in prompt_whitelist_issues):
+        prompt_whitelist_level = "ERROR_HOLLOW"
 
     return {
         "filename": path.name,
@@ -491,6 +614,9 @@ def _measure_role(path: Path) -> dict:
         # field checks
         "missing_required": sorted(missing_required),
         "present_forbidden": sorted(present_forbidden),
+        "list_field_violations": list_field_violations,
+        "version_mismatch": version_mismatch,
+        "section8_max_version": section8_max,
         # structure
         "found_sections": found_sections,
         "has_dynamic_markers": has_dynamic_markers,
@@ -555,6 +681,13 @@ def _format_measurements(measures: list[dict]) -> str:
             issues.append(f"缺必填字段：{m['missing_required']}")
         if m["present_forbidden"]:
             issues.append(f"含禁止字段：{m['present_forbidden']}")
+        for v in m.get("list_field_violations", []):
+            issues.append(f"规范 §2.2 list 字段类型违规：{v}")
+        if m.get("version_mismatch"):
+            issues.append(
+                f"规范 §3.4a 版本漂移：frontmatter `version: {m['version']}` "
+                f"≠ §8 版本历史最大版本号 {m['section8_max_version']}"
+            )
         if not m["has_dynamic_markers"]:
             issues.append("缺 DYNAMIC 标记对（<!-- DYNAMIC_START/END -->）")
         if m["marker_literal_in_body"]:
@@ -588,6 +721,7 @@ def _format_measurements(measures: list[dict]) -> str:
             continue
         badge = {
             "ERROR_NEW": "🔴 ERROR",
+            "ERROR_HOLLOW": "🔴 ERROR",
             "WARN_NORMALIZE": "🟡 WARN",
             "WARN_META": "🔵 INFO",
         }.get(level, level)
