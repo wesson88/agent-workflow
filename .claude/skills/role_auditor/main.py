@@ -78,10 +78,22 @@ FORBIDDEN_FIELDS = {
 # 长度上限（字符数）+ 数量上限
 # ⚠️ 阈值来源硬约束（见项目 CLAUDE.md「阈值来源必须显式声明」）
 LIMITS = {
-    # 依据：**初值，无数据支持**。规范 §4 长度软上限章节沿用 5A-1（DYNAMIC 5000）
-    # 与 role_auditor 首版实施同期设定，未做实测校准。~1400 tokens/5000 chars 是
-    # 快估算（假设中文 3.5 chars/token）。等大型角色实战暴露具体膨胀点后校准。
-    "frontmatter": 800,
+    # 2026-08-15 校准：800 → 2000。
+    # 依据：**实测**。原 800 是「初值，无数据支持」，且注释里按 ~3.5 chars/token
+    # 换算，说明当初是**当 token 预算来定的** —— 这是概念错配：frontmatter 绝大
+    # 部分根本不进 prompt。全量 27 个角色实测：
+    #   frontmatter 合计 24,090 chars，真正进 LLM 的仅 3,158 chars（13%）
+    # 且进 prompt 的量与 frontmatter 总长几乎无关 —— 非契约化角色恒定 62-97 chars
+    # （prompt_builder.build_system_prompt 的「角色摘要」只取 role/domain/style/
+    # skills 四项）；契约化角色多出 outputs/inputs 清单（common._render_contract_
+    # summary），最大 前端工程师 372 chars ≈ 106 tokens。其余字段（aliases/upstream/
+    # downstream/monitors/tools/version/max_tokens/model/produces/consumes/
+    # budget_input_tokens/domains）只在引擎内部消费，零 prompt 成本。
+    # 结论：本阈值衡量的是**可维护性**不是 token 成本，800 定得过紧（13/27 超限，
+    # 即 48% 失守，阈值已失去信号价值）。2000 后仅 前端工程师(2273) 仍超限 —— 它
+    # 的膨胀源是 output_contract/input_contract 模板，属于真该治理的对象，保留信号。
+    # 复盘见 vault [[Obsidian可视化仪表盘建设-2026-08-15]]。
+    "frontmatter": 2000,
     "body_no_dynamic": 5000,
     "single_section": 1500,
     "dynamic": 5000,
@@ -320,6 +332,48 @@ def _parse_frontmatter(text: str) -> tuple[dict, str, int]:
     return fm, body, len(text[:end + 4])
 
 
+# 规范 §11 契约化字段。这两个键不计入 frontmatter 软上限 —— 见 _split_fm_contract。
+_CONTRACT_KEYS = frozenset({"output_contract", "input_contract"})
+_FM_TOP_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):")
+
+
+def _split_fm_contract(fm_raw: str) -> tuple[str, str]:
+    """把 frontmatter 原文拆成 (计入软上限的部分, 契约字段部分)。
+
+    2026-08-15 新增。成因：规范 §11 鼓励 output_contract / input_contract 契约化，
+    但 §4 的 frontmatter 软上限把契约模板一并计入 —— **越遵循 §11 的角色越必然违反
+    §4**（2026-08-13 审计 [[角色基因劣化对比-2026-08-13]] §2.2「越合规越超标」已定性）。
+
+    实测：契约字段占 前端工程师 1281 / 技术主管 968 / 后端工程师 994 chars，
+    而其余 24 个角色根本没有这两个键 —— 排除后 fm_chars 一字不变，零影响。
+
+    软上限的治理目标是「字段值不要塞长描述」；契约模板是结构化声明、由 workflow
+    在运行时按 contract_overrides 实例化，与该目标无关，故拆出单独计数。
+
+    切分口径：frontmatter 是行式 YAML，顶层键在列 0，缩进行 / `- ` 行归属当前键。
+    """
+    blocks: list[tuple[str, str]] = []
+    cur_key: str | None = None
+    cur: list[str] = []
+    for line in fm_raw.split("\n"):
+        m = _FM_TOP_KEY_RE.match(line)
+        if m:
+            if cur_key is not None:
+                blocks.append((cur_key, "\n".join(cur)))
+            cur_key, cur = m.group(1), [line]
+        elif cur_key is not None:
+            cur.append(line)
+        else:
+            # 首个顶层键之前的内容（正常不该有），归入计数部分
+            blocks.append(("", line))
+    if cur_key is not None:
+        blocks.append((cur_key, "\n".join(cur)))
+
+    kept = [b for k, b in blocks if k not in _CONTRACT_KEYS]
+    dropped = [b for k, b in blocks if k in _CONTRACT_KEYS]
+    return "\n".join(kept), "\n".join(dropped)
+
+
 def _last_dynamic_body(text: str) -> str:
     ms = list(_DYNAMIC_RE.finditer(text))
     return ms[-1].group(1) if ms else ""
@@ -426,6 +480,15 @@ def _measure_role(path: Path) -> dict:
     """对单个角色文件做可量化测量，返回测量字典。"""
     text = path.read_text(encoding="utf-8")
     fm, body, fm_chars = _parse_frontmatter(text)
+
+    # 规范 §11 契约字段拆出单独计数，不计入 §4 软上限（见 _split_fm_contract）
+    _fm_raw_match = re.match(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n", text, re.DOTALL)
+    if _fm_raw_match:
+        _kept, _contract = _split_fm_contract(_fm_raw_match.group(1))
+        fm_contract_chars = len(_fm_raw_match.group(1)) - len(_kept)
+    else:
+        fm_contract_chars = 0
+    fm_governed_chars = fm_chars - fm_contract_chars
 
     dynamic_body = _last_dynamic_body(body)
 
@@ -605,7 +668,10 @@ def _measure_role(path: Path) -> dict:
         "is_meta": is_meta,
         "is_tiny": is_tiny,
         # lengths
-        "frontmatter_chars": fm_chars,
+        "frontmatter_chars": fm_governed_chars,
+        # 信息项，不设阈值（阈值无实测依据）。契约膨胀仍可见，但不再误报为 FM 超限。
+        "frontmatter_contract_chars": fm_contract_chars,
+        "frontmatter_chars_total": fm_chars,
         "body_no_dynamic_chars": body_no_dynamic_chars,
         "dynamic_chars": len(dynamic_body),
         "max_section_chars": max_section,
@@ -625,7 +691,7 @@ def _measure_role(path: Path) -> dict:
         "oversized_patches": oversized_patches,
         "marker_literal_in_body": marker_literal_in_body,
         # limits exceeded
-        "fm_over_limit": fm_chars > LIMITS["frontmatter"],
+        "fm_over_limit": fm_governed_chars > LIMITS["frontmatter"],
         "body_over_limit": body_no_dynamic_chars > LIMITS["body_no_dynamic"],
         "section_over_limit": max_section > LIMITS["single_section"],
         "dynamic_over_limit": len(dynamic_body) > LIMITS["dynamic"],
@@ -660,9 +726,13 @@ def _format_measurements(measures: list[dict]) -> str:
         if m["oversized_patches"]:
             over.append(f"P{m['oversized_patches']}")
 
+        # 契约字符只在非零时附注，避免给 24 个无契约角色的表格加噪音
+        _contract = m.get("frontmatter_contract_chars") or 0
+        fm_cell = f"{m['frontmatter_chars']}" + (f" (+{_contract}契约)" if _contract else "")
+
         lines.append(
             f"| {m['role']} | {m['domain']} "
-            f"| {m['frontmatter_chars']} "
+            f"| {fm_cell} "
             f"| {m['body_no_dynamic_chars']} "
             f"| {m['max_section_chars']}(§{m['max_section_id']}) "
             f"| {m['dynamic_chars']} "
