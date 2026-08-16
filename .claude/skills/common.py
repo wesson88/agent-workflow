@@ -985,97 +985,23 @@ def read_input_files(
     return "\n\n".join(parts)
 
 
-# ── 输出文件原子写入（带 Windows 重试）───────────────────
-from engine.obsidian_io import _atomic_replace_with_retry  # noqa: E402
-
-
-def write_output_atomic(dest_path: Path, content: str) -> None:
-    dest_path = Path(dest_path)
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(
-        "w",
-        dir=dest_path.parent,
-        delete=False,
-        encoding="utf-8",
-        suffix=".tmp",
-        newline="\n",
-    ) as tf:
-        tf.write(content)
-        tmp = tf.name
-    _atomic_replace_with_retry(tmp, dest_path)
-
-
-# ── Claude 多文件输出解析 ────────────────────────────────
-_FILE_BLOCK_RE = re.compile(
-    r"<!--\s*FILE:\s*(.+?)\s*-->\n(.*?)<!--\s*/FILE\s*-->",
-    re.DOTALL,
+# ── 输出解析与原子写入（re-export，实现在 output_parser.py）──────────────
+#
+# 2026-08-16：此前本文件**自己留了一份副本**，与 output_parser.py 逐字重复
+# （只差注释），而模块 docstring 却声称「已拆分为四个子模块，本文件作为
+# re-export 聚合入口」—— 声明与实现不符。后果是 S3 修复必须改两处，漏一处
+# 就等着下次重构把 bug 带回来。这里改成真 re-export，删掉重复实现。
+#
+# 内部辅助（_FILE_BLOCK_RE / _strip_outer_code_fence /
+# _normalize_empty_file_placeholder）一并 re-export，保历史 import 兼容。
+from output_parser import (  # noqa: E402, F401
+    _FILE_BLOCK_RE,
+    _normalize_empty_file_placeholder,
+    _split_residual_blocks,
+    _strip_outer_code_fence,
+    parse_claude_output_to_files,
+    write_output_atomic,
 )
-
-# 匹配文件首尾被 markdown 代码围栏包裹的情况：
-#   ```python
-#   ... 实际代码 ...
-#   ```
-# Claude 偶尔违反 OUTPUT_FORMAT_SPEC 给代码加围栏，写入磁盘前剥离一层。
-# 仅当首尾各有一对围栏时才剥离，避免误删合法 markdown 内的代码块。
-_LEADING_FENCE_RE = re.compile(
-    r"\A\s*```[^\n`]*\n",   # 开始：```（可选语言标签）+ 换行
-)
-_TRAILING_FENCE_RE = re.compile(
-    r"\n```\s*\Z",          # 结尾：换行 + ```
-)
-
-# 匹配纯 HTML/markdown 注释占位（如 __init__.py 被写成 `<!-- empty -->`）：
-# Claude 偶尔在"应该空文件"的 FILE 块里塞一行注释当占位，但 .py 解释器
-# 会把它当语法错误。检测全文都是 <!-- ... --> 注释时，写空文件。
-_PURE_COMMENT_RE = re.compile(
-    r"\A\s*(?:<!--.*?-->\s*)+\Z",
-    re.DOTALL,
-)
-
-
-def _strip_outer_code_fence(content: str) -> str:
-    """若 content 整体被一对 markdown 代码围栏包裹，剥离外层。
-
-    保守策略：只在 **同时** 检测到首尾匹配的围栏时剥离，避免误伤含
-    内嵌代码块的 markdown 文档。
-    """
-    head = _LEADING_FENCE_RE.search(content)
-    tail = _TRAILING_FENCE_RE.search(content)
-    if not head or not tail:
-        return content
-    inner = content[head.end():tail.start()]
-    # 保证文件末尾有换行
-    return inner if inner.endswith("\n") else inner + "\n"
-
-
-def _normalize_empty_file_placeholder(content: str) -> str:
-    """若 content 仅包含 HTML/markdown 注释（无实际代码），写空文件。
-
-    场景：Claude 在 `__init__.py` 等本应空的 FILE 块里写
-        <!-- empty -->
-    或
-        <!-- empty – marks src/backend as a Python package -->
-    这些进 .py 文件会触发 SyntaxError。
-    """
-    if _PURE_COMMENT_RE.match(content):
-        return ""
-    return content
-
-
-def parse_claude_output_to_files(raw_output: str) -> dict:
-    """解析 Claude 输出中的 <!-- FILE: path --> ... <!-- /FILE --> 块。
-
-    返回 {相对路径: 内容}。注意路径中的 {project} 占位符不在此处替换，
-    由调用方在写盘前用 engine.config.resolve_path 处理。
-    自动剥离整体被 markdown 代码围栏包裹的内容（Claude 偶尔违反约定）。
-    """
-    results = {}
-    for m in _FILE_BLOCK_RE.finditer(raw_output):
-        rel = m.group(1).strip()
-        content = _strip_outer_code_fence(m.group(2))
-        content = _normalize_empty_file_placeholder(content)
-        results[rel] = content
-    return results
 
 
 # ── 时间与审计（P10.5 A1：抽 engine.audit 单点入口，此处仅 re-export 保向后兼容）

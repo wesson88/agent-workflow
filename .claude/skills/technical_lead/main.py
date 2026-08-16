@@ -795,6 +795,57 @@ def _run_module_manifest_mode(
     return 0
 
 
+# 索引表里的任务行：`| T01 | 标题 | 3 | — |`（也吃 T03a 这类带字母后缀的）
+_INDEX_TASK_ROW_RE = re.compile(r"^\|\s*(T\d+[a-z]?)\s*\|", re.MULTILINE)
+
+
+def _verify_task_index_completeness(
+    output_files: dict, side: str
+) -> tuple[list[str], list[str]]:
+    """比对「索引声明的任务」与「实际产出的任务卡」，返回 (declared, missing)。
+
+    ## 为什么需要这道校验（S4 · mini-ledger §3，2026-05-21）
+
+    Plan/Detail 拆分失败后会回退单 call 兜底，由一次调用产出
+    「索引 + 全部任务卡」。当 max_tokens 装不下时，LLM 会**产出一个完整的索引、
+    但只写出前几个任务卡** —— 索引里白纸黑字写着 T01–T05，磁盘上只有 T01–T03。
+
+    实战后果：mini-ledger 少了 `给前端-T04.md`（记录列表筛选+翻页）和
+    `给前端-T05.md`（月度汇总+饼图），而流程**判成功继续往下走**，
+    下游前端工程师照着不完整的指令集开工。
+
+    检测不到的原因是没有 ground truth —— 单 call 模式下没人知道该有几个任务。
+    但索引是 LLM 自己的产出，它自己声明了任务清单：**拿它当自证的 ground truth**。
+
+    CLI 路径拿不到 API 的 `stop_reason`（`engine/llm.py` 也从未透出该字段），
+    所以只能从产出形态反推。上游 `parse_claude_output_to_files` 还有一道
+    「声明块数 vs 恢复块数」的截断告警（S3），两者互补：
+    那道抓「块没闭合」，这道抓「块压根没生成」。
+    """
+    index_body = next(
+        (
+            body for path, body in output_files.items()
+            if f"给{side}-索引" in Path(path).name
+        ),
+        None,
+    )
+    if index_body is None:
+        return [], []
+
+    declared = _INDEX_TASK_ROW_RE.findall(index_body)
+    if not declared:
+        return [], []
+
+    task_re = re.compile(rf"给{re.escape(side)}-(T\d+[a-z]?)\.md$")
+    produced = {
+        m.group(1)
+        for path in output_files
+        if (m := task_re.search(Path(path).name.replace("\\", "/")))
+    }
+    missing = [t for t in declared if t not in produced]
+    return declared, missing
+
+
 def main() -> int:
     args = parse_args()
     task = (args.task or "").strip()
@@ -1025,6 +1076,31 @@ def main() -> int:
             written.append(f"10-项目/{project}/指令/{fallback_name}")
             print(f"[{ROLE}] 未检测到 FILE 标签，降级写入 {dest}")
         else:
+            # S4：落盘前先验完整性。索引声明了 T01-T05 却只产出 T01-T03 时，
+            # 旧行为是判成功继续往下走，下游照着不完整的指令集开工（mini-ledger 实战）。
+            declared, missing = _verify_task_index_completeness(output_files, side)
+            if missing:
+                print(
+                    f"[{ROLE}] ❌ {side}单 call 兜底产出不完整："
+                    f"索引声明 {len(declared)} 个任务 {declared}，"
+                    f"缺 {missing}（最可能是 max_tokens 装不下索引+全部任务卡）。\n"
+                    f"    已产出的文件不写盘 —— 半套指令集比没有更危险，"
+                    f"下游会照着它开工。请重跑本步骤。",
+                    file=sys.stderr,
+                )
+                set_role_status(
+                    ROLE, status="failed",
+                    increment_consecutive_failures=True, increment_error=True,
+                    enforce_transition=False,
+                )
+                append_audit({
+                    "timestamp": utc_now(), "role": ROLE, "project": project,
+                    "task": task, "result": "failed",
+                    "error": "fallback_incomplete_task_set",
+                    "side": side, "declared": declared, "missing": missing,
+                })
+                return 1
+
             for rel_path, content in output_files.items():
                 rel_resolved = rel_path.replace("{project}", project)
                 dest = resolve_path(rel_resolved, project)
