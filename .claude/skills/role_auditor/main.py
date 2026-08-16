@@ -36,6 +36,11 @@ from common import (
     build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, parse_targets,
+    # 私有名，但**必须**共用：审计器量的必须是引擎真正注入的那段文本。
+    # 若在此另写一份抽取逻辑，两边一漂移审计就再次失真 —— 2026-08-16 前的
+    # 口径错配（把不进 prompt 的 §7/§8 算进正文，4 假阳性）就是这么来的。
+    # 参 [[feedback_contract_three_layers]]：同一契约不允许两份实现。
+    _extract_role_prompt_sections,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -94,9 +99,48 @@ LIMITS = {
     # 的膨胀源是 output_contract/input_contract 模板，属于真该治理的对象，保留信号。
     # 复盘见 vault [[Obsidian可视化仪表盘建设-2026-08-15]]。
     "frontmatter": 2000,
-    "body_no_dynamic": 5000,
+    # ── 以下四项 2026-08-16 补依据 + 修口径 ────────────────────────────
+    # 背景：这四个值同生于 66c0cb1（2026-05-10），当时 LIMITS 上方只有一行
+    # `# 长度上限（字符数）`，**五个值全裸无依据**。vault `角色基因规范.md` §4
+    # 仅为两个 5000 写了「≈ 1400 tokens，配合上下文注入仍在合理范围」——
+    # 「合理范围」正是项目 CLAUDE.md 反例清单点名的无效依据；且 5000/1400
+    # ≈ 3.57 chars/token 与 frontmatter 800 那条同源，而后者已被证伪为概念错配。
+    # 佐证该批值属 a priori 拍脑袋：66c0cb1 自带的首轮审计基线即写着
+    # 「后端工程师正文 11377 chars（规范上限 5000）」—— 先定死再去量，一量就 2.3 倍。
+    #
+    # 本轮全量实测 26 角色重定依据。**关键发现：口径错了，值没错**。
+    #
+    # `prompt_body`（原 `body_no_dynamic`，改名因旧名描述的就是错的量）：
+    #   旧口径 = 整个 body 减 DYNAMIC，**把 §7/§8 也算进去**；而业务角色走
+    #   `common._extract_role_prompt_sections` 严格 §1-§6，§8 版本历史一个字
+    #   不进 prompt。实测 23 个业务角色：旧口径合计 87264 chars，真进 prompt
+    #   61838，**虚高 29%**（技术主管虚高 48%：6683 计入 / 3491 实注入）。
+    #   后果：旧口径报 4 个超限（技术主管/前端/后端/架构师），按真实注入量
+    #   **0 个超限** —— 4 假阳性 / 0 真阳性，指标已完全失真。
+    #   更反常的是它**惩罚写文档**：本轮给技术主管补 v1.8.0 版本历史（950 chars，
+    #   记录治理依据，正是 CLAUDE.md 硬性要求）后，旧指标从 5733 涨到 6683。
+    #   依据：**实测断层**。改口径后 26 角色注入量 max=5269（复盘者，元角色走
+    #   meta_full 路径）、次高 4174（后端工程师），断层宽 1095；5000 落在
+    #   (4174, 5269) 内，命中 1/26。中位 2636 / 均值 2761 / min 1142。
+    "prompt_body": 5000,
+    # `single_section` 同步改口径：只量注入范围内的章节（业务 §1-§6 / 元角色
+    #   全 body 减 DYNAMIC 与版本历史），不再把 §8 版本历史算成"最大章节"。
+    #   依据：**实测断层**。改口径后 158 个章节：超 1500 的 6 个（复盘者 §3 2388 /
+    #   后端 §6 2052 / 前端 §6 1878 / 架构师 §6 1763 / 创意记录员 §3 1618 /
+    #   技术主管 §5 1537），其下一档是 1173（知识沉淀者 §4）；断层 (1173, 1537)
+    #   宽 364，1500 落在其中，命中率 6/158 = 3.8%。中位 306。
     "single_section": 1500,
+    # `dynamic`：DYNAMIC 区确实进 prompt（按 [KEEP]/[GRADUATE?] label 过滤后
+    #   注入，见 P10.5 B4），故 token 口径本身成立，无需改。
+    #   依据：**实测上界 + 明标未校准**。26 角色实测 max=2037（后端工程师，
+    #   仅为限额 41%）、中位 99、**超限 0 个**。即本阈值当前无实战命中，
+    #   5000 属沿用 66c0cb1 的未校准上界，保留作堆积护栏。
+    #   ⚠️ 待补丁囤积真发生过 ≥ 1 次后按实测重定（已挂 98-待办）。
     "dynamic": 5000,
+    # `single_patch` 依据：**实测断层**。25 条 patch：超 1200 的 2 条
+    #   （制作人 #1 1449 / 作曲 #1 1278），其下一档 984（后端 #2）；
+    #   断层 (984, 1278) 宽 294，1200 落在其中，命中 2/25 = 8%。
+    #   分布双峰：21 条 ≤ 125（多为 125 字样板头），其余 700-1449。
     "single_patch": 1200,
     # 2026-08-13 新增：业务角色 §1-§6 单章节最小有效正文（剥离 HTML 注释与空白后）
     # 依据：**实测断层**。2026-08-13 全量测了本库 22 个业务角色的 §1-§6 有效字符
@@ -492,13 +536,27 @@ def _measure_role(path: Path) -> dict:
 
     dynamic_body = _last_dynamic_body(body)
 
-    # 去掉 DYNAMIC 区域计算 body 长度
+    # 去掉 DYNAMIC 区域计算 body 长度。
+    # ⚠️ 这是**可维护性**口径（含 §7/§8），仅作信息项报出，**不再用于判超限**。
     body_no_dynamic = _DYNAMIC_RE.sub(
         "<!-- DYNAMIC_START --><!-- DYNAMIC_END -->", body
     )
     body_no_dynamic_chars = len(body_no_dynamic)
 
-    section_chars = _section_char_counts(body_no_dynamic)
+    # ── prompt 口径（2026-08-16 修）─────────────────────────────────
+    # 判超限只看**真正注入 system_prompt 的那段**：业务角色 §1-§6 /
+    # 元角色全 body 减 DYNAMIC 与版本历史。直接复用引擎的抽取函数，不另写一份。
+    # 抽取失败（业务角色缺章 / 乱序）时降级回旧口径并置 extract_ok=False ——
+    # 审计器不能因单个角色结构不合规就崩掉整轮，那类问题由 T2.7 lint 单独报。
+    _domain = str(fm.get("domain") or "").strip()
+    try:
+        prompt_text, prompt_path_used = _extract_role_prompt_sections(body, _domain)
+        extract_ok = True
+    except Exception as _e:
+        prompt_text, prompt_path_used, extract_ok = body_no_dynamic, f"fallback:{_e.__class__.__name__}", False
+    prompt_body_chars = len(prompt_text)
+
+    section_chars = _section_char_counts(prompt_text)
     max_section = max(section_chars.values(), default=0)
     max_section_id = max(section_chars, key=section_chars.get, default="?") if section_chars else "?"
 
@@ -672,7 +730,12 @@ def _measure_role(path: Path) -> dict:
         # 信息项，不设阈值（阈值无实测依据）。契约膨胀仍可见，但不再误报为 FM 超限。
         "frontmatter_contract_chars": fm_contract_chars,
         "frontmatter_chars_total": fm_chars,
+        # 可维护性口径（含 §7/§8）：信息项，**不判超限**（2026-08-16 起）
         "body_no_dynamic_chars": body_no_dynamic_chars,
+        # prompt 口径：真正注入 system_prompt 的字符数，判超限只看这个
+        "prompt_body_chars": prompt_body_chars,
+        "prompt_path_used": prompt_path_used,
+        "prompt_extract_ok": extract_ok,
         "dynamic_chars": len(dynamic_body),
         "max_section_chars": max_section,
         "max_section_id": max_section_id,
@@ -692,7 +755,7 @@ def _measure_role(path: Path) -> dict:
         "marker_literal_in_body": marker_literal_in_body,
         # limits exceeded
         "fm_over_limit": fm_governed_chars > LIMITS["frontmatter"],
-        "body_over_limit": body_no_dynamic_chars > LIMITS["body_no_dynamic"],
+        "body_over_limit": prompt_body_chars > LIMITS["prompt_body"],
         "section_over_limit": max_section > LIMITS["single_section"],
         "dynamic_over_limit": len(dynamic_body) > LIMITS["dynamic"],
         # T2.7 prompt 白名单契约 lint
@@ -710,7 +773,12 @@ def _format_measurements(measures: list[dict]) -> str:
     lines = [
         "# 程序层测量结果（字符长度 / 字段合规 / DYNAMIC 合规）",
         "",
-        "| 角色 | domain | FM字符 | 正文字符 | 最大章节字符(§) | DYNAMIC字符 | 超限 | 缺必填 | 有禁止字段 | DYNAMIC对 | 补丁数 |",
+        "> **正文列口径（2026-08-16 修）**：`进prompt` 是真正注入 system_prompt 的字符数"
+        "（业务角色 §1-§6 / 元角色全 body 减 DYNAMIC 与版本历史），**判超限只看它**；"
+        "`全文` 含 §7/§8，仅作可维护性信息项。旧版把 §8 版本历史算进超限判定，"
+        "导致 4 假阳性 / 0 真阳性，并反向惩罚写版本历史。",
+        "",
+        "| 角色 | domain | FM字符 | 正文(进prompt/全文) | 最大章节字符(§) | DYNAMIC字符 | 超限 | 缺必填 | 有禁止字段 | DYNAMIC对 | 补丁数 |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for m in measures:
@@ -733,7 +801,8 @@ def _format_measurements(measures: list[dict]) -> str:
         lines.append(
             f"| {m['role']} | {m['domain']} "
             f"| {fm_cell} "
-            f"| {m['body_no_dynamic_chars']} "
+            f"| {m['prompt_body_chars']}/{m['body_no_dynamic_chars']}"
+            f"{'' if m.get('prompt_extract_ok', True) else ' ⚠️降级'} "
             f"| {m['max_section_chars']}(§{m['max_section_id']}) "
             f"| {m['dynamic_chars']} "
             f"| {' '.join(over) or '—'} "
@@ -757,6 +826,11 @@ def _format_measurements(measures: list[dict]) -> str:
             issues.append(
                 f"规范 §3.4a 版本漂移：frontmatter `version: {m['version']}` "
                 f"≠ §8 版本历史最大版本号 {m['section8_max_version']}"
+            )
+        if not m.get("prompt_extract_ok", True):
+            issues.append(
+                f"prompt 抽取失败（`{m.get('prompt_path_used')}`）→ 正文口径已降级为"
+                f"「全文减 DYNAMIC」，本行超限判定偏严不可信；根因见下方 T2.7 lint 段"
             )
         if not m["has_dynamic_markers"]:
             issues.append("缺 DYNAMIC 标记对（<!-- DYNAMIC_START/END -->）")
