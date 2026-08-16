@@ -256,30 +256,78 @@ def resolve_target(target: str, vault_root: Path | None = None) -> Path | None:
 
 
 # ── 3. load：读文件 + 章节抽取 + 截断 ────────────────────
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$")
+
+
+def iter_lines_with_fence_state(lines):
+    """逐行 yield `(line, in_fence)`，`in_fence=True` 表示该行属于代码围栏。**公共 API**。
+
+    ## 为什么必须有这个（2026-08-16 加）
+
+    规则文档普遍用 ```` ```markdown ```` 块展示**产出模板**，模板里带自己的
+    `## 1. xxx` 标题。任何按标题切分的算法若不识别围栏，就会把模板标题当成
+    文档的同级章节 —— 抽取当场中止。
+
+    实测后果（修复前，`00-系统/规则/music/产物schema.md`）：8 个音乐角色的
+    章节级 `rule_refs` 全部被截断，36 条里 14 条丢失 > 30%，合计应注入
+    21531 chars 实际只到 4525（**丢 79%**）。最严重的「4. 曲作.md」只注入
+    79/1088 chars（93%），LLM 拿到的"产物契约"实为「标题 + 一行位置 + 一个
+    空的 ```markdown 开头」。且 `extract_section` 返回 `hit=True`，
+    **不报错、不回退全文、零告警** —— 与 [[产物frontmatter链接写法-产出方治理-2026-08-16]]
+    同属静默失效家族。
+
+    ## 为何提为共享 API
+
+    同一 bug 2026-08-13 已在 `role_auditor._split_sections` 修过一次（该处
+    注释明写"不跳围栏的话模板里的 `## 1.` 会把真正的 §1 整个覆盖掉"），
+    但修法**没有传播**到本文件与 `skills/input_reader.py`。本次一次性收口：
+    三处共用本函数，杜绝第四份实现（参 [[feedback_contract_three_layers]]）。
+
+    闭合规则按 CommonMark：闭合行需同字符、长度 ≥ 开启长度、**且不带 info
+    string**。围栏标记行本身一律记为 `in_fence=True`（它不可能是标题）。
+    """
+    fence: tuple[str, int] | None = None
+    for line in lines:
+        m = _FENCE_RE.match(line)
+        if m:
+            marker, info = m.group(1), m.group(2).strip()
+            ch, ln = marker[0], len(marker)
+            if fence is None:
+                fence = (ch, ln)
+            elif ch == fence[0] and ln >= fence[1] and not info:
+                fence = None
+            yield line, True
+            continue
+        yield line, fence is not None
+
+
 def extract_section(content: str, section: str) -> tuple[str, bool]:
     """从 Markdown 文档抽取指定章节。返回 (text, hit)。**公共 API**。
 
-    匹配规则与 skills.common._extract_sections 对齐：标题文字**包含**关键词
-    （大小写不敏感）即命中；遇到同级或更高级标题退出。
+    匹配规则与 skills.input_reader._extract_sections 对齐：标题文字**包含**
+    关键词（大小写不敏感）即命中；遇到同级或更高级标题退出。
     返回 hit=False 时调用方应回退全文。
+
+    **代码围栏内的标题不参与切分**（2026-08-16 修，见
+    `iter_lines_with_fence_state` docstring 的实测数据）。
 
     2026-07-18 评审去重：原为私有 `_extract_section`，skill_trigger 为避免
     引私有 API 复制了 30 行同款算法；现提为公共 API 供两处共用。
     """
     if not section:
         return content, True
-    lines = content.splitlines(keepends=True)
     out: list[str] = []
     in_section = False
     current_level = 0
     key = section.lower()
-    for line in lines:
+    for line, in_fence in iter_lines_with_fence_state(content.splitlines(keepends=True)):
         heading = None
-        for lvl in range(1, 7):
-            prefix = "#" * lvl + " "
-            if line.startswith(prefix):
-                heading = (lvl, line[lvl + 1:].strip())
-                break
+        if not in_fence:
+            for lvl in range(1, 7):
+                prefix = "#" * lvl + " "
+                if line.startswith(prefix):
+                    heading = (lvl, line[lvl + 1:].strip())
+                    break
         if heading:
             lvl, title = heading
             is_target = key in title.lower()

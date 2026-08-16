@@ -37,17 +37,29 @@ def _extract_sections(content: str, sections: list[str]) -> str:
     """
     if not sections:
         return content
-    lines = content.splitlines(keepends=True)
+    # 围栏感知：规则/产物文档常内嵌 ```markdown 模板，模板自带 `## N. xxx`
+    # 标题。不跳围栏就会把模板标题当成同级章节，抽取当场中止 —— 实测在
+    # `产物schema.md` 上导致 8 个音乐角色的契约注入丢 79%（详见
+    # engine.wikilink.iter_lines_with_fence_state docstring）。
+    # 共用 engine 侧唯一实现，不再自带一份（2026-08-16）。
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from engine.wikilink import iter_lines_with_fence_state
+        tagged = list(iter_lines_with_fence_state(content.splitlines(keepends=True)))
+    except Exception:
+        # 引擎不可用时降级为旧行为（全部视作非围栏），不阻断主路径
+        tagged = [(ln, False) for ln in content.splitlines(keepends=True)]
     result: list[str] = []
     in_section = False
     current_level = 0
-    for line in lines:
+    for line, in_fence in tagged:
         heading = None
-        for lvl in range(1, 7):
-            prefix = "#" * lvl + " "
-            if line.startswith(prefix):
-                heading = (lvl, line[lvl + 1:].strip())
-                break
+        if not in_fence:
+            for lvl in range(1, 7):
+                prefix = "#" * lvl + " "
+                if line.startswith(prefix):
+                    heading = (lvl, line[lvl + 1:].strip())
+                    break
         if heading:
             lvl, title = heading
             is_target = any(s.lower() in title.lower() for s in sections)
