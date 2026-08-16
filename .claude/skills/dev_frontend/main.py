@@ -267,6 +267,8 @@ def main() -> int:
 
         # P8.6：模块化模式下加"单模块聚焦"约束段 + 追加进度流/测试报告要求
         module_focus = render_module_focus_hint(module_id, project)
+        # 路径**示例**，取 技术栈.md §5 的默认布局——改默认值请改那份规则并同步这里；
+        # 实际路径以指令清单声明的为准，见 user_prompt。
         base_required = [
             "src/frontend/index.html",
             "src/frontend/app.js",
@@ -294,12 +296,13 @@ def main() -> int:
             "---\n"
             f"本轮任务：{task or f'实现 {task_label} 中的前端代码'}\n\n"
             "请按指令清单完整实现前端：\n"
-            "  - 入口 HTML + 主 JS：`src/frontend/index.html`、`src/frontend/app.js`\n"
-            "  - 公共组件：`src/frontend/components/...`\n"
-            "  - 页面：`src/frontend/pages/...`\n"
-            "  - 状态管理：`src/frontend/store/...`\n"
-            "  - 样式：`src/frontend/styles/...`\n"
-            "  - 测试：`tests/frontend/...`\n\n"
+            # 2026-08-16：原为逐条硬编码 `src/frontend/...`。目录布局是**项目级架构
+            # 决策**，写死在跨项目模板里会与项目 spec 对撞（后端侧已因此产出孤儿
+            # 文件，见 技术栈.md §5.2）。改为「引用 canonical 规则 + 指令清单优先」。
+            "  - **代码与测试路径**：以本轮指令清单显式声明的路径为准；"
+            "指令未声明时按 `技术栈.md §5` 默认布局"
+            "（入口/组件/页面/状态/样式在 `src/frontend/` 下分目录，测试在 `tests/frontend/`）。"
+            "若两者冲突，以指令清单为准并在产出中显式说明依据，不要静默二选一。\n\n"
             "技术栈严格按 `00-系统/规则/se/技术栈.md`；需含全局 Error Boundary、"
             "loading/error 状态、响应式适配。\n"
             + render_required_outputs(base_required)

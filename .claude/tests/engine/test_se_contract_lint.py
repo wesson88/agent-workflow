@@ -500,3 +500,94 @@ class TestContractSchema:
                     f"  {name}.{ctype} 契约展开与 {key} 不等价：\n" + "\n".join(detail)
                 )
         assert not broken, "契约首个 template 与 declared 路径语义不等价：\n" + "\n".join(broken)
+
+
+class TestLayoutConventionSingleSource:
+    """项目布局 / API 横切要求的 canonical 出处唯一性（2026-08-16 S2）。
+
+    背景：huashu-demo 2026-07-19 事故 —— 布局约定当时**没有 canonical 出处**，
+    只硬编码在 dev_backend/dev_frontend 的 user_prompt 里，上游架构师 / 技术主管
+    完全看不到，产任务卡时无据可循 → TL 用 `backend/`、引擎模板要 `src/backend/`，
+    两套权威指令对撞，T06 那轮产出落进 `backend/tests/test_smoke.py` 成为孤儿。
+
+    修法（C 方案）：canonical 默认值收进 `技术栈.md` §5/§6（四个 SE 角色都全文
+    注入该文件），引擎模板改为「引用规则 + 指令清单/项目 spec 优先」。
+    本 lint 守两头：规则章节不许被删，模板不许把硬编码写回去。
+    """
+
+    _TECH_STACK_REL = "00-系统/规则/se/技术栈.md"
+
+    def test_canonical_sections_exist(self):
+        """§5 布局 / §6 API 横切要求是 dev_* prompt 指向的锚点，删了就成断链。"""
+        text = (VAULT_ROOT / self._TECH_STACK_REL).read_text(encoding="utf-8")
+        missing = [
+            s for s in ("## 5. 项目代码布局", "## 6. API 横切要求")
+            if s not in text
+        ]
+        assert not missing, (
+            f"{self._TECH_STACK_REL} 缺少 canonical 章节 {missing}；"
+            f"dev_backend / dev_frontend 的 user_prompt 指向它们，删除会造成断链"
+        )
+
+    def test_tech_stack_reaches_all_four_se_roles(self):
+        """四个角色都得真读到这份文件，否则 canonical 出处形同虚设。
+
+        这正是 2026-08-16 S1 的教训：[[产物schema]] `## 通用规则` 写了约定，
+        但没进任何 prompt —— 该节要求的 produced_by 在 133 份产物里出现 0 次。
+        """
+        broken = []
+        for skill in ("chief_architect", "technical_lead", "dev_backend", "dev_frontend"):
+            main_py = PROJECT_ROOT / ".claude" / "skills" / skill / "main.py"
+            text = main_py.read_text(encoding="utf-8")
+            if "tech_stack" not in text:
+                broken.append(f"  {skill}/main.py 没有引用 tech_stack")
+                continue
+            if "read_input_files" not in text:
+                broken.append(f"  {skill}/main.py 未调用 read_input_files")
+        assert not broken, (
+            "技术栈.md 是布局/横切约定的 canonical 出处，四个 SE 角色必须都注入它：\n"
+            + "\n".join(broken)
+        )
+
+    def test_dev_prompts_do_not_hardcode_layout(self):
+        """user_prompt 里不许再把路径布局写成无条件指令。
+
+        禁的是「路径以 `src/backend/...` 开头」这类命令式措辞。
+        裸路径（`src/backend/main.py` 这种出现在 required 示例清单里的）不禁 ——
+        它们已在注释里标注为「取 技术栈.md §5 默认布局」，且 prompt 明确说了以指令清单为准。
+
+        实现是**整文件文本匹配**（含注释），不做上下文区分：命令式措辞即便写在注释里
+        也会被拦。宁可误伤一条注释，也不放过一次回退。
+        """
+        banned = (
+            "路径以 `src/backend/",
+            "路径以 `tests/backend/",
+            "入口 HTML + 主 JS：`src/frontend/",
+        )
+        broken = []
+        for skill in ("dev_backend", "dev_frontend"):
+            text = (PROJECT_ROOT / ".claude" / "skills" / skill / "main.py").read_text(
+                encoding="utf-8"
+            )
+            for phrase in banned:
+                if phrase in text:
+                    broken.append(f"  {skill}/main.py 出现命令式硬编码：{phrase}...")
+        assert not broken, (
+            "布局是项目级架构决策，不能写死在跨项目模板里"
+            "（huashu-demo T06 因此产出孤儿文件）：\n" + "\n".join(broken)
+        )
+
+    def test_dev_backend_auth_requirement_has_exception_clause(self):
+        """鉴权默认开（用户 2026-08-16 决策），但必须给项目 spec 留排除口。
+
+        原文是无条件的「所有 API 必须含输入校验、鉴权、结构化日志」，与
+        huashu-demo「PRD 非目标明确排除账号体系」直接对撞。
+        """
+        text = (PROJECT_ROOT / ".claude" / "skills" / "dev_backend" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        assert "鉴权" in text, "鉴权要求不应被整段删除 —— 用户决策是默认开"
+        assert "例外" in text and "显式排除" in text, (
+            "鉴权要求必须带排除条款（PRD / 系统设计显式排除时按项目决策），"
+            "否则会重演 huashu-demo T06 的模板 vs spec 对撞"
+        )
