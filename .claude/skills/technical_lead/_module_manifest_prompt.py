@@ -65,7 +65,10 @@ graph LR
 <!-- /FILE -->"""
 
 
-_PROMPT_TEMPLATE = """**本轮 output_contract.artifacts_pattern = module_manifest**（模块化开发工作流）。按角色 md §5.7 分支执行。
+_PROMPT_TEMPLATE = """**本轮 output_contract.artifacts_pattern = module_manifest**（模块化开发工作流）。
+
+本段即该模式的**完整产出契约**。角色 md §5 只在步骤 3 指出存在本分支，不复述细节 ——
+2026-08-16 前两处各存一份，既让 legacy 模式白吃 2795 chars，又埋下双份漂移的隐患。
 
 ### 执行上下文（关键，务必先读）
 
@@ -100,25 +103,60 @@ _PROMPT_TEMPLATE = """**本轮 output_contract.artifacts_pattern = module_manife
 - ❌ `10-项目/{project}/指令/给后端-T0N.md` / `给前端-T0N.md`
 - ❌ `10-项目/{project}/指令/给后端-索引.md` / `给前端-索引.md`
 
-### 「模块清单.md」结构硬约束（引擎 manifest_validator fail-closed）
+### 「模块清单.md」结构硬约束（引擎 manifest_validator fail-closed，违反即 ManifestValidationError）
 
-- 必含 `## 结构化（DAG 原始数据，引擎消费）` H2 段 + 内嵌 ` ```yaml``` ` 块
+- 必含 `## 结构化（DAG 原始数据，引擎消费）` H2 段 + 内嵌一个 ` ```yaml``` ` 块
 - 顶层 `nodes:` 是 list，至少 1 项
-- 每 node 必填：`id` / `title` / `role` / `depends_on` / `status`
-- `role` ∈ `{{backend, frontend}}`
-- `status` 初始一律 `pending`
-- `depends_on` 是 list（无依赖用 `[]`），引用的 id 必须存在，禁止环 / 自依赖
-- id 全局唯一（推荐 T01/T02/... 命名）
+- 每 node 必填：`id` / `title` / `role` / `depends_on` / `status`；**缺一即 fail**
+- `id` 全局唯一，禁止重复；建议 `T01/T02/...` 或 `M1a/M1b/...` 命名
+- `title` 为模块简短标题，**8-16 字**
+- `## 概览` 段只写拆解思路 + 依赖概览，**不要复述 PRD / 系统设计原文，指向即可**
+- `role` ∈ `{{backend, frontend}}`（其它值拒载）
+- `status` 初始一律 `pending`（`in_progress` / `done` / `blocked` 由引擎在 engineer / gate 阶段改写）
+- `depends_on` 是 list，可为空 `[]`；引用的每个 id **必须在 nodes 里存在**
+- **禁止自依赖、禁止环**（Kahn 拓扑排序失败即 fail）
+- 允许可选字段 `estimate_hours` / `user_story` / `notes`（不影响校验）
 - 建议加 `## 拓扑（Mermaid）` 段便于 Obsidian 渲染
 
-### 「模块/<id>-<slug>.md」结构
+### title_slug 规则（`模块/<module_id>-<title_slug>.md` 用）
 
-5 段依次：**目标 / 输入 / 输出 / 验收 / 失败模式**（详见角色 md §5.7 模板）
+- 从 title 生成，保留中文，去空格与 `/ \\ : * ? " < > |` 特殊字符，长度 ≤ 30 字符
+- 例：title="数据模型 & 校验" → slug="数据模型-校验"
 
-### title_slug 规则
+### 「模块/<module_id>-<title_slug>.md」结构
 
-- 从 title 生成，保留中文，去空格与 `/ \\ : * ? " < > |` 特殊字符
-- 长度 ≤ 30 字符
+每个模块详情文件包含 5 段（下游 engineer skill 消费）：
+
+```markdown
+# 模块 <module_id>：<title>
+
+## 目标
+（一段：本模块要交付什么可运行/可测的能力。绑定 PRD 用户故事 US-xx / 系统设计 §x.x。）
+
+## 输入
+- 上游模块产物（列 `depends_on` 模块的输出文件/接口）
+- 系统设计里本模块相关章节（引用式，如 `参见系统设计.md §3.2`，不复述）
+- 需读取的 vault 文件（如 `10-项目/{project}/PRD.md` 相关章节）
+
+## 输出
+- 代码文件（列 `src/backend/...` 或 `src/frontend/...` 具体路径）
+- 测试文件（`tests/backend/...` 或 `tests/frontend/...`）
+- 可能的文档更新（如 README 段）
+
+## 验收
+- 3-6 条独立可执行的验收项（每条含"命令 / 条件 → 期望"）
+- 至少含 1 条 pytest / 手动测试可复现步骤
+- 边界条件覆盖（空 / 超长 / 非法输入 / 依赖异常）
+
+## 失败模式
+- 3-5 条本模块可能遇到的失败场景 + 独占降级路径（[[A2-失败模式表穷举非框架异常]] + [[A4-降级路径独占覆盖]]）
+- 禁止 `try/except: pass` 兜底
+```
+
+### 边界与禁止
+
+- **禁止**用 Plan+Detail×N 两阶段流程（本模式一次性输出所有 FILE 块）
+- **禁止**为多个模块共用一个详情文件（引擎按 `模块/<module_id>-*.md` 通配加载单模块聚焦）
 
 ### 拆解建议
 
