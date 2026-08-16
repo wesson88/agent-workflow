@@ -58,6 +58,31 @@ from .ability_loader import assemble_user_context  # noqa: E402
 # music 扇出 dormant 约定（原 music_mastering_engineer/main.py，收编为通用规则）
 _DORMANT_KEYWORDS = ("dormant", "本项目状态：dormant", "不启动")
 
+# frontmatter 链接写法契约（治理三层里的"提示词层"，见 engine/frontmatter_links.py）
+#
+# 放引擎侧而不是各域 rule_refs 的理由：这条约定管的是**引擎读写的文件格式**，
+# 不是领域知识；而且 2026-08-16 复盘证明挂在 vault 章节里会漏——[[产物schema]]
+# `## 通用规则` 写了 frontmatter 约定，但 8 个音乐角色的章节级 rule_refs 全都
+# 只引自己那节，通用规则从未进过 prompt。放这里，所有 runner 角色（含未来新域）
+# 自动吃到，新增角色也忘不掉。落盘前还有 normalize_frontmatter_links 兜底。
+_FRONTMATTER_CONTRACT = """
+frontmatter 硬约束（写错**不会报错**，但 Obsidian / Dataview 会静默读到错值）：
+
+- 链接字段（`upstream` / `downstream` / `related` / `consumers` 等）必须加引号：
+  单个链接写 `upstream: "[[创作 vision]]"`
+- 多个链接必须用 block list，每项独立成行、独立加引号。
+  禁止 `upstream: "[[a]], [[b]]"`（会被读成一个字符串，不是两个链接）：
+
+  ```yaml
+  upstream:
+    - "[[创作 vision]]"
+    - "[[词作]]"
+  ```
+
+- 每份文件只允许**一个** frontmatter 块（开头 `---` 到第一个闭合 `---`）；
+  不要在正文里再起一个 `---` 元数据块，那一块会被整个当成正文。
+"""
+
 
 def _detect_dormant(instruction_path: Path | None) -> bool:
     """读 `指令/给<自身>.md` 开头判断制作人是否明示 dormant。"""
@@ -293,6 +318,7 @@ def _build_user_prompt(
         f"本轮任务：{task or '（未提供，请基于上游输入综合推导）'}\n\n"
         f"{material_note}"
         f"{scenario}\n"
+        f"{_FRONTMATTER_CONTRACT}"
         f"{render_required_outputs(output_rels)}"
     )
 
@@ -433,14 +459,30 @@ def run_role(
         )
         return _fail(1, "no_file_blocks")
 
+    from .frontmatter_links import check_frontmatter, normalize_frontmatter_links
     from .obsidian_io import atomic_write_text
     written: list[str] = []
+    fm_fixes: list[str] = []
+    fm_problems: list[str] = []
     for rel_path, content in output_files.items():
         rel_resolved = rel_path.replace("{project}", project)
         dest = resolve_path(rel_resolved, project)
+        if dest.suffix.lower() == ".md":
+            # 落盘前规范化 frontmatter 链接写法（治理三层里的"主循环层"）
+            content, fixes = normalize_frontmatter_links(content)
+            for fix in fixes:
+                fm_fixes.append(f"{rel_resolved} · {fix}")
+            for problem in check_frontmatter(content):
+                fm_problems.append(f"{rel_resolved} · {problem}")
         atomic_write_text(dest, content)
         print(f"[{role.name}] 写入: {dest}")
         written.append(rel_resolved)
+
+    for fix in fm_fixes:
+        print(f"[{role.name}] frontmatter 已自动规范化: {fix}")
+    for problem in fm_problems:
+        # 规范化修不了的结构性问题：只能告警，需人工或角色侧修
+        print(f"[{role.name}] ⚠️ frontmatter: {problem}", file=sys.stderr)
 
     # Suno-prompt 必产角色（作曲）：has_suno_prompt 软告警 + Style 段字符实测
     suno_audit: dict = {}
@@ -475,6 +517,8 @@ def run_role(
         "timestamp": utc_now(), "role": role.name, "project": project,
         "task": task, "result": "success", "outputs": written,
         "is_dormant": is_dormant, "runner": "in_process",
+        "frontmatter_link_fixes": fm_fixes,
+        "frontmatter_problems": fm_problems,
         **suno_audit,
     })
     print(

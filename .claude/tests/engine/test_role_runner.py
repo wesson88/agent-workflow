@@ -215,6 +215,74 @@ class TestSunoStyleMeasurement:
             _shutil.rmtree(proj, ignore_errors=True)
 
 
+class TestFrontmatterLinkNormalization:
+    """落盘前 frontmatter 链接规范化（治理三层的"主循环层"）。
+
+    根因见 engine/frontmatter_links.py docstring：LLM 连 frontmatter 一起产出，
+    引擎原样落盘，写错不报错但 Dataview 静默读到错值。
+    """
+
+    def test_contract_reaches_prompt(self, runner_env):
+        """提示词层：frontmatter 契约必须进 user_prompt（不能再指望域 rule_refs）。"""
+        from engine.role_runner import run_role
+
+        run_role(ROLE, "常规母带", PROJECT)
+        user = runner_env["user"]
+        assert "frontmatter 硬约束" in user
+        assert '禁止 `upstream: "[[a]], [[b]]"`' in user
+
+    def test_c_class_output_is_normalized_on_disk(self, monkeypatch):
+        """主循环层：LLM 产出 C 类写法 → 落盘时已被改成 block list。"""
+        import shutil as _shutil
+
+        import yaml
+
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        proj = VAULT_ROOT / "10-项目" / "music" / PROJECT
+        (proj / "指令").mkdir(parents=True, exist_ok=True)
+        (proj / "指令" / "给作曲.md").write_text("# 给作曲\n写一首民谣", encoding="utf-8")
+        (proj / "词作.md").write_text("# 词作\n歌词正文", encoding="utf-8")
+
+        captured: dict = {"audit": []}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", captured["audit"].append)
+        canned = (
+            "<!-- FILE: 10-项目/music/{project}/曲作.md -->\n"
+            "---\n"
+            "type: composition\n"
+            'upstream: "[[创作 vision]], [[词作]]"\n'
+            "---\n# 曲作\n<!-- /FILE -->\n"
+            "<!-- FILE: 10-项目/music/{project}/Suno-prompt.md -->\n"
+            "# Suno\n<!-- /FILE -->\n"
+        )
+        monkeypatch.setattr(rr, "call_claude", lambda s, u, r: canned)
+        try:
+            assert run_role("作曲", "写歌", PROJECT).ok
+            written = (proj / "曲作.md").read_text(encoding="utf-8")
+            fm = yaml.safe_load(written.split("---", 2)[1])
+            # 落盘后是两个链接的 list，而不是一个字符串
+            assert fm["upstream"] == ["[[创作 vision]]", "[[词作]]"]
+            assert fm["type"] == "composition"
+            audit = captured["audit"][-1]
+            assert len(audit["frontmatter_link_fixes"]) == 1
+            assert "曲作.md" in audit["frontmatter_link_fixes"][0]
+            assert audit["frontmatter_problems"] == []
+        finally:
+            _shutil.rmtree(proj, ignore_errors=True)
+
+    def test_clean_output_records_no_fixes(self, runner_env):
+        """正确写法不该被改，audit 两个字段留空（避免噪声）。"""
+        from engine.role_runner import run_role
+
+        run_role(ROLE, "常规母带", PROJECT)
+        audit = runner_env["audit"][-1]
+        assert audit["frontmatter_link_fixes"] == []
+        assert audit["frontmatter_problems"] == []
+
+
 class TestMaterialDirScan:
     """素材目录扫描输入源（SE 收编批 1 · 原 PM collect_input_docs 收编）。"""
 
