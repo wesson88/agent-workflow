@@ -54,8 +54,9 @@ from .wikilink import (
     invalidate_cache as invalidate_wikilink_cache,
 )
 from .skill_trigger import (
-    match_skill, discover_role_skills, render_triggered_block,
-    extract_core_section,
+    SkillMatch, match_skill, score_skill,
+    discover_role_skills, discover_role_skills_scored, render_triggered_block,
+    extract_core_section, extract_pointer_payload, extract_full_payload,
 )
 
 __all__ = [
@@ -91,6 +92,7 @@ __all__ = [
     "parse_wikilinks", "resolve_target", "load_wikilink", "expand_wikilinks",
     "invalidate_wikilink_cache",
     # skill_trigger
-    "match_skill", "discover_role_skills", "render_triggered_block",
-    "extract_core_section",
+    "SkillMatch", "match_skill", "score_skill",
+    "discover_role_skills", "discover_role_skills_scored", "render_triggered_block",
+    "extract_core_section", "extract_pointer_payload", "extract_full_payload",
 ]

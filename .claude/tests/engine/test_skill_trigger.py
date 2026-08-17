@@ -227,10 +227,16 @@ class TestRenderTriggeredBlock:
         assert "仅此而已" in block
 
     def test_total_char_budget_caps_accumulation(self, tmp_path: Path, capsys):
-        """命中过多 skill 时 total_char_budget 兜底，超 budget 的跳过 + 警告。"""
+        """命中过多 skill 时 total_char_budget 兜底，超 budget 的跳过 + 警告。
+
+        ⚠️ 2026-08-17 规模改了，契约没改。改造前是单遍填充（每张直接给
+        `## 核心约束` 全段），故 5 张 × 1500 chars / budget 5000 就能触发溢出。
+        改造后第 1 遍只给指针（本例被 `max_chars_per_pointer=500` 钉住），
+        5 × 500 = 2500 装得下 —— 那是**改进**（低相关的降级为指针而非整张丢弃），
+        不是回归。要验"预算兜底仍在"，需把 budget 压到指针总量之下。
+        新增的两遍填充契约另见 `test_skill_relevance_tiering.py::TestTwoPassBudget`。
+        """
         skills = []
-        # 5 个 skill 各 1500 字符核心内容，total=7500 < 10000 全装入
-        # 把 budget 设 5000：前 3 装入（4500），第 4-5 跳过
         for i in range(5):
             body = f"## 核心约束\n" + ("约束" * 750) + "\n"  # ~1500 字符
             sk = _write(
@@ -238,9 +244,9 @@ class TestRenderTriggeredBlock:
                 _skill_md(trigger={"always": True}, body=body),
             )
             skills.append((sk, "always"))
-        block, loaded = render_triggered_block(skills, total_char_budget=5000)
-        # 前 3 装入（每个 ~1500，累计 4500 < 5000；加第 4 个会超）
-        assert len(loaded) <= 4  # 取决于实际字符数；至少不是全 5 个
+        # 指针各 ~500（撞 max_chars_per_pointer）；budget 1200 → 装 2 张，跳 3 张
+        block, loaded = render_triggered_block(skills, total_char_budget=1200)
+        assert len(loaded) <= 4, f"至少不该全 5 张都进，实得 {loaded}"
         err = capsys.readouterr().err
         assert "total_char_budget" in err
         assert "用满" in err

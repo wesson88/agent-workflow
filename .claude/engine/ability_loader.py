@@ -107,8 +107,8 @@ def load_genre_skill_block(
     目录不存在 / 双路径均空 → ("", 原因)，调用方负责跳过。
     """
     from engine import (
-        VAULT_ROOT, discover_role_skills, render_triggered_block,
-        expand_wikilinks, extract_core_section,
+        VAULT_ROOT, discover_role_skills_scored, render_triggered_block,
+        expand_wikilinks, extract_full_payload,
     )
     from engine.obsidian_io import split_frontmatter
 
@@ -140,13 +140,15 @@ def load_genre_skill_block(
                     continue
                 raw = e.path.read_text(encoding="utf-8")
                 _, body = split_frontmatter(raw)
-                core = extract_core_section(body).strip()
+                # 2026-08-17：wikilink 显式点名 = 最强相关度信号 → 完整载荷。
+                # 见 load_skill_block 同位注释。
+                core = extract_full_payload(body).strip()
                 if len(core) > 3000:
                     core = core[:3000] + (
                         f"\n\n…（截断：原文 {len(core)} 字符，本次取前 3000）"
                     )
                 wikilink_parts.append(
-                    f"=== Skill (wikilink:[[{e.wikilink.target}]]) ===\n{core}"
+                    f"=== Skill (wikilink:[[{e.wikilink.target}]] · full) ===\n{core}"
                 )
                 wikilink_loaded.append(e.path.stem)
             wikilink_unresolved = list(result.unresolved)
@@ -155,8 +157,10 @@ def load_genre_skill_block(
             print(f"[load_genre_skill_block:{role_name}] ⚠️ {msg}。", file=sys.stderr)
             _warn_audit("genre_skill_wikilink", role_name, msg)
 
-    hits = discover_role_skills(role_dir, task_text, upstream_text)
-    dedup_hits = [(p, r) for p, r in hits if p.stem not in set(wikilink_loaded)]
+    # scored 版保留相关度明细（改造前的 2-tuple 会在去重这步丢掉排序信息）。
+    _scored = discover_role_skills_scored(role_dir, task_text, upstream_text)
+    _loaded = set(wikilink_loaded)
+    dedup_hits = [m for m in _scored if m.path.stem not in _loaded]
     keyword_block, keyword_loaded = render_triggered_block(dedup_hits)
     keyword_body = ""
     if keyword_block:
@@ -206,8 +210,8 @@ def load_skill_block(
     - 可选 `code_root` 参数：dev_backend / dev_frontend 等需扫项目代码做 file_patterns 时传入
     """
     from engine import (
-        VAULT_ROOT, discover_role_skills, render_triggered_block,
-        expand_wikilinks, extract_core_section,
+        VAULT_ROOT, discover_role_skills_scored, render_triggered_block,
+        expand_wikilinks, extract_full_payload,
     )
     from engine.obsidian_io import split_frontmatter
 
@@ -237,13 +241,17 @@ def load_skill_block(
                     continue
                 raw = e.path.read_text(encoding="utf-8")
                 _, body = split_frontmatter(raw)
-                core = extract_core_section(body).strip()
+                # 2026-08-17：wikilink 是**最强相关度信号** —— 任务文本直接点名了
+                # 这张 skill，比 keyword 命中确定得多。故给完整载荷（核心约束 +
+                # 详细规则 + 反例），不再只给 111 字的 `## 核心约束` 论点句。
+                # 上限仍 3000，与改造前一致（body 来自全文读盘，不是 e.content）。
+                core = extract_full_payload(body).strip()
                 if len(core) > 3000:
                     core = core[:3000] + (
                         f"\n\n…（截断：原文 {len(core)} 字符，本次取前 3000）"
                     )
                 wikilink_parts.append(
-                    f"=== Skill (wikilink:[[{e.wikilink.target}]]) ===\n{core}"
+                    f"=== Skill (wikilink:[[{e.wikilink.target}]] · full) ===\n{core}"
                 )
                 wikilink_loaded.append(e.path.stem)
             wikilink_unresolved = list(result.unresolved)
@@ -252,11 +260,13 @@ def load_skill_block(
             print(f"[load_skill_block:{role_name}] ⚠️ {msg}。", file=sys.stderr)
             _warn_audit("skill_wikilink", role_name, msg)
 
-    if code_root is not None:
-        hits = discover_role_skills(role_dir, task_text, upstream_text, code_root)
-    else:
-        hits = discover_role_skills(role_dir, task_text, upstream_text)
-    dedup_hits = [(p, r) for p, r in hits if p.stem not in set(wikilink_loaded)]
+    # scored 版保留相关度明细，render 侧才能按相关度分级 —— 用 2-tuple 会在
+    # 这一步把排序信息丢掉（改造前即如此）。
+    _scored = discover_role_skills_scored(
+        role_dir, task_text, upstream_text, code_root if code_root is not None else None,
+    )
+    _loaded = set(wikilink_loaded)
+    dedup_hits = [m for m in _scored if m.path.stem not in _loaded]
     keyword_block, keyword_loaded = render_triggered_block(dedup_hits)
     keyword_body = ""
     if keyword_block:

@@ -199,3 +199,84 @@ def test_依据里不得使用被点名的无效措辞():
         tail = line.split("依据：", 1)[1]
         for bad in ("经验值", "合理值", "业界标准", "我觉得", "感觉"):
             assert bad not in tail, f"依据措辞无效（{bad}）：{line.strip()}"
+
+
+# ══════════════════════════════════════════════════════════════
+#  技能池可区分性 lint（2026-08-17 新增）
+# ══════════════════════════════════════════════════════════════
+
+class TestSkillPoolDistinctness:
+    """一张 skill 没有「本目录独有」的 keyword → 触发器无法把它与同组区分。
+
+    命中时必然整组一起命中、`rank_key` 全等，谁进 prompt 只能靠文件名字典序
+    决胜（= 任意选择）。危害在 2026-08-17 分级载荷改造后放大：落选者从
+    「少 ~120 字论点句」变成「少整份细则」，当选者拿到的可能是错流派的参数。
+
+    依据：2026-08-17 全量测 —— 131 张有 keywords 的 skill 里 **76 张（58%）**
+    无独有 keyword，全在 music 域 7 个角色；se 域 0 张。
+    """
+
+    @staticmethod
+    def _mk(tmp: Path, role: str, pool: dict[str, list[str]]) -> Path:
+        """在 tmp 下造 `20-知识/角色技能/{domain}/{role}/` 技能池，返回 vault root。"""
+        d = tmp / "20-知识" / "角色技能" / "testdom" / role
+        d.mkdir(parents=True, exist_ok=True)
+        for stem, kws in pool.items():
+            fm = ["type: skill", "trigger:", "  keywords:"]
+            fm += [f"    - {k!r}" for k in kws]
+            (d / f"{stem}.md").write_text(
+                "---\n" + "\n".join(fm) + "\n---\n\n## 核心约束\n一句话。\n",
+                encoding="utf-8",
+            )
+        return tmp
+
+    def _run(self, tmp: Path, pool: dict[str, list[str]], monkeypatch) -> list[str]:
+        self._mk(tmp, "测试角色", pool)
+        monkeypatch.setattr(ra_mod, "VAULT_ROOT", tmp)
+        return ra_mod._indistinct_skills_in_pool("testdom", "角色-测试角色")
+
+    def test_签名完全相同的组全部报出(self, tmp_path: Path, monkeypatch):
+        """复刻 `music/编曲` 的 6 张 R&B 同签名。"""
+        out = self._run(tmp_path, {
+            "Ar1": ["soul", "r&b"], "Ar2": ["soul", "r&b"], "Ar3": ["soul", "r&b"],
+        }, monkeypatch)
+        assert len(out) == 3, f"3 张同签名都该报出，实得 {out}"
+        assert all("签名相同" in x for x in out)
+
+    def test_有独有词的不报(self, tmp_path: Path, monkeypatch):
+        """`Ar7-R&B-地域风格差异` 有 10 个独有词（Motown/Stax…），不该被报。"""
+        out = self._run(tmp_path, {
+            "Ar1": ["soul"], "Ar2": ["soul"], "Ar7": ["soul", "motown"],
+        }, monkeypatch)
+        assert [x.split("（")[0] for x in out] == ["Ar1", "Ar2"], f"实得 {out}"
+
+    def test_se式任务性keyword全不报(self, tmp_path: Path, monkeypatch):
+        """se 域每个 keyword 唯一（实测 df>1 计数为 0）→ 应零报出。"""
+        out = self._run(tmp_path, {
+            "B1": ["os.environ"], "B5": ["fetchone"], "B6": ["StaticFiles"],
+        }, monkeypatch)
+        assert out == []
+
+    def test_单张skill不参与判定(self, tmp_path: Path, monkeypatch):
+        assert self._run(tmp_path, {"只有一张": ["soul"]}, monkeypatch) == []
+
+    def test_目录不存在返回空不抛错(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(ra_mod, "VAULT_ROOT", tmp_path)
+        assert ra_mod._indistinct_skills_in_pool("nodom", "角色-不存在") == []
+        assert ra_mod._indistinct_skills_in_pool("", "角色-空域") == []
+        assert ra_mod._indistinct_skills_in_pool("testdom", "不带前缀") == []
+
+    def test_报告里出现修法指引(self, tmp_path: Path, monkeypatch):
+        """lint 不能只报数字 —— 必须给出根因与怎么改，否则读报告的人不知道干什么。
+
+        走真实 `_measure_role` → `_format_measurements` 全链路（不手搓 measure
+        dict：那会随字段增删静默失配，本测试第一版就因此 KeyError）。
+        """
+        self._mk(tmp_path, "测试角色", {"A": ["soul"], "B": ["soul"]})
+        monkeypatch.setattr(ra_mod, "VAULT_ROOT", tmp_path)
+        m = ra_mod._measure_role(_write(tmp_path, _body(), domain="testdom"))
+        assert len(m["skill_pool_indistinct"]) == 2, "前提不成立：lint 没报出"
+        text = ra_mod._format_measurements([m])
+        assert "无任何独有 keyword" in text
+        assert "任务性" in text and "字典序" in text
+        assert "A（与 B 签名相同）" in text, "必须列出具体是哪几张"

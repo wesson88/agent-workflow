@@ -520,6 +520,54 @@ def _check_dynamic_marker_literal(body_no_dynamic: str) -> bool:
     return bool(re.search(r"`?<!--\s*DYNAMIC_START\s*-->`?", body_no_dynamic))
 
 
+def _indistinct_skills_in_pool(domain: str, role_stem: str) -> list[str]:
+    """本角色 skill 目录里「没有任何独有 keyword」的 skill（触发器无法区分）。
+
+    返回 `["S1（与 S2/S3 签名相同）", ...]`；目录不存在 / 少于 2 张 / 无 keywords
+    → 空列表（单张 skill 无需区分；file_patterns 或 always 触发的不参与本检查）。
+    """
+    if not domain or not role_stem.startswith("角色-"):
+        return []
+    role_dir = VAULT_ROOT / "20-知识" / "角色技能" / domain / role_stem[3:]
+    if not role_dir.is_dir():
+        return []
+
+    kw: dict[str, list[str]] = {}
+    for f in sorted(role_dir.glob("*.md")):
+        if f.name.startswith(".") or f.name.startswith("_"):
+            continue
+        try:
+            sk_fm, _, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        trig = sk_fm.get("trigger") if isinstance(sk_fm, dict) else None
+        if not isinstance(trig, dict):
+            continue
+        ks = trig.get("keywords") or []
+        if isinstance(ks, list) and ks:
+            kw[f.stem] = [str(x) for x in ks if isinstance(x, str) and str(x).strip()]
+    if len(kw) < 2:
+        return []
+
+    df: dict[str, int] = {}
+    for ks in kw.values():
+        for low in {x.lower() for x in ks}:
+            df[low] = df.get(low, 0) + 1
+
+    out: list[str] = []
+    for stem, ks in sorted(kw.items()):
+        if any(df.get(x.lower(), 0) == 1 for x in ks):
+            continue
+        sig = frozenset(x.lower() for x in ks)
+        peers = sorted(
+            s for s, other in kw.items()
+            if s != stem and frozenset(x.lower() for x in other) == sig
+        )
+        note = f"（与 {'/'.join(peers[:3])}{'…' if len(peers) > 3 else ''} 签名相同）" if peers else "（无独有词）"
+        out.append(f"{stem}{note}")
+    return out
+
+
 def _measure_role(path: Path) -> dict:
     """对单个角色文件做可量化测量，返回测量字典。"""
     text = path.read_text(encoding="utf-8")
@@ -630,6 +678,23 @@ def _measure_role(path: Path) -> dict:
         skill_fm, _, _ = _parse_frontmatter(skill_text)
         if not _skill_trigger_valid(skill_fm):
             skill_trigger_gaps.append(f"{rel}（trigger 缺失或不完整）")
+
+    # 2026-08-17：**技能池内不可区分检查**（触发器选择能力的前置条件）
+    # 扫本角色的整个 skill 目录（= `discover_role_skills` 的扫描范围，不只
+    # skill_refs 声明的那几张）。一张 skill 若没有任何「本目录独有」的 keyword，
+    # 触发器就无法把它与同组区分 —— 命中时必然与同组一起命中，rank_key 全等，
+    # 谁进 prompt 只能靠文件名字典序决胜（= 任意选择）。
+    #
+    # 依据：2026-08-17 全量测 —— 131 张有 keywords 的 skill 里 76 张（58%）
+    # 无任何独有 keyword，分布在 21 个「keyword 签名完全相同」的组里。最大一组
+    # 是 `music/混音师` 的 7 张 R&B skill（M1 频谱能量分配 / M2 人声慢启动压缩 /
+    # M3 Plate与Pre-delay / M4 立体声宽度墙 / M5 Bass包络 / M6 Sidechain /
+    # M7 陷阱清单）—— 声明了完全一样的流派标签集合。
+    # 根因：音乐域建设时 keyword 写成了「这张 skill 属于哪个流派」而不是
+    # 「什么任务需要这张 skill」。se 域无此问题（keyword 本就任务性）。
+    # 危害在 2026-08-17 分级载荷改造后**放大**：改造前落选者各损失 ~120 字
+    # 论点句，改造后落选者损失整份细则、当选者拿到的可能是错流派的工程参数。
+    skill_pool_indistinct: list[str] = _indistinct_skills_in_pool(_domain, path.stem)
 
     # 章节序号检查
     found_sections = sorted(int(k) for k in section_chars if k.isdigit())
@@ -765,6 +830,8 @@ def _measure_role(path: Path) -> dict:
         "skill_refs_count": skill_refs_count,
         "skill_refs_over_limit": skill_refs_over_limit,
         "skill_trigger_gaps": skill_trigger_gaps,
+        # 2026-08-17：技能池可区分性 lint
+        "skill_pool_indistinct": skill_pool_indistinct,
     }
 
 
@@ -847,6 +914,17 @@ def _format_measurements(measures: list[dict]) -> str:
             )
         for gap in m.get("skill_trigger_gaps", []):
             issues.append(f"skill_refs 引用的 skill trigger 缺失：{gap}")
+        # 2026-08-17：技能池可区分性
+        _ind = m.get("skill_pool_indistinct") or []
+        if _ind:
+            issues.append(
+                f"技能池 {len(_ind)} 张 skill 无任何独有 keyword，触发器无法区分 → "
+                f"命中必然整组一起命中、rank_key 全等、谁进 prompt 靠文件名字典序"
+                f"（= 任意选择）。修法：每张补 ≥1 个本目录独有的**任务性** keyword"
+                f"（写「什么任务需要它」，不是「它属于哪个流派」）。明细："
+                + "；".join(_ind[:8])
+                + ("…" if len(_ind) > 8 else "")
+            )
         if issues:
             lines.append(f"\n### {m['role']}（{m['filename']}）")
             for iss in issues:
