@@ -126,6 +126,13 @@ def parse_blocks(text: str, *, segment: str | None = None) -> list[dict[str, Any
 
     块的正文 = 从头行下一行起，到下一个信封头 / 闭合行（`===` 或 `=== END ===`）
     / 文末为止。`chars` 只算正文，不含头行 —— 「这张 skill 给了模型多少字」。
+
+    **`tail: True`** 标在每段最后一个块上：它后面若还有非信封正文（如
+    `_build_user_prompt` 追加的产出要求），会被一并计进它的 `chars`，所以那个
+    数字是上界而非精确值。2026-08-24 首次真链路比对就是靠这个差异暴露的 ——
+    离线基线只喂到 skill 段结束（Ma3 = 3028），真链路 user_prompt 后面还有
+    939 字框架文案（Ma3 = 3967）。信封协议里没有闭合标记可依赖（19 个产出点
+    里只有 3 个写 `=== END ===`），因此不猜边界，只标明「此数为上界」。
     """
     if not text:
         return []
@@ -170,7 +177,10 @@ def parse_blocks(text: str, *, segment: str | None = None) -> list[dict[str, Any
             continue
         if cur is not None:
             body.append(line)
+    tail_open = cur is not None      # 文末仍在块内 = 该块吃到了段尾
     _flush()
+    if out and tail_open:
+        out[-1]["tail"] = True
     return out
 
 
@@ -183,7 +193,8 @@ def fingerprint(segments: dict[str, str]) -> dict[str, Any]:
 
     返回：
         {
-          "blocks": [{kind, name, chars, tier?, seg, flags?}, …],
+          "blocks": [{kind, name, chars, tier?, seg, flags?, tail?}, …],
+                    # tail=True → 该块吃到了段尾，chars 是上界（见 parse_blocks）
           "counts": {kind: n, …},          # 按 kind 计数
           "chars":  {kind: 总字数, …},
           "unknown": n,                     # > 0 → 出现了第 8 种信封，仪表要瞎

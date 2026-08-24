@@ -217,6 +217,26 @@ class TestParseBlocks:
         blocks = parse_blocks("=== a.md ===\nbody\n===\nnot in any block\n")
         assert len(blocks) == 1 and blocks[0]["chars"] == len("body")
 
+    def test_tail_flag_marks_upper_bound(self):
+        """段尾未闭合的块，chars 会把后续框架文案算进来 → 标 tail 说明是上界。
+
+        2026-08-24 首次真链路比对靠这条差异暴露：离线基线只喂到 skill 段结束
+        （3028），真链路 user_prompt 后面还有 939 字产出要求（3967）。
+        """
+        blocks = parse_blocks("=== a.md ===\nbody\n\n## 产出要求\n后面这些不属于 a.md\n")
+        assert blocks[0]["tail"] is True
+        assert blocks[0]["chars"] > len("body")
+
+    def test_no_tail_when_properly_closed(self):
+        blocks = parse_blocks("=== a.md ===\nbody\n===\n## 产出要求\n无关正文\n")
+        assert "tail" not in blocks[0]
+        assert blocks[0]["chars"] == len("body")
+
+    def test_only_last_block_gets_tail(self):
+        blocks = parse_blocks("=== a.md ===\nA\n=== b.md ===\nB\n尾部\n")
+        assert "tail" not in blocks[0]
+        assert blocks[1]["tail"] is True
+
     def test_no_envelope_returns_empty(self):
         assert parse_blocks("普通正文，没有信封\n") == []
         assert parse_blocks("") == []
