@@ -59,6 +59,43 @@ def _append_token_audit(level: str, reason: str, ctx: dict) -> None:
         # 不阻断主路径；仅在 stderr 留一行
         print(f"[audit] ⚠️ audit.jsonl 写入失败（{type(e).__name__}: {e}）", file=sys.stderr)
 
+
+def _injection_fingerprint(
+    static: str, dynamic_own: str, dynamic_upstream: str, user_prompt: str,
+) -> dict | None:
+    """P0.1：采集本次 call 的注入指纹（哪些 skill / 规则章节 / 上游产物真进了 prompt）。
+
+    设计见 engine/injection_fingerprint.py。这里只做三件事：分段喂进去、
+    unknown 信封打 stderr + audit warn、任何异常降级为 None。
+
+    **失败必须降级而非抛**：仪表本身不能成为主链路的新故障点 —— 这正是
+    归因文档记的那批「加了机制反而多一处挂点」的反面。
+    """
+    try:
+        from .injection_fingerprint import fingerprint, format_unknown_warning
+        fp = fingerprint({
+            "static": static,
+            "dynamic_own": dynamic_own,
+            "dynamic_upstream": dynamic_upstream,
+            "user": user_prompt,
+        })
+        if fp.get("unknown"):
+            msg = format_unknown_warning(fp)
+            print(msg, file=sys.stderr)
+            _append_token_audit("warn", "injection_envelope_unknown", {
+                "unknown": fp["unknown"],
+                "labels": [b["name"] for b in fp["blocks"] if b["kind"] == "unknown"][:10],
+            })
+        return fp
+    except Exception as e:
+        print(
+            f"[injection_fingerprint] ⚠️ 指纹采集失败（{type(e).__name__}: {e}），"
+            f"本次 call 无注入指纹；主链路不受影响。",
+            file=sys.stderr,
+        )
+        return None
+
+
 # Windows 命令行总长度上限 32767；预留出余量给其它参数。
 # 超过此阈值的 system_prompt 自动改走 stdin inline。
 _CMD_ARG_LIMIT = 8192
@@ -206,6 +243,10 @@ def call_llm(
     # 入口审计：在真正调用 LLM 前过两道护栏（system 单独阈值 + 总量百分比/角色预算）
     _audit_token_budget(model, static, dynamic_combined, user_prompt, input_budget=input_budget)
 
+    # P0.1 注入指纹：唯一采集点。在此处而非各 adapter 里，是因为这里是三条轨道
+    # 唯一共同的上游，且尚未被 CLI 的 inline 包装（`=== 系统指令 ===`）污染。
+    injection = _injection_fingerprint(static, dynamic_own, dynamic_upstream, user_prompt)
+
     if track == "api":
         api_cfg = cfg["api"]
         kind = api_cfg.get("kind", "anthropic")
@@ -213,14 +254,14 @@ def call_llm(
             return _call_anthropic_sdk(
                 api_cfg, static, dynamic_own, dynamic_upstream,
                 user_prompt, max_tokens, print_stream,
-                role_name=role_name, model_name=model,
+                role_name=role_name, model_name=model, injection=injection,
             )
         # openai_compat：拼接为单字符串
         flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
         if kind == "openai_compat":
             return _call_openai_compat(
                 api_cfg, flat, user_prompt, max_tokens, print_stream,
-                role_name=role_name, model_name=model,
+                role_name=role_name, model_name=model, injection=injection,
             )
         raise ValueError(f"未知 api kind：{kind}（provider={model}）")
 
@@ -228,7 +269,7 @@ def call_llm(
         flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
         return _call_cli(
             cfg["cli"], flat, user_prompt, print_stream,
-            role_name=role_name, model_name=model,
+            role_name=role_name, model_name=model, injection=injection,
         )
 
     # unavailable：给出可操作的提示
@@ -370,6 +411,7 @@ def _call_anthropic_sdk(
     *,
     role_name: str | None = None,
     model_name: str | None = None,
+    injection: dict | None = None,
 ) -> str:
     """调用 Anthropic SDK，B1（P10.5）3-block 分层缓存。
 
@@ -446,6 +488,7 @@ def _call_anthropic_sdk(
                 "cache_creation_input_tokens": cache_create,
                 "elapsed_s": round(elapsed, 3),
                 "attempt": attempt,
+                **({"injection": injection} if injection else {}),
             })
             return "".join(chunks)
         except _RETRYABLE as e:
@@ -468,6 +511,7 @@ def _call_openai_compat(
     *,
     role_name: str | None = None,
     model_name: str | None = None,
+    injection: dict | None = None,
 ) -> str:
     """2026-07-18 评审修复：此前该路径是"二等公民"——无重试、无超时、
     不落 llm_call 审计事件（gemini/deepseek 角色的 token 消耗在 audit.jsonl
@@ -549,6 +593,7 @@ def _call_openai_compat(
                 "elapsed_s": round(elapsed, 3),
                 "attempt": attempt,
                 "track": "openai_compat",
+                **({"injection": injection} if injection else {}),
             })
             return "".join(chunks)
         except _RETRYABLE as e:
@@ -713,6 +758,7 @@ def _call_cli(
     *,
     role_name: str | None = None,
     model_name: str | None = None,
+    injection: dict | None = None,
 ) -> str:
     """通用 CLI 调用，输出格式由 cli_cfg.output_format 决定。
 
@@ -836,6 +882,7 @@ def _call_cli(
         "elapsed_s": round(elapsed, 3),
         "max_stdout_gap_s": round(stats.get("max_gap_s", 0.0), 3),
         "track": "cli",
+        **({"injection": injection} if injection else {}),
     })
     return "".join(chunks)
 

@@ -255,6 +255,62 @@ class TestPayloadTiers:
         body = "# S\n\n## 随便一段\n\n仅此而已。\n"
         assert "仅此而已" in extract_full_payload(body)
 
+    # ── 2026-08-24 白名单改黑名单（见 _SECTION_BOILERPLATE 上方依据）──
+    def test_完整载荷保留非模板章节名(self):
+        """核心回归：SE 工程红线用另一套章节名，白名单时代只送 8–16%。
+
+        `强制写法`（代码示例）与 `验收 gate`（自审动作）必须在载荷里 ——
+        这两段丢了，B1/B5/B6/B7/F1/TL1/TL2 就只剩标题加一句话。
+        """
+        body = (
+            "# B1 — 环境变量必须运行期读取\n\n"
+            "## 核心约束\n\n模块级快照即违规。\n\n"
+            "## 失败机理\n\nimport 时点快照。\n\n"
+            "## 强制写法\n\n```python\nos.environ['X']\n```\n\n"
+            "## 验收 gate（双重）\n\ngrep 自审。\n\n"
+            "## 跨项目证据\n\nhuashu-demo。\n\n"
+            "## 来源\n\n内部沉淀。\n"
+        )
+        full = extract_full_payload(body)
+        for kept in ("模块级快照即违规", "import 时点快照", "os.environ",
+                     "grep 自审", "huashu-demo", "B1 — 环境变量"):
+            assert kept in full, f"丢了应保留的内容：{kept}"
+        assert "内部沉淀" not in full, "`## 来源` 仍须剔除"
+
+    def test_样板段的子段一并剔除(self):
+        body = "# S\n\n## 正文\n\nA\n\n## 来源\n\nB\n\n### 二手来源\n\nC\n"
+        full = extract_full_payload(body)
+        assert "A" in full
+        assert "B" not in full and "C" not in full
+
+    def test_精确匹配不误杀含关键词的正文段(self):
+        """全库有 `## 来源与失效管理` × 2 —— 「失效管理」是可执行内容。
+
+        包含匹配会连它一起剔除，故用精确相等 + 剥 `N. ` 编号前缀。
+        """
+        body = "# S\n\n## 来源与失效管理\n\n失效后回滚。\n\n## 7. 版本历史\n\nv1.0\n"
+        full = extract_full_payload(body)
+        assert "失效后回滚" in full, "`来源与失效管理` 是正文，不得剔除"
+        assert "v1.0" not in full, "`7. 版本历史` 剥编号后应命中样板名单"
+
+    def test_代码围栏内的标题不参与切分(self):
+        """`bf3af04` 的教训：SE skill 的 `强制写法` 段全是代码块。
+
+        围栏里写 `## 来源` 只是示例文本，不能触发剔除。
+        """
+        body = (
+            "# S\n\n## 强制写法\n\n"
+            "```markdown\n## 来源\n这行在围栏里\n```\n\n"
+            "围栏后的正文。\n"
+        )
+        full = extract_full_payload(body)
+        assert "这行在围栏里" in full and "围栏后的正文" in full
+
+    def test_h3_同名不剔除(self):
+        """全库 `### 历史延续` / `### …密度感的来源` 各 1 处是正文 → 只对 h2 生效。"""
+        body = "# S\n\n## 详细规则\n\n### 历史延续\n\n保留我。\n"
+        assert "保留我" in extract_full_payload(body)
+
 
 # ══════════════════════════════════════════════════════════════
 #  4. 两遍填预算
