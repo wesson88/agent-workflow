@@ -51,6 +51,7 @@ files + 项目代码自动召回。
 from __future__ import annotations
 
 import fnmatch
+import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -61,10 +62,39 @@ from .obsidian_io import split_frontmatter
 
 
 # skill 正文的 canonical 分段（`20-知识/角色技能/**` 实测 138 张里 114 张遵守）
-# 指针载荷只取 §核心约束；完整载荷取前三段，**刻意不含 `## 来源`** ——
-# 那是给人看的溯源元信息（100 张有），不是给 LLM 的可执行知识。
+# 指针载荷只取 §核心约束。
 _SECTION_CORE = "核心约束"
-_SECTION_FULL = ("核心约束", "详细规则", "反例")
+
+# 完整载荷 = **全文减样板段**（2026-08-24 由白名单改黑名单）。
+#
+# 原实现是白名单 `("核心约束", "详细规则", "反例")` + 「三段全不命中才回退全文」。
+# 目的一直是「排除 `## 来源` 这种给人看的溯源元信息」，但白名单把目的写成了
+# 手段，代价是**只认音乐 skill 的模板**：
+#
+#   全库 138 张按白名单命中段数分布 —— 0 段 24 张（回退全文，载荷/全文 94%）/
+#   **1 段 9 张（16%）** / 2 段 17 张（88%）/ 3 段 88 张（94%）。
+#   命中恰好 1 段比完全不命中更糟：后者回退全文，前者只送那一段。
+#   而那 9 张全在 se 域 —— SE 工程红线用另一套章节名
+#   （`核心约束 / 失败机理 / 强制写法 / 验收 gate / 跨项目证据`），
+#   只命中第一个。实测送达率：B1 109/1295=8% · B5 89/1055=8% ·
+#   F1 109/1111=10% · B7 11% · B6 14% · TL2 16%。
+#   即 `强制写法` 里的代码示例、`验收 gate` 的自审动作从未进过任何 prompt。
+#
+# 黑名单直接表达原意，且对域封闭（新域自带章节名默认进载荷，不需加特例）。
+# 改前/改后模拟：music 104 张 94%→96%（+2%）· se 34 张 86%→**99%**（+16%）。
+#
+# 名单依据 —— 全库 1149 个唯一章节标题的频次：
+#   `来源` h2 × 100（几乎每张都有，全库约定，唯一有频次结论的一条）
+#   `历史` × 3 · `历史记录` × 1 · `版本历史` × 1 · `载体演进` × 1 · `后续观察` × 1
+#     ↑ 这 5 个是**语义判断**（溯源/沿革元信息），不是频次结论，明标。
+# 匹配用**精确相等**而非包含：全库有 `## 来源与失效管理` × 2 是正文
+# （「失效管理」是可执行内容），包含匹配会误杀。标题的 `N. ` 编号前缀先剥。
+# 只对 h2 生效：`### 历史延续` / `### Ghost Note（鬼音）：密度感的来源` 各 1 处是正文。
+_SECTION_BOILERPLATE = frozenset({
+    "来源", "历史", "历史记录", "版本历史", "载体演进", "后续观察",
+})
+_HEADING_RE = re.compile(r"^(#{1,6}) +(.+?)\s*$")
+_NUM_PREFIX_RE = re.compile(r"^\d+(?:\.\d+)*[.、]?\s+")
 
 
 # ── 1. 章节抽取 ────────────────────────────────────────────────────
@@ -112,19 +142,35 @@ def extract_pointer_payload(content: str) -> str:
 
 
 def extract_full_payload(content: str) -> str:
-    """**完整载荷**：核心约束 + 详细规则 + 反例，按文档顺序拼接。
+    """**完整载荷**：全文减样板段（`_SECTION_BOILERPLATE`，见其上方依据）。
 
-    三段全无命中（结构不合规的外部导入 skill）→ 回退全文，保持既有行为。
+    2026-08-24 由白名单三段拼接改为黑名单剔除 —— 原实现只认音乐 skill 的
+    章节模板，SE 工程红线只送 8–16%。改动依据见 `_SECTION_BOILERPLATE`。
+
+    被剔除的 h2 段连同其子段（h3+）一起丢弃；无样板段的文档即全文。
+    **代码围栏内的标题不参与切分**（复用 `iter_lines_with_fence_state`，
+    2026-08-16 `bf3af04` 的教训 —— SE skill 的 `强制写法` 段全是代码块，
+    不识别围栏会把代码里的 `## xxx` 当成真标题）。
     """
-    from .wikilink import extract_section
-    parts: list[str] = []
-    for name in _SECTION_FULL:
-        text, hit = extract_section(content, name)
-        if hit and text.strip():
-            parts.append(text.strip())
-    if not parts:
-        return content.strip()
-    return "\n\n".join(parts)
+    from .wikilink import iter_lines_with_fence_state
+
+    out: list[str] = []
+    drop_level = 0                      # >0：正在丢弃一个 h{drop_level} 段
+    for line, in_fence in iter_lines_with_fence_state(content.splitlines(keepends=True)):
+        if not in_fence:
+            m = _HEADING_RE.match(line)
+            if m:
+                lvl = len(m.group(1))
+                if drop_level and lvl <= drop_level:
+                    drop_level = 0      # 同级或更高级标题 → 丢弃段结束
+                title = _NUM_PREFIX_RE.sub("", m.group(2).strip())
+                if not drop_level and lvl == 2 and title in _SECTION_BOILERPLATE:
+                    drop_level = lvl
+                    continue
+        if drop_level:
+            continue
+        out.append(line)
+    return "".join(out).strip()
 
 
 # ── 2. 单 skill 评分 ───────────────────────────────────────────────
