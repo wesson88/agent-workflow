@@ -299,18 +299,55 @@ class TestVaultPathSync:
         )
 
 
-class TestSkillRefsConsistency:
-    """skill_refs 路径必须真实存在于 vault（防止 frontmatter 写错路径）。"""
+class TestOutsourcedSkillReachability:
+    """ship 角色的每张外迁 skill 都必须能被触发器召回。
 
-    def test_all_skill_refs_resolve(self, ship_roles):
-        broken: list[str] = []
+    取代原 `TestSkillRefsConsistency`（断言 frontmatter `skill_refs` 声明的路径
+    真实存在）。该字段 2026-08-25 废弃，但**它守的风险没消失、反而变紧了**：
+    废弃前 skill 名义上有两条入 prompt 的通道（声明 inline + 触发器召回），
+    废弃后只剩触发器。一张 trigger 缺失的 skill 从"少一条路"变成"外迁即删除"。
+
+    对齐 `engine.skill_trigger.match_skill` 的 fail-closed 契约：
+    trigger.keywords / file_patterns / always 三者至少有一。
+    """
+
+    def test_every_outsourced_skill_is_reachable(self, ship_roles):
+        import yaml
+
+        unreachable: list[str] = []
+        checked = 0
+        genes_root = VAULT_ROOT / "00-系统" / "角色基因"
         for name, data in ship_roles.items():
-            for rel in data["role"].skill_refs:
-                path = VAULT_ROOT / rel
-                if not path.is_file():
-                    broken.append(f"  {name} → {rel}（vault 文件不存在）")
-        assert not broken, (
-            "skill_refs 引用的 vault 文件不存在：\n" + "\n".join(broken)
+            role = data["role"]
+            # 目录段取角色基因文件所在子目录，**不取 frontmatter domain** ——
+            # SE 角色 domain 是「技术开发」而目录段是 se，两者不等（见
+            # role_auditor._role_skill_dir 的实测记录）。
+            seg = role.note_path.resolve().parent.relative_to(genes_root.resolve())
+            skill_dir = VAULT_ROOT / "20-知识" / "角色技能" / seg / role.name
+            if not skill_dir.is_dir():
+                continue
+            for sk in sorted(skill_dir.glob("*.md")):
+                if sk.name.startswith((".", "_")):
+                    continue
+                checked += 1
+                m = re.match(r"^---\r?\n(.*?)\r?\n---", sk.read_text(encoding="utf-8"), re.S)
+                fm = yaml.safe_load(m.group(1)) if m else None
+                trig = fm.get("trigger") if isinstance(fm, dict) else None
+                if not isinstance(trig, dict):
+                    unreachable.append(f"  {name} → {sk.name}（无 trigger 字段）")
+                    continue
+                has = (
+                    bool(trig.get("keywords"))
+                    or bool(trig.get("file_patterns"))
+                    or trig.get("always") is True
+                )
+                if not has:
+                    unreachable.append(f"  {name} → {sk.name}（trigger 三项全空）")
+
+        assert checked > 0, "没扫到任何外迁 skill —— 目录口径可能已变，本 lint 已失效"
+        assert not unreachable, (
+            f"外迁 skill 无法被触发器召回（= 永远不进 prompt，等于删除）"
+            f"，共 {len(unreachable)}/{checked} 张：\n" + "\n".join(unreachable)
         )
 
 

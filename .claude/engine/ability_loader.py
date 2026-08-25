@@ -16,8 +16,9 @@ engine/ability_loader.py — 能力加载统一层（架构演进第 4 步 · 20
    调用方声明 domain → 自动注入 `00-系统/规则/{domain}/{角色}-视角.md`
    （存在才注入；通用角色跨域工作的视角适配）
 
-system 侧两机制**不在**本模块：skill_refs（role_loader 加载期 inline 进 body）
-与 capability_refs 摘要（build_system_prompt 内）位置语义不同，保持原地。
+system 侧机制**不在**本模块：capability_refs 摘要（build_system_prompt 内）
+位置语义不同，保持原地。（另一个曾在此列的 skill_refs 已于 2026-08-25 废弃 ——
+实测 0/14 生效，见 role_loader._warn_deprecated_skill_refs 的依据段。）
 
 第三方 skill 兼容硬约束（设计文档）：对外来 skill 禁止 fail-closed schema
 校验——宽容降级 + 告警不拒载；`extract_core_section` 无"核心约束"章节时

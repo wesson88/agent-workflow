@@ -226,31 +226,32 @@ def _gather_worker_role_notes(scope_roles: tuple[str, ...], domain: str) -> list
     return out
 
 
-def _gather_worker_skill_refs(scope_roles: tuple[str, ...], domain: str) -> list[Path]:
-    """工作角色 frontmatter 中 skill_refs 引用的 skill 文件（去重）。按 domain 路径解析。"""
-    rgd = role_genes_dir()
+def _gather_worker_skill_files(scope_roles: tuple[str, ...], domain: str) -> list[Path]:
+    """工作角色的外迁 skill 文件（去重）：扫 `20-知识/角色技能/{domain}/{角色}/*.md`。
+
+    2026-08-25 前本函数读 frontmatter `skill_refs`。改扫目录的原因不是"更方便"，
+    是那个字段实测**欠声明**：5 个有值角色里 UI设计师声明 2 张而目录有 17 张，
+    复盘者按声明读就只看到 2 张，然后在"这条规则主体是否已覆盖"上误判 15 张。
+    目录才是唯一事实源，`skill_trigger.discover_role_skills` 一直扫的也是它。
+
+    与触发器路径的差异：这里**不**按 trigger 过滤。复盘者要判断"某条规则是否
+    已存在于外迁文件里"，一张 trigger 写坏、进不了 prompt 的 skill 依然是已存在
+    的知识 —— 漏看它会导致重复立补丁。trigger 合法性由 role_auditor 单独 lint。
+    """
+    root = VAULT_ROOT / "20-知识" / "角色技能"
     seen: set[Path] = set()
     out: list[Path] = []
     for role in scope_roles:
-        role_file = _role_gene_path(rgd, domain, role)
-        if not role_file.exists():
+        role_dir = (root / domain / role) if domain else (root / role)
+        if not role_dir.is_dir():
             continue
-        try:
-            from engine.obsidian_io import split_frontmatter
-            from engine.config import VAULT_ROOT
-            fm, _ = split_frontmatter(role_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        refs = fm.get("skill_refs") or []
-        if isinstance(refs, str):
-            refs = [refs]
-        for ref in refs:
-            if not isinstance(ref, str) or not ref.strip():
+        for sk in sorted(role_dir.glob("*.md")):
+            if sk.name.startswith((".", "_")) or not sk.is_file():
                 continue
-            sk = (VAULT_ROOT / ref.strip()).resolve()
-            if sk.is_file() and sk not in seen:
-                seen.add(sk)
-                out.append(sk)
+            resolved = sk.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                out.append(resolved)
     return out
 
 
@@ -320,13 +321,13 @@ def main() -> int:
         print(f"[{ROLE}] 🎯 target 过滤命中 {len(scope_worker_roles)} 个角色：{list(scope_worker_roles)}")
     print(f"[{ROLE}] domain={domain} / worker_roles 全集={list(WORKER_ROLES_DOMAIN)}")
 
-    # 输入：adapter + 项目产出 + 工作角色笔记 + 角色 skill_refs 外迁内容 + 最近 N 份复盘记录
+    # 输入：adapter + 项目产出 + 工作角色笔记 + 角色外迁 skill 全目录 + 最近 N 份复盘记录
     adapter_inputs = [adapter_path] if adapter_path.exists() else []
     project_docs = _gather_project_outputs(project, days, domain)
     role_notes = _gather_worker_role_notes(scope_worker_roles, domain)
-    skill_refs = _gather_worker_skill_refs(scope_worker_roles, domain)
+    skill_files = _gather_worker_skill_files(scope_worker_roles, domain)
     recent_reflections = _gather_recent_reflections(limit=5)
-    inputs = adapter_inputs + project_docs + role_notes + skill_refs + recent_reflections
+    inputs = adapter_inputs + project_docs + role_notes + skill_files + recent_reflections
 
     if not project_docs:
         scope = f"项目 {project}" if project else "所有项目"
@@ -351,7 +352,7 @@ def main() -> int:
         f"{'单项目=' + project if project else '所有项目'} / "
         f"窗口={days}d / adapter={'✅' if adapter_inputs else '❌ fallback 主体骨架'} / "
         f"项目文档={len(project_docs)} 份 / 角色笔记={len(role_notes)} 份 / "
-        f"skill_refs={len(skill_refs)} 份 / 历史复盘={len(recent_reflections)} 份",
+        f"外迁 skill={len(skill_files)} 份 / 历史复盘={len(recent_reflections)} 份",
         flush=True,
     )
 
@@ -382,17 +383,19 @@ def main() -> int:
         f"- 项目：{project or '所有项目'}\n"
         f"- 时间窗口：最近 {days} 天\n"
         f"- 共扫描 {len(adapter_inputs)} 份 adapter + {len(project_docs)} 份项目产出 + "
-        f"{len(role_notes)} 份角色笔记 + {len(skill_refs)} 份 skill_refs 外迁文件 + "
+        f"{len(role_notes)} 份角色笔记 + {len(skill_files)} 份外迁 skill + "
         f"{len(recent_reflections)} 份历史复盘记录\n\n"
         f"# 关于 domain adapter\n"
         f"输入第 1 份（若存在）是 `00-系统/规则/{domain}/复盘者-视角.md` adapter，"
         f"它定义了**本域的**：① 工作角色清单 + 补丁数量上限 ② 项目产出扫描清单 + 路径 ③ 输出角色基因路径模板 "
         f"④ 补丁命名前缀（如 SE 用 B/F，music 用 D/P/L/C/A/H/M/MS）⑤ 域专属示例。"
         f"**所有补丁必须遵循 adapter §4 命名前缀**，证据引用必须用 adapter §2 的产物清单（不要引用其他域的产物名）。\n\n"
-        f"# 关于 skill_refs 外迁文件\n"
-        f"工作角色 frontmatter 中 `skill_refs` 引用的文件位于 `20-知识/角色技能/{{角色}}/` 子树。"
+        f"# 关于外迁 skill\n"
+        f"每个工作角色的外迁 skill 位于 `20-知识/角色技能/{domain}/{{角色}}/` 目录，"
+        f"上面已按角色**整目录**读入（不是按 frontmatter 声明筛选 —— 该字段已废弃）。"
         f"它们是角色基因主体外迁的详细规则。**判断补丁是否再现 / 是否已被主体覆盖时，"
-        f"必须同时查阅角色基因 + 对应的 skill_refs 内容**。\n\n"
+        f"必须同时查阅角色基因 + 该角色的全部外迁 skill**。\n"
+        f"新增外迁 skill 必须带 `trigger.keywords`，否则永远不会进任何 prompt。\n\n"
         f"# 输入文件全文\n\n{context}\n\n---\n\n"
         f"# 你的任务（必须严格按以下顺序）\n\n"
         f"## Step 1：闭环验证（先做，不可跳过）\n\n"

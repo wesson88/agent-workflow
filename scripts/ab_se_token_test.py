@@ -2,9 +2,13 @@
 ab_se_token_test.py — SE 域 schema/skill 注入 token 三路径实测
 
 对照路径（SE 域版，参 scripts/ab_schema_token_test.py 音乐域版本）：
-  A0 历史 / 极端：无 rule_refs 也无 skill_refs（只 base system prompt）
+  A0 历史 / 极端：无 rule_refs 也无 skill 注入（只 base system prompt）
   A1 当前实现：rule_refs 章节级注入（指向 F-*#6 工程参考 skill 段）
-  B  假想对照：skill_refs 全文件注入（每个角色的所有 skill .md 全文读）
+  B  上界对照：角色 skill 目录全文件注入（`20-知识/角色技能/{域}/{角色}/*.md` 全读）
+
+注：B 臂原按 frontmatter `skill_refs` 声明取文件。该字段 2026-08-25 废弃后改为
+扫目录 —— 顺带修掉一个测量偏差：声明是**欠声明**的（UI设计师声明 2 张而目录
+17 张），按声明测出来的"全量上界"其实不是上界。
 
 测 4 角色：架构师 / 技术主管 / 后端工程师 / 前端工程师（短期路线图 §3.3 指定）
 对照维度：注入 chars / 净 token 差（粗估 ~2.5 chars/token 中英混合）
@@ -46,16 +50,25 @@ def estimate_tokens(chars: int) -> int:
     return int(chars / CHARS_PER_TOKEN)
 
 
-def _read_skill_file(rel_path: str) -> tuple[int, str]:
-    """读 skill 文件全文（B 路径用）。返回 (chars, source_note)。"""
-    fp = VAULT_ROOT / rel_path
-    if not fp.exists():
-        return 0, f"miss:{rel_path}"
+def _role_skill_files(domain: str, role_name: str) -> list[Path]:
+    """角色外迁 skill 目录下的 *.md（B 路径用）。目录不存在 → 空列表。"""
+    d = VAULT_ROOT / "20-知识" / "角色技能" / domain / role_name
+    if not d.is_dir():
+        return []
+    return [
+        p for p in sorted(d.glob("*.md"))
+        if p.is_file() and not p.name.startswith((".", "_"))
+    ]
+
+
+def _read_skill_file(path: Path) -> tuple[int, str]:
+    """读 skill 文件全文。返回 (chars, source_note)。"""
+    rel = path.relative_to(VAULT_ROOT).as_posix()
     try:
-        text = fp.read_text(encoding="utf-8")
-    except Exception as e:
-        return 0, f"err:{rel_path}({e})"
-    return len(text), f"ok:{rel_path}"
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return 0, f"err:{rel}({e})"
+    return len(text), f"ok:{rel}"
 
 
 def measure_role(role_name: str) -> dict:
@@ -68,11 +81,12 @@ def measure_role(role_name: str) -> dict:
     a1_block, a1_hint = load_rule_block(role.rule_refs)
     a1_chars = len(a1_block)
 
-    # B 路径：skill_refs 全文件注入
+    # B 路径：角色 skill 目录全文件注入
+    skill_files = _role_skill_files(role.domain, role.name)
     b_total = 0
     b_notes: list[str] = []
-    for rel in role.skill_refs:
-        chars, note = _read_skill_file(rel)
+    for p in skill_files:
+        chars, note = _read_skill_file(p)
         b_total += chars
         b_notes.append(note)
 
@@ -82,8 +96,8 @@ def measure_role(role_name: str) -> dict:
         "role": role_name,
         "rule_refs": list(role.rule_refs),
         "rule_refs_count": len(role.rule_refs),
-        "skill_refs": list(role.skill_refs),
-        "skill_refs_count": len(role.skill_refs),
+        "skill_files": [p.relative_to(VAULT_ROOT).as_posix() for p in skill_files],
+        "skill_files_count": len(skill_files),
         "base_system_chars": base_chars,
         "A0_chars": 0,
         "A1_chars": a1_chars,
@@ -135,7 +149,7 @@ def main() -> int:
     print("-" * len(header))
     for r in results:
         print(
-            f"{r['role']:<10} {r['rule_refs_count']:<6} {r['skill_refs_count']:<7} "
+            f"{r['role']:<10} {r['rule_refs_count']:<6} {r['skill_files_count']:<7} "
             f"{r['base_system_chars']:<10} "
             f"{r['A0_chars']:<10} {r['A1_chars']:<10} {r['B_chars']:<10} "
             f"{r['A0_to_A1_add_chars']:<10} {r['A1_to_B_save_chars']:<10} "
@@ -168,7 +182,7 @@ def main() -> int:
     print(f"  A1 vs B 节省：{save_ratio * 100:.1f}%")
     print(f"  结论：{_verdict(save_ratio)}")
 
-    print(f"\n--- 角色详细 rule_refs / skill_refs ---")
+    print(f"\n--- 角色详细 rule_refs / 外迁 skill ---")
     for r in results:
         print(f"\n[{r['role']}]")
         print(f"  A1 hint：{r['A1_hint']}")
@@ -178,21 +192,21 @@ def main() -> int:
                 print(f"    • {ref}")
         else:
             print(f"  rule_refs：（空）")
-        if r["skill_refs"]:
-            print(f"  skill_refs（{r['skill_refs_count']}）：")
-            for rel, note in zip(r["skill_refs"], r["B_notes"]):
-                tag = "✗" if note.startswith(("miss:", "err:")) else "✓"
+        if r["skill_files"]:
+            print(f"  外迁 skill（{r['skill_files_count']}）：")
+            for rel, note in zip(r["skill_files"], r["B_notes"]):
+                tag = "✗" if note.startswith("err:") else "✓"
                 print(f"    {tag} {rel}")
         else:
-            print(f"  skill_refs：（空）")
+            print(f"  外迁 skill：（目录空或不存在）")
 
     print(f"\n--- 假设条件 ---")
     print(f"- token 估算系数：{CHARS_PER_TOKEN} chars/token（中英混合粗估）")
-    print(f"- A0：base system prompt only，无 rule_refs 章节注入也无 skill_refs 全文加载")
+    print(f"- A0：base system prompt only，无 rule_refs 章节注入也无 skill 全文加载")
     print(f"- A1：rule_refs 章节级 expand（当前实现）；指向 F-*#6 工程参考 skill 段")
-    print(f"- B ：skill_refs 全文件注入（假想对照，每个 skill .md 全文 concat）")
+    print(f"- B ：角色 skill 目录全文件注入（上界对照，每个 skill .md 全文 concat）")
     print(f"- base sys：build_system_prompt 返回的 static+dynamic chars（不变量，三路径共享）")
-    print(f"- skill_refs 路径相对 VAULT_ROOT：{VAULT_ROOT}")
+    print(f"- skill 目录：{VAULT_ROOT / '20-知识' / '角色技能'}/{{域}}/{{角色}}/")
     return 0
 
 

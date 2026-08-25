@@ -71,7 +71,7 @@ REQUIRED_FIELDS = {
 # 产品经理 upstream: null 上实证了这个盲区）。
 LIST_FIELDS = {
     "aliases", "upstream", "downstream", "monitors",
-    "inputs", "outputs", "tools", "skills", "skill_refs",
+    "inputs", "outputs", "tools", "skills",
 }
 
 # frontmatter 禁止字段（来自规范 §2.4）
@@ -153,11 +153,15 @@ LIMITS = {
     # _extract_role_prompt_sections 不 raise、T2.7 lint 全绿 —— 空壳角色若被调度，
     # 注入的是一个无使命、无职责、无边界的自由裁量 agent。
     "min_section_chars": 40,
-    # P6 新增：角色 skill_refs 数量软上限（触发 [SHRINK?]）
-    # 依据：**推导逻辑 + 实测参考**。当前实测：架构师 5 skill / 后端 4 / TL 2 / 前端 1，
-    # 上限 = 现最高值（架构师 5），高于此值提示治理域过宽应拆分。
-    # 命中不阻塞 load_role，仅 LLM 报告标记。等音乐域 9+ 角色实战后再评估上调。
-    "skill_refs_max": 5,
+    # 已删：`skill_refs_max: 5`（2026-08-25，随 skill_refs 废弃）。
+    # **删掉而不是重定值**，理由要留档：原依据是「上限 = 现最高值（架构师 5 张）」，
+    # 自己的注释就写着这是循环论证（`skill_trigger.py` 模块 docstring 把它列为
+    # 反面样本）。改扫目录后实测量级完全变了 —— 编曲 22 / 混音师 21 / UI设计师 17 /
+    # 和声编写 13 / 录音师 12 张，5 这个数会对 10 个角色里的 8 个报警，阈值彻底
+    # 失去信号价值。而「一个角色该有几张 skill」目前**没有任何数据能支撑**，
+    # 按项目 CLAUDE.md 的阈值来源硬约束，宁可无阈值也不要一个编出来的。
+    # 真正该管的是「同一目录里的 skill 触发器能否互相区分」——
+    # 那是下面 `skill_pool_indistinct` 检查的职责，且它有 76/131 的实测基线。
 }
 
 
@@ -520,16 +524,45 @@ def _check_dynamic_marker_literal(body_no_dynamic: str) -> bool:
     return bool(re.search(r"`?<!--\s*DYNAMIC_START\s*-->`?", body_no_dynamic))
 
 
-def _indistinct_skills_in_pool(domain: str, role_stem: str) -> list[str]:
+def _role_skill_dir(role_path: Path) -> Path | None:
+    """角色的外迁 skill 目录，无法定位 → None。
+
+    段名取**角色基因文件自己所在的子目录**（相对 `00-系统/角色基因/`），不取
+    frontmatter `domain`：
+      `00-系统/角色基因/se/角色-后端工程师.md`  → `20-知识/角色技能/se/后端工程师/`
+      `00-系统/角色基因/music/角色-混音师.md`   → `20-知识/角色技能/music/混音师/`
+      `00-系统/角色基因/角色-复盘者.md`         → `20-知识/角色技能/复盘者/`
+
+    ⚠️ 为什么不用 `domain`：**它和目录段不是一回事**。music/元/通用 三域恰好相等，
+    但 7 个 SE 角色的 `domain` 是 `技术开发` 而目录段是 `se`。2026-08-25 实测发现
+    `_indistinct_skills_in_pool` 原按 `domain` 拼路径，于是一直在找不存在的
+    `20-知识/角色技能/技术开发/` —— 那条带 76/131 实测基线的「技能池不可区分」
+    lint 对全部 SE 角色**从未真正执行过**，只是恰好 se 域真答案也是 0 才没露馅。
+    文件位置是结构事实、不会漂；domain 是可自由填写的语义标签，会漂。
+
+    单点定义：trigger 完整性 lint 与技能池可区分性检查共用（skill_refs 废弃后
+    目录是唯一事实源，路径口径必须只有一个）。
+    """
+    stem = role_path.stem
+    if not stem.startswith("角色-"):
+        return None
+    genes_root = VAULT_ROOT / "00-系统" / "角色基因"
+    skills_root = VAULT_ROOT / "20-知识" / "角色技能"
+    try:
+        seg = role_path.resolve().parent.relative_to(genes_root.resolve())
+    except ValueError:
+        return None
+    return skills_root / seg / stem[3:]
+
+
+def _indistinct_skills_in_pool(role_path: Path) -> list[str]:
     """本角色 skill 目录里「没有任何独有 keyword」的 skill（触发器无法区分）。
 
     返回 `["S1（与 S2/S3 签名相同）", ...]`；目录不存在 / 少于 2 张 / 无 keywords
     → 空列表（单张 skill 无需区分；file_patterns 或 always 触发的不参与本检查）。
     """
-    if not domain or not role_stem.startswith("角色-"):
-        return []
-    role_dir = VAULT_ROOT / "20-知识" / "角色技能" / domain / role_stem[3:]
-    if not role_dir.is_dir():
+    role_dir = _role_skill_dir(role_path)
+    if role_dir is None or not role_dir.is_dir():
         return []
 
     kw: dict[str, list[str]] = {}
@@ -648,40 +681,35 @@ def _measure_role(path: Path) -> dict:
         bool(fm_version) and section8_max is not None and fm_version != section8_max
     )
 
-    # P6：skill_refs 数量 + 引用 skill 文件的 trigger 完整性
-    # skill_refs 列表本身长度（软上限 LIMITS["skill_refs_max"]）
-    skill_refs_raw = fm.get("skill_refs") if isinstance(fm, dict) else None
-    if isinstance(skill_refs_raw, list):
-        skill_refs_paths = [str(x).strip() for x in skill_refs_raw if x]
-    elif isinstance(skill_refs_raw, str):
-        skill_refs_paths = [skill_refs_raw.strip()] if skill_refs_raw.strip() else []
-    else:
-        skill_refs_paths = []
-    skill_refs_count = len(skill_refs_paths)
-    skill_refs_over_limit = skill_refs_count > LIMITS["skill_refs_max"]
-
-    # 引用 skill 文件的 trigger 完整性：缺 trigger.keywords / file_patterns / always
-    # 的 skill 会被 skill_trigger.discover_role_skills fail-closed 跳过；本 lint 提前
-    # 暴露，防止"角色声明 skill_refs 但触发器机制静默失效"。
+    # 外迁 skill 的 trigger 完整性：缺 trigger.keywords / file_patterns / always
+    # 的 skill 会被 skill_trigger.discover_role_skills fail-closed 跳过。
+    #
+    # 2026-08-25：扫描源从 frontmatter `skill_refs` 声明改为**整个 skill 目录**。
+    # 该字段废弃后，触发器是 skill 进 prompt 的**唯一**通道 —— 原来 trigger 写坏
+    # 至少还有 skill_refs 声明这条（名义上的）后路，现在没有了，所以这条 lint
+    # 从"提前暴露"升级为"唯一防线"。同时口径也变准了：原来只查声明的那几张，
+    # UI设计师声明 2 张而目录有 17 张，另外 15 张的 trigger 从来没被查过。
+    skill_dir = _role_skill_dir(path)
     skill_trigger_gaps: list[str] = []
-    for rel in skill_refs_paths:
-        skill_path = VAULT_ROOT / rel
-        if not skill_path.is_file():
-            # 缺文件与 §10.7 load_role fallback 一致：不 fail_closed，仅记录
-            skill_trigger_gaps.append(f"{rel}（文件缺失）")
-            continue
-        try:
-            skill_text = skill_path.read_text(encoding="utf-8")
-        except OSError as e:
-            skill_trigger_gaps.append(f"{rel}（读取失败：{e}）")
-            continue
-        skill_fm, _, _ = _parse_frontmatter(skill_text)
-        if not _skill_trigger_valid(skill_fm):
-            skill_trigger_gaps.append(f"{rel}（trigger 缺失或不完整）")
+    skill_file_count = 0
+    if skill_dir is not None and skill_dir.is_dir():
+        for skill_path in sorted(skill_dir.glob("*.md")):
+            if skill_path.name.startswith((".", "_")) or not skill_path.is_file():
+                continue
+            skill_file_count += 1
+            rel = skill_path.relative_to(VAULT_ROOT).as_posix()
+            try:
+                skill_text = skill_path.read_text(encoding="utf-8")
+            except OSError as e:
+                skill_trigger_gaps.append(f"{rel}（读取失败：{e}）")
+                continue
+            skill_fm, _, _ = _parse_frontmatter(skill_text)
+            if not _skill_trigger_valid(skill_fm):
+                skill_trigger_gaps.append(f"{rel}（trigger 缺失或不完整 → 永不进 prompt）")
 
     # 2026-08-17：**技能池内不可区分检查**（触发器选择能力的前置条件）
-    # 扫本角色的整个 skill 目录（= `discover_role_skills` 的扫描范围，不只
-    # skill_refs 声明的那几张）。一张 skill 若没有任何「本目录独有」的 keyword，
+    # 扫本角色的整个 skill 目录（= `discover_role_skills` 的扫描范围）。
+    # 一张 skill 若没有任何「本目录独有」的 keyword，
     # 触发器就无法把它与同组区分 —— 命中时必然与同组一起命中，rank_key 全等，
     # 谁进 prompt 只能靠文件名字典序决胜（= 任意选择）。
     #
@@ -694,7 +722,7 @@ def _measure_role(path: Path) -> dict:
     # 「什么任务需要这张 skill」。se 域无此问题（keyword 本就任务性）。
     # 危害在 2026-08-17 分级载荷改造后**放大**：改造前落选者各损失 ~120 字
     # 论点句，改造后落选者损失整份细则、当选者拿到的可能是错流派的工程参数。
-    skill_pool_indistinct: list[str] = _indistinct_skills_in_pool(_domain, path.stem)
+    skill_pool_indistinct: list[str] = _indistinct_skills_in_pool(path)
 
     # 章节序号检查
     found_sections = sorted(int(k) for k in section_chars if k.isdigit())
@@ -826,9 +854,8 @@ def _measure_role(path: Path) -> dict:
         # T2.7 prompt 白名单契约 lint
         "prompt_whitelist_issues": prompt_whitelist_issues,
         "prompt_whitelist_level": prompt_whitelist_level,
-        # P6：skill_refs 治理 lint
-        "skill_refs_count": skill_refs_count,
-        "skill_refs_over_limit": skill_refs_over_limit,
+        # 外迁 skill 治理 lint（2026-08-25 起口径 = 整个 skill 目录）
+        "skill_file_count": skill_file_count,
         "skill_trigger_gaps": skill_trigger_gaps,
         # 2026-08-17：技能池可区分性 lint
         "skill_pool_indistinct": skill_pool_indistinct,
@@ -906,14 +933,9 @@ def _format_measurements(measures: list[dict]) -> str:
         if m["oversized_patches"]:
             for idx, size in m["oversized_patches"]:
                 issues.append(f"DYNAMIC 第 {idx} 条 patch 超限：{size} > {LIMITS['single_patch']} chars")
-        # P6: skill_refs 治理
-        if m.get("skill_refs_over_limit"):
-            issues.append(
-                f"skill_refs 数量 {m['skill_refs_count']} > 软上限 "
-                f"{LIMITS['skill_refs_max']} → 建议 [SHRINK?]（收敛到 `_通用/` 或拆角色）"
-            )
+        # 外迁 skill 治理：trigger 是 skill 进 prompt 的唯一通道，缺了就是死文件
         for gap in m.get("skill_trigger_gaps", []):
-            issues.append(f"skill_refs 引用的 skill trigger 缺失：{gap}")
+            issues.append(f"外迁 skill 触发器不合法：{gap}")
         # 2026-08-17：技能池可区分性
         _ind = m.get("skill_pool_indistinct") or []
         if _ind:
@@ -1006,7 +1028,7 @@ def _format_stem_uniqueness(dupes: dict[str, list[Path]]) -> str:
         lines.append("")
     lines.append(
         "**修复方向**：重命名为唯一 stem，或在 wikilink 处用完整路径消歧"
-        "（如 `[[20-知识/角色技能/架构师/A1-代码量预算分账]]`）。"
+        "（如 `[[20-知识/角色技能/se/架构师/A1-代码量预算分账]]`）。"
     )
     return "\n".join(lines)
 
@@ -1130,9 +1152,16 @@ def main() -> int:
         f"对每个 §6 超 1500 chars / 单 patch 超 1200 chars 的角色，按规范 §10「Skill 引用机制」**逐条**列出可外迁段落，每条 `[SPLIT?]` 必须包含 4 个字段：\n\n"
         f"1. **source**：源段落定位（如 `角色-X.md §6 步骤 3 子项 (1)` 或 `DYNAMIC patch [YYYY-MM-DD][KEEP] Xn`）\n"
         f"2. **size**：估算字符数（让用户判断收益）\n"
-        f"3. **target**：建议 skill 文件路径（如 `20-知识/角色技能/{{角色}}/{{patch_id}}-{{标题}}.md`，跨角色共享用 `_通用/`）\n"
-        f"4. **rationale**：为什么这段值得外迁（含可独立 grep gate / 反例 / 跨角色复用 等）\n\n"
-        f"已 split 的角色（frontmatter 含 skill_refs）：若仍超限，新建议必须不与现有 skill_refs 重复\n"
+        f"3. **target**：建议 skill 文件路径 `20-知识/角色技能/{{域段}}/{{角色}}/{{patch_id}}-{{标题}}.md`。"
+        f"**域段不可省**（`se` / `music` / 元角色无段），取角色基因文件所在子目录，"
+        f"**不是** frontmatter `domain`（SE 角色 domain 是「技术开发」而域段是 `se`）。"
+        f"跨角色复用**不要**放 `_通用/`——`_` 前缀被扫描跳过、且触发器不跨目录，"
+        f"应各角色目录各放一份，或提为 `00-系统/规则/` 下的规则文档由 `rule_refs` 引用\n"
+        f"4. **rationale**：为什么这段值得外迁（含可独立 grep gate / 反例 / 跨角色复用 等）\n"
+        f"5. **trigger**：新 skill 的 `trigger.keywords` ≥ 1 个，且必须是**本目录独有**的"
+        f"**任务性**词（「什么任务需要它」，不是「它属于哪类」）。触发器是 skill 进 prompt 的"
+        f"唯一通道，keyword 与同目录他张重复 = 命中时靠文件名字典序决胜。\n\n"
+        f"已 split 的角色（`20-知识/角色技能/{{域}}/{{角色}}/` 目录非空）：若仍超限，新建议必须不与该目录现有 skill 重复\n"
         f"未超限的角色：不要发明 [SPLIT?] 建议\n"
         f"已被规范 §7 豁免的元角色 / 极小角色：豁免内不下 [SPLIT?]\n\n"
         f"---\n\n"
@@ -1161,7 +1190,7 @@ def main() -> int:
         f"## 2. [SPLIT?] 外迁建议（结构化）\n"
         f"（只对超限角色出条目；未超限的不要凑数）\n\n"
         f"### 角色：<role>\n"
-        f"- **[SPLIT?]** source: <段落定位> | size: ~N chars | target: `20-知识/角色技能/<角色>/<id>-<标题>.md` | rationale: <一句话>\n"
+        f"- **[SPLIT?]** source: <段落定位> | size: ~N chars | target: `20-知识/角色技能/<域段>/<角色>/<id>-<标题>.md` | rationale: <一句话> | trigger: <本目录独有的任务性 keyword，≥1 个>\n"
         f"- ...\n\n"
         f"## 3. 整体建议\n"
         f"（跨角色共性问题 + 优先处理顺序；包括规范文档本身是否需要更新）\n"

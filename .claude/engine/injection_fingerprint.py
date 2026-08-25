@@ -16,27 +16,33 @@ engine/injection_fingerprint.py — 注入指纹（P0.1 · 2026-08-24）
 从巧合升级为受测契约（见 tests/engine/test_injection_fingerprint.py 的
 `_REGISTRY`：新增注入点必须登记，否则测试红）。
 
-## 信封格式（全部 7 种，含产出点）
+## 信封格式（全部 6 种，含产出点）
 
 | kind             | 形状                                              | 产出点 |
 |------------------|---------------------------------------------------|--------|
 | `skill_trigger`  | `=== Skill (auto-trigger:{reason} · {tier}): [[stem]] ===` | skill_trigger.py |
 | `skill_wikilink` | `=== Skill (wikilink:[[target]] · full) ===`       | ability_loader.py |
 | `skill_task`     | `=== Skill: [[target]] ===`                        | prompt_builder.py（TL 子任务） |
-| `skill_ref`      | `=== Skill: {vault相对路径} ===`                    | role_loader.py（静态 skill_refs） |
 | `skill_cite`     | `=== Skill 引用: [[target]] ({文件名}) ===`         | dev_backend / dev_frontend |
 | `rule_ref`       | `=== [[F-角色#章节]] ===`                           | ability_loader.py |
 | `input_file`     | `=== 文件名.md ===`（不含 `[[`，带扩展名）           | input_reader / common / archivist / graduator / TL |
 
-判别顺序即上表顺序（`Skill:` 后面是 `[[…]]` 还是路径，决定 task/ref）。
-认不出的信封 → `kind="unknown"`，call_llm 侧打 stderr + audit warn：
-**仪表宁可报「我看不懂」也不能默默归错类**。
+判别顺序即上表顺序。认不出的信封 → `kind="unknown"`，call_llm 侧打 stderr +
+audit warn：**仪表宁可报「我看不懂」也不能默默归错类**。
+
+已退役：`skill_ref`（`=== Skill: {vault相对路径} ===`，role_loader 的静态
+skill_refs）。2026-08-25 随 skill_refs 废弃拆除产出点。`Skill:` 后面**不是**
+`[[…]]` 的形态因此故意落到 `unknown` —— 若哪天它又出现（vault 回滚、旧脚本、
+误改），仪表会喊而不是把它归到一个已不存在的机制名下。
 
 ## 一并抓的降级信号（各产出点已有的文本标记）
 
 - `truncated`：`[截断警告]` / `[总量截断]` —— 输入被裁过
-- `missing` / `read_error`：`[SKILL MISSING:` / `[SKILL READ ERROR:` —— skill_refs 缺文件
 - `empty`：信封在、正文空 —— 最典型的沉默失效形态
+
+`[SKILL MISSING:` / `[SKILL READ ERROR:` 两个标记随 `_resolve_skill_refs` 一并
+移除：它们唯一的产出点已拆，而「旧形态复活」这一风险已由上面的 `unknown`
+兜住 —— 一个风险留一道闸，不留第二道。
 """
 
 from __future__ import annotations
@@ -63,12 +69,10 @@ _FILENAME_RE = re.compile(r"^[^\[\]]*\.[0-9A-Za-z]{1,6}(?:\s*[（(].*[）)])?$")
 _DEGRADE_MARKERS: tuple[tuple[str, str], ...] = (
     ("truncated", "[截断警告]"),
     ("truncated", "[总量截断]"),
-    ("missing", "[SKILL MISSING:"),
-    ("read_error", "[SKILL READ ERROR:"),
 )
 
 SKILL_KINDS = frozenset({
-    "skill_trigger", "skill_wikilink", "skill_task", "skill_ref", "skill_cite",
+    "skill_trigger", "skill_wikilink", "skill_task", "skill_cite",
 })
 ALL_KINDS = SKILL_KINDS | {"rule_ref", "input_file", "unknown"}
 
@@ -103,8 +107,10 @@ def classify_envelope(label: str) -> dict[str, Any]:
         if m:
             # prompt_builder：TL 按子任务挑的 skill（唯一「角色自己选」的路径）
             return {"kind": "skill_task", "name": m.group("target"), "tier": "full"}
-        # role_loader：静态 skill_refs，label 是 vault 相对路径
-        return {"kind": "skill_ref", "name": rest, "tier": "full"}
+        # 路径形态 = 已退役的 skill_ref。**故意**不给它一个 kind：唯一产出点
+        # （role_loader._resolve_skill_refs）已于 2026-08-25 拆除，再出现说明有
+        # 东西复活了旧形态，此时该报「看不懂」而不是归到一个死机制名下。
+        return {"kind": "unknown", "name": label}
 
     m = _WIKILINK_ONLY_RE.match(label)
     if m:
@@ -189,7 +195,9 @@ def fingerprint(segments: dict[str, str]) -> dict[str, Any]:
 
     segments：{段名: 文本}，如 {"static": …, "dynamic_own": …, "user": …}。
     段名会写进每个块的 `seg` 字段 —— 「skill 进的是 system 还是 user」正是
-    立项要回答的问题之一（静态 skill_refs 在 system，动态触发在 user）。
+    立项要回答的问题之一。P0.1 实测答案：**全在 user**，system 段注入恒为
+    0 chars（9/9 角色）；唯一声称走 system 的静态 skill_refs 实测 0/14 生效，
+    已于 2026-08-25 废弃。
 
     返回：
         {

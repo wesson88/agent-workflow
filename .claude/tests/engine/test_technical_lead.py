@@ -775,11 +775,15 @@ class TestFrontendPassSplit:
 
 
 # ══════════════════════════════════════════════════════
-# Dynamic skill_refs injection in Detail call loop
+# Detail call 循环里按任务裁剪 skill（wikilink 驱动）
 # ══════════════════════════════════════════════════════
 
 class TestDynamicSkillInjection:
-    """验证 _run_pass_split Detail call 中 skill_refs 动态裁剪逻辑。"""
+    """验证 _run_pass_split Detail call 中按任务裁剪 skill 的逻辑。
+
+    机制是解析 summary 里的 `[[BN-xxx]]` wikilink，与（已于 2026-08-25 废弃的）
+    frontmatter `skill_refs` 字段无关 —— 原命名「skill_refs 动态裁剪」是误导。
+    """
 
     def _make_plan(self, summary: str, estimate_hours: int = 2) -> dict:
         return {

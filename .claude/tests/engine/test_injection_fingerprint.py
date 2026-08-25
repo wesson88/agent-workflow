@@ -57,8 +57,9 @@ _REGISTRY: tuple[tuple[str, str, str, str, str], ...] = (
      "=== [[F-技术主管#6. 可用技能索引]] ==="),
     ("engine/ability_loader.py", "=== Skill (wikilink:[[{}]] · full) ===", "emit", "skill_wikilink",
      "=== Skill (wikilink:[[M1-频谱能量分配]] · full) ==="),
-    ("engine/role_loader.py", "=== Skill: {} ===", "emit", "skill_ref",
-     "=== Skill: 20-知识/角色技能/se/技术主管/F-模块拆分.md ==="),
+    # 已退役：`engine/role_loader.py` 的 `=== Skill: {vault相对路径} ===`（静态
+    # skill_refs）。2026-08-25 随字段废弃拆除产出点，故注册表里不再有它 ——
+    # 若它回来了，`test_scan_matches_registry` 会以「扫到未注册的产出点」报红。
     ("engine/skill_trigger.py", "=== Skill (auto-trigger:{} · {}): [[{}]] ===", "emit", "skill_trigger",
      "=== Skill (auto-trigger:keyword · full): [[M1-频谱能量分配]] ==="),
     ("skills/prompt_builder.py", "=== Skill: [[{}]] ===", "emit", "skill_task",
@@ -164,16 +165,26 @@ class TestClassify:
             "tier": "pointer", "reason": "keyword",
         }
 
-    def test_skill_ref_vs_skill_task_split_on_wikilink(self):
-        """同一 `=== Skill: X ===` 前缀，X 是路径还是 wikilink 决定 kind。
+    def test_skill_path_form_is_unknown_not_a_dead_kind(self):
+        """`=== Skill: X ===` 里 X 是 wikilink → skill_task；是路径 → unknown。
 
-        role_loader（静态 skill_refs → system prompt）与 prompt_builder
-        （TL 按子任务动态挑 → user prompt）恰好共用前缀，是本解析器最容易
-        混淆的一对；混淆会让「静态注入」和「角色自己选」在 audit 里不可分辨，
-        而这两者的区别正是立项要量化的东西。
+        路径形态原属 `skill_ref`（role_loader 的静态 skill_refs），2026-08-25
+        随字段废弃拆除产出点。**故意降为 unknown 而不是删掉整个分支**：
+        unknown 会在 call_llm 侧打 stderr + audit warn，所以旧形态一旦复活
+        （vault 回滚 / 旧脚本 / 误改）会立刻被喊出来；若归给一个已不存在的
+        kind，audit 里就会出现一条查不到产出点的记录 —— 那正是本模块开头
+        「宁可报看不懂也不默默归错类」要防的事。
         """
         assert classify_envelope("Skill: [[F-模块拆分]]")["kind"] == "skill_task"
-        assert classify_envelope("Skill: 20-知识/角色技能/se/x.md")["kind"] == "skill_ref"
+        assert classify_envelope("Skill: 20-知识/角色技能/se/x.md")["kind"] == "unknown"
+        # unknown 的 name 保留整条 label，便于从 audit 反查是谁写的
+        assert classify_envelope("Skill: 20-知识/x.md")["name"] == "Skill: 20-知识/x.md"
+
+    def test_skill_ref_kind_fully_retired(self):
+        """`skill_ref` 不在任何 kind 集合里 —— 防"删了产出点忘了删枚举"。"""
+        from engine.injection_fingerprint import SKILL_KINDS, ALL_KINDS
+        assert "skill_ref" not in SKILL_KINDS
+        assert "skill_ref" not in ALL_KINDS
 
     def test_rule_ref_section_vs_whole(self):
         assert classify_envelope("[[F-技术主管#6. 索引]]")["tier"] == "section"
@@ -208,10 +219,13 @@ class TestParseBlocks:
         blocks = parse_blocks("=== a.md ===\nhead\n\n⚠️ [总量截断] 已达上限\n")
         assert blocks[0]["flags"] == ["truncated"]
 
-    def test_skill_missing_flagged(self):
-        blocks = parse_blocks("=== Skill: 20-知识/x.md ===\n[SKILL MISSING: 20-知识/x.md]\n")
-        assert blocks[0]["kind"] == "skill_ref"
-        assert blocks[0]["flags"] == ["missing"]
+    def test_per_skill_truncation_flagged(self):
+        blocks = parse_blocks(
+            "=== Skill (auto-trigger:keyword · full): [[M1-频谱能量分配]] ===\n"
+            "正文\n⚠️ [截断警告] 单张超限\n"
+        )
+        assert blocks[0]["kind"] == "skill_trigger"
+        assert blocks[0]["flags"] == ["truncated"]
 
     def test_bare_closer_ends_block(self):
         blocks = parse_blocks("=== a.md ===\nbody\n===\nnot in any block\n")
@@ -243,11 +257,11 @@ class TestParseBlocks:
 
 
 class TestFingerprint:
-    SYS = (
-        "## 引用技能（来自 skill_refs）\n\n"
-        "=== Skill: 20-知识/角色技能/se/技术主管/F-模块拆分.md ===\n"
-        "静态注入的技能全文\n"
-    )
+    # static 段**没有信封**。这不是省事，是 P0.1 的实测结论：9/9 角色的
+    # system prompt 注入恒为 0 chars —— 唯一声称走 static 的静态 skill_refs
+    # 实测 0/14 生效，已于 2026-08-25 废弃拆除。本 fixture 因此兼作回归守卫：
+    # 哪天 static 里又冒出信封，test_static_segment_has_no_envelopes 会红。
+    SYS = "## 角色：技术主管\n主体正文若干，无任何 === 信封 ===\n"
     USER = (
         "=== [[F-技术主管#6. 可用技能索引]] ===\n规则章节\n\n"
         "=== Skill (auto-trigger:keyword · full): [[M1-频谱能量分配]] ===\n"
@@ -260,18 +274,20 @@ class TestFingerprint:
     def _fp(self):
         return fingerprint({"static": self.SYS, "user": self.USER})
 
-    def test_segment_attribution(self):
-        """「skill 进的是 system 还是 user」—— 立项要回答的问题之一。"""
+    def test_static_segment_has_no_envelopes(self):
+        """「skill 进的是 system 还是 user」—— 立项要回答的问题，实测答案：全在 user。"""
         fp = self._fp()
+        assert {b["seg"] for b in fp["blocks"]} == {"user"}
+
+    def test_segment_attribution(self):
+        fp = fingerprint({"static": self.SYS, "user": self.USER})
         by_seg = {b["name"]: b["seg"] for b in fp["blocks"]}
-        assert by_seg["20-知识/角色技能/se/技术主管/F-模块拆分.md"] == "static"
         assert by_seg["M1-频谱能量分配"] == "user"
+        assert by_seg["模块清单.md"] == "user"
 
     def test_counts_and_chars_aggregate(self):
         fp = self._fp()
-        assert fp["counts"] == {
-            "skill_ref": 1, "rule_ref": 1, "skill_trigger": 2, "input_file": 1,
-        }
+        assert fp["counts"] == {"rule_ref": 1, "skill_trigger": 2, "input_file": 1}
         assert fp["chars"]["skill_trigger"] == len("细则正文若干") + len("只有指针")
         assert fp["unknown"] == 0
         assert "degraded" not in fp
@@ -282,10 +298,24 @@ class TestFingerprint:
         assert tiers == {"M1-频谱能量分配": "full", "M2-人声慢启动压缩": "pointer"}
 
     def test_degraded_surfaced(self):
-        fp = fingerprint({"static": "=== Skill: x.md ===\n[SKILL MISSING: x.md]\n"})
+        """降级标记用**还有产出点**的那两个（截断）。
+
+        原用例喂 `[SKILL MISSING:`，那是 `_resolve_skill_refs` 的标记，随
+        skill_refs 废弃一并移除 —— 留着测一个没人会写的标记等于测空气。
+        """
+        fp = fingerprint({"user":
+            "=== Skill (auto-trigger:keyword · full): [[M1-频谱能量分配]] ===\n"
+            "正文\n\n⚠️ [总量截断] 已达上限\n"
+        })
         assert fp["degraded"] == [
-            {"kind": "skill_ref", "name": "x.md", "flags": ["missing"]}
+            {"kind": "skill_trigger", "name": "M1-频谱能量分配", "flags": ["truncated"]}
         ]
+
+    def test_retired_skill_ref_shape_counts_as_unknown(self):
+        """旧的静态 skill_refs 形态若复活 → 计入 unknown，不静默通过。"""
+        fp = fingerprint({"static": "=== Skill: 20-知识/角色技能/se/x.md ===\n技能全文\n"})
+        assert fp["unknown"] == 1
+        assert fp["counts"] == {"unknown": 1}
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -308,7 +338,7 @@ def _events(path: Path) -> list[dict]:
 class TestLlmWiring:
     def test_collect_from_four_segments(self, audit_path):
         fp = llm_mod._injection_fingerprint(
-            "=== Skill: a/b.md ===\nS\n",
+            "=== a.md ===\nS\n",
             "=== [[F-x#1. y]] ===\nD1\n",
             "=== [[F-z#2. w]] ===\nD2\n",
             "=== c.md ===\nU\n",
@@ -316,7 +346,7 @@ class TestLlmWiring:
         assert {b["seg"] for b in fp["blocks"]} == {
             "static", "dynamic_own", "dynamic_upstream", "user",
         }
-        assert fp["counts"] == {"skill_ref": 1, "rule_ref": 2, "input_file": 1}
+        assert fp["counts"] == {"rule_ref": 2, "input_file": 2}
 
     def test_unknown_envelope_warns_to_stderr_and_audit(self, audit_path, capsys):
         fp = llm_mod._injection_fingerprint("=== 某种全新格式 ===\nbody\n", "", "", "")
@@ -351,11 +381,11 @@ class TestLlmWiring:
             lambda name: {"mode": "cli_only", "cli": {"path": "claude"}, "context_window": 200000},
         )
         llm_mod.call_llm(
-            "=== Skill: a/b.md ===\n静态技能\n",
+            "=== Skill (wikilink:[[F-模块拆分]] · full) ===\n技能全文\n",
             "=== 模块清单.md ===\n上游\n",
             model="fake", print_stream=False, role_name="测试角色",
         )
-        assert seen["injection"]["counts"] == {"skill_ref": 1, "input_file": 1}
+        assert seen["injection"]["counts"] == {"skill_wikilink": 1, "input_file": 1}
 
     def test_cli_llm_call_event_carries_injection(self, audit_path, tmp_path):
         """端到端：真子进程走完 _call_cli，injection 落进 llm_call 事件。
@@ -446,15 +476,43 @@ class TestAgainstRealProducers:
             "截断标记必须被指纹抓到 —— 否则「输入被裁掉一半」这件事在 audit 里不可见"
         )
 
-    def test_resolve_skill_refs_real_output(self, tmp_path):
-        """role_loader._resolve_skill_refs 真跑一次（含缺文件分支）。"""
-        from engine.role_loader import _resolve_skill_refs
+    def test_retired_skill_ref_emitter_stays_gone(self):
+        """role_loader 不得再产出静态 skill_refs 的信封与降级标记。
 
-        ok = tmp_path / "20-知识" / "F-有的.md"
-        ok.parent.mkdir(parents=True)
-        ok.write_text("---\ntitle: x\n---\n技能正文\n", encoding="utf-8")
-        text = _resolve_skill_refs(("20-知识/F-有的.md", "20-知识/F-没的.md"), tmp_path)
-        blocks = parse_blocks(text)
-        assert [b["kind"] for b in blocks] == ["skill_ref", "skill_ref"]
-        assert blocks[0].get("flags") is None and blocks[0]["chars"] == len("技能正文")
-        assert blocks[1]["flags"] == ["missing"]
+        与上面的 literal 断言同款思路，但方向相反：那条锁「模板不许漂」，
+        这条锁「产出点不许回来」。2026-08-25 拆除后，若谁把 inline 逻辑改回去，
+        `test_scan_matches_registry` 会因未注册而红、本条会因字面残留而红 ——
+        两道都指向同一个动作，是刻意的：这不是 lint 洁癖，而是那条路径实测
+        0/14 生效，复活即等于重建一个沉默失效。
+        """
+        src = (CLAUDE_ROOT / "engine" / "role_loader.py").read_text(encoding="utf-8")
+        # 只看**代码行**：注释里为留档而复述旧形态是允许的，甚至是必要的
+        # （废弃依据就写在那儿）。把注释一起断言会逼人删掉历史，本末倒置。
+        code = "\n".join(
+            ln for ln in src.splitlines()
+            if not ln.lstrip().startswith("#")
+        )
+        for literal in (
+            '"\\n\\n## 引用技能（来自 skill_refs）\\n\\n"',
+            "[SKILL MISSING:",
+            "[SKILL READ ERROR:",
+            "def _resolve_skill_refs",
+        ):
+            assert literal not in code, f"静态 skill_refs 产出点复活了：{literal}"
+
+    def test_deprecated_field_still_declared_gets_warned(self, tmp_path, capsys):
+        """字段还留在 frontmatter → 必须喊，不许静默忽略。
+
+        这是废弃动作本身的验收点：一个仍被声明、却已无消费者的字段，正是
+        本项目在治的「沉默失效」形态（第 10 例就是 skill_refs 自己）。
+        """
+        from engine.role_loader import _warn_deprecated_skill_refs
+
+        note = tmp_path / "角色-测试.md"
+        _warn_deprecated_skill_refs({"skill_refs": ["20-知识/a.md", "20-知识/b.md"]}, note)
+        err = capsys.readouterr().err
+        assert "角色-测试.md" in err and "2 条" in err and "不会生效" in err
+
+        _warn_deprecated_skill_refs({"skill_refs": []}, note)
+        _warn_deprecated_skill_refs({}, note)
+        assert capsys.readouterr().err == "", "空 [] 与缺字段都不该告警（否则 27 个角色天天刷屏）"

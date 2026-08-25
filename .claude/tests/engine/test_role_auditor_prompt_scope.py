@@ -69,8 +69,18 @@ def _body(sec6_pad: str = "", sec8_pad: str = "") -> str:
 """
 
 
-def _write(tmp_path: Path, body: str, domain: str = "se") -> Path:
-    p = tmp_path / "角色-测试角色.md"
+def _write(tmp_path: Path, body: str, domain: str = "se", seg: str | None = None) -> Path:
+    """写角色基因文件。
+
+    seg 为 None → 落在 tmp_path 根（历史行为，多数用例只关心章节口径，不碰 skill 目录）。
+    seg 给了值 → 落在 `00-系统/角色基因/{seg}/`，这是 `_role_skill_dir` 定段的依据
+    （2026-08-25 起技能目录段按文件位置解析，不按 frontmatter domain）。
+    """
+    p = (
+        tmp_path / "角色-测试角色.md" if seg is None
+        else tmp_path / "00-系统" / "角色基因" / seg / "角色-测试角色.md"
+    )
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(f"---\nrole: 测试角色\ndomain: {domain}\n---\n{body}", encoding="utf-8")
     return p
 
@@ -230,10 +240,19 @@ class TestSkillPoolDistinctness:
             )
         return tmp
 
+    @staticmethod
+    def _role_note(tmp: Path, role: str, seg: str = "testdom") -> Path:
+        """造出角色基因文件本体 —— 2026-08-25 起技能目录段由它的位置决定。"""
+        p = tmp / "00-系统" / "角色基因" / seg / f"角色-{role}.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("---\nrole: x\n---\n\n## 1. 核心\n略\n", encoding="utf-8")
+        return p
+
     def _run(self, tmp: Path, pool: dict[str, list[str]], monkeypatch) -> list[str]:
         self._mk(tmp, "测试角色", pool)
+        note = self._role_note(tmp, "测试角色")
         monkeypatch.setattr(ra_mod, "VAULT_ROOT", tmp)
-        return ra_mod._indistinct_skills_in_pool("testdom", "角色-测试角色")
+        return ra_mod._indistinct_skills_in_pool(note)
 
     def test_签名完全相同的组全部报出(self, tmp_path: Path, monkeypatch):
         """复刻 `music/编曲` 的 6 张 R&B 同签名。"""
@@ -262,9 +281,41 @@ class TestSkillPoolDistinctness:
 
     def test_目录不存在返回空不抛错(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr(ra_mod, "VAULT_ROOT", tmp_path)
-        assert ra_mod._indistinct_skills_in_pool("nodom", "角色-不存在") == []
-        assert ra_mod._indistinct_skills_in_pool("", "角色-空域") == []
-        assert ra_mod._indistinct_skills_in_pool("testdom", "不带前缀") == []
+        assert ra_mod._indistinct_skills_in_pool(
+            self._role_note(tmp_path, "不存在", seg="nodom")) == []
+        assert ra_mod._indistinct_skills_in_pool(
+            self._role_note(tmp_path, "空域", seg="")) == []
+        assert ra_mod._indistinct_skills_in_pool(
+            tmp_path / "00-系统" / "角色基因" / "testdom" / "不带前缀.md") == []
+        # 角色文件不在 00-系统/角色基因/ 子树下 → 无法定段，返回 None 而非猜
+        assert ra_mod._indistinct_skills_in_pool(tmp_path / "别处" / "角色-流浪.md") == []
+
+    def test_domain与目录段不等时按文件位置解析(self, tmp_path: Path, monkeypatch):
+        """SE 角色 `domain: 技术开发` 但目录段是 `se` —— 必须按文件位置走。
+
+        2026-08-25 实测：原实现按 frontmatter `domain` 拼路径，于是一直在找不
+        存在的 `20-知识/角色技能/技术开发/`，本 lint 对全部 7 个 SE 角色**从未
+        执行过**（se 域真答案恰好也是 0，所以没露馅）。
+        """
+        self._mk(tmp_path, "后端工程师", {
+            "B1": ["soul"], "B2": ["soul"],      # 同签名，正确解析时必报 2 条
+        })
+        # 角色文件放 se/ 段，frontmatter 却写 domain: 技术开发
+        p = tmp_path / "00-系统" / "角色基因" / "se" / "角色-后端工程师.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("---\nrole: 后端工程师\ndomain: 技术开发\n---\n\n## 1. 核心\n略\n",
+                     encoding="utf-8")
+        # _mk 造的池在 testdom 段，这里要的是 se 段
+        d = tmp_path / "20-知识" / "角色技能" / "se" / "后端工程师"
+        d.mkdir(parents=True, exist_ok=True)
+        for stem in ("B1", "B2"):
+            (d / f"{stem}.md").write_text(
+                "---\ntype: skill\ntrigger:\n  keywords:\n    - 'soul'\n---\n\n## 核心约束\n略\n",
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(ra_mod, "VAULT_ROOT", tmp_path)
+        out = ra_mod._indistinct_skills_in_pool(p)
+        assert len(out) == 2, f"按文件位置(se)应扫到 2 张同签名，实得 {out}"
 
     def test_报告里出现修法指引(self, tmp_path: Path, monkeypatch):
         """lint 不能只报数字 —— 必须给出根因与怎么改，否则读报告的人不知道干什么。
@@ -274,7 +325,9 @@ class TestSkillPoolDistinctness:
         """
         self._mk(tmp_path, "测试角色", {"A": ["soul"], "B": ["soul"]})
         monkeypatch.setattr(ra_mod, "VAULT_ROOT", tmp_path)
-        m = ra_mod._measure_role(_write(tmp_path, _body(), domain="testdom"))
+        m = ra_mod._measure_role(
+            _write(tmp_path, _body(), domain="testdom", seg="testdom")
+        )
         assert len(m["skill_pool_indistinct"]) == 2, "前提不成立：lint 没报出"
         text = ra_mod._format_measurements([m])
         assert "无任何独有 keyword" in text

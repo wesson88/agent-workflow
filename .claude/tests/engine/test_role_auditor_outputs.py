@@ -235,7 +235,7 @@ class TestRunAudit:
         assert "framework_choice" in e["patterns"]
 
 
-# ── P6：skill_refs 治理 + trigger 完整性 lint ────────────────
+# ── 外迁 skill 治理 + trigger 完整性 lint ────────────────────
 class TestSkillTriggerValid:
     """_skill_trigger_valid：判断 skill frontmatter 的 trigger 字段是否合法。"""
 
@@ -285,108 +285,132 @@ def _write_skill(vault: Path, rel: str, frontmatter_yaml: str) -> Path:
     return p
 
 
-class TestMeasureRoleSkillRefs:
-    """_measure_role 的 P6 新字段：skill_refs_count / over_limit / trigger_gaps。"""
+_FM_BASE = (
+    "domain: 测域\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\n"
+    "aliases: []\nupstream: []\ndownstream: []\nmonitors: []\n"
+    "inputs: []\noutputs: []\ntools: []"
+)
 
-    def test_no_skill_refs_zero_count_no_gaps(self, tmp_vault):
+
+class TestMeasureRoleOutsourcedSkills:
+    """_measure_role 的外迁 skill lint（2026-08-25 起口径 = 整个 skill 目录）。
+
+    改动前本类叫 TestMeasureRoleSkillRefs，量的是 frontmatter `skill_refs` 声明。
+    该字段废弃后两件事同时变了：
+      ① 扫描源 = `20-知识/角色技能/{domain}/{角色}/` 目录，声明不再参与；
+      ② `skill_refs_max` 软上限连同 `skill_refs_over_limit` 字段一并删除。
+    """
+
+    def test_no_skill_dir_zero_count_no_gaps(self, tmp_vault):
         role_path = _write_role(
-            tmp_vault.path, "角色-无 skill.md",
-            "role: 无 skill\ndomain: 元\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\ninputs: []\noutputs: []\ntools: []",
+            tmp_vault.path, "角色-无 skill.md", f"role: 无 skill\n{_FM_BASE}",
         )
         m = ra_mod._measure_role(role_path)
-        assert m["skill_refs_count"] == 0
-        assert not m["skill_refs_over_limit"]
+        assert m["skill_file_count"] == 0
         assert m["skill_trigger_gaps"] == []
+        assert "skill_refs_over_limit" not in m, "废弃字段不该复活"
+        assert "skill_refs_count" not in m
 
-    def test_within_limit_all_triggers_valid_no_gaps(self, tmp_vault):
+    def test_all_triggers_valid_no_gaps(self, tmp_vault):
         for i in range(3):
             _write_skill(
-                tmp_vault.path, f"20-知识/角色技能/测试/S{i}.md",
+                tmp_vault.path, f"20-知识/角色技能/有 skill/S{i}.md",
                 f"type: skill\ntrigger:\n  keywords:\n    - kw{i}",
             )
         role_path = _write_role(
-            tmp_vault.path, "角色-有 skill.md",
-            "role: 有 skill\ndomain: 元\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\ninputs: []\noutputs: []\ntools: []\nskill_refs:\n  - 20-知识/角色技能/测试/S0.md\n  - 20-知识/角色技能/测试/S1.md\n  - 20-知识/角色技能/测试/S2.md",
+            tmp_vault.path, "角色-有 skill.md", f"role: 有 skill\n{_FM_BASE}",
         )
         m = ra_mod._measure_role(role_path)
-        assert m["skill_refs_count"] == 3
-        assert not m["skill_refs_over_limit"]
+        assert m["skill_file_count"] == 3
         assert m["skill_trigger_gaps"] == []
 
-    def test_over_limit_triggers_flag(self, tmp_vault):
-        # 6 个 skill（超软上限 5），每个都有 trigger.always 保证 gaps 为空
-        for i in range(6):
+    def test_undeclared_skills_are_also_checked(self, tmp_vault):
+        """口径修正的正控：目录里的每一张都查，不看有没有被声明过。
+
+        实测缘由：UI设计师 frontmatter 只声明 2 张，目录里有 17 张 ——
+        另外 15 张的 trigger 在旧口径下从来没被查过。
+        """
+        _write_skill(
+            tmp_vault.path, "20-知识/角色技能/欠声明/好的.md",
+            "type: skill\ntrigger:\n  keywords:\n    - kw",
+        )
+        _write_skill(
+            tmp_vault.path, "20-知识/角色技能/欠声明/坏的.md", "type: skill",
+        )
+        role_path = _write_role(
+            tmp_vault.path, "角色-欠声明.md", f"role: 欠声明\n{_FM_BASE}",
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["skill_file_count"] == 2
+        assert len(m["skill_trigger_gaps"]) == 1
+        assert "坏的.md" in m["skill_trigger_gaps"][0]
+
+    def test_count_alone_never_reports_an_issue(self, tmp_vault):
+        """数量上限已删 —— 22 张也不报警。
+
+        这条是**刻意的回归守卫**：`skill_refs_max = 5` 的依据是「上限 = 现最高值」，
+        自认循环论证；改扫目录后实测编曲 22 / 混音师 21 / UI设计师 17，5 会对
+        10 个角色里 8 个报警。没有数据能支撑「一个角色该有几张」，所以宁可无阈值。
+        谁想加回来，得先带依据，并让这条测试红。
+        """
+        for i in range(22):
             _write_skill(
-                tmp_vault.path, f"20-知识/角色技能/测试/S{i}.md",
+                tmp_vault.path, f"20-知识/角色技能/很多/S{i}.md",
                 "type: skill\ntrigger:\n  always: true",
             )
-        refs = "\n".join(f"  - 20-知识/角色技能/测试/S{i}.md" for i in range(6))
         role_path = _write_role(
-            tmp_vault.path, "角色-过多 skill.md",
-            f"role: 过多\ndomain: 元\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\ninputs: []\noutputs: []\ntools: []\nskill_refs:\n{refs}",
+            tmp_vault.path, "角色-很多.md", f"role: 很多\n{_FM_BASE}",
         )
         m = ra_mod._measure_role(role_path)
-        assert m["skill_refs_count"] == 6
-        assert m["skill_refs_over_limit"]
+        assert m["skill_file_count"] == 22
         assert m["skill_trigger_gaps"] == []
-
-    def test_missing_trigger_field_gap(self, tmp_vault):
-        _write_skill(
-            tmp_vault.path, "20-知识/角色技能/测试/S_no_trigger.md",
-            "type: skill",
-        )
-        role_path = _write_role(
-            tmp_vault.path, "角色-触发器空.md",
-            "role: 触发器空\ndomain: 元\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\ninputs: []\noutputs: []\ntools: []\nskill_refs:\n  - 20-知识/角色技能/测试/S_no_trigger.md",
-        )
-        m = ra_mod._measure_role(role_path)
-        assert m["skill_refs_count"] == 1
-        assert len(m["skill_trigger_gaps"]) == 1
-        assert "S_no_trigger.md" in m["skill_trigger_gaps"][0]
-        assert "trigger 缺失" in m["skill_trigger_gaps"][0]
-
-    def test_missing_skill_file_gap(self, tmp_vault):
-        role_path = _write_role(
-            tmp_vault.path, "角色-指向缺失.md",
-            "role: 缺失指向\ndomain: 元\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\ninputs: []\noutputs: []\ntools: []\nskill_refs:\n  - 20-知识/角色技能/测试/NOT_EXISTS.md",
-        )
-        m = ra_mod._measure_role(role_path)
-        assert m["skill_refs_count"] == 1
-        assert len(m["skill_trigger_gaps"]) == 1
-        assert "NOT_EXISTS.md" in m["skill_trigger_gaps"][0]
-        assert "文件缺失" in m["skill_trigger_gaps"][0]
-
-    def test_format_measurements_includes_p6_issues(self, tmp_vault):
-        """P6 lint 触发时 _format_measurements 应输出对应 issue 行。"""
-        _write_skill(
-            tmp_vault.path, "20-知识/角色技能/测试/S_bad.md",
-            "type: skill",
-        )
-        role_path = _write_role(
-            tmp_vault.path, "角色-触发器空.md",
-            "role: 触发器空\ndomain: 元\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\ninputs: []\noutputs: []\ntools: []\nskill_refs:\n  - 20-知识/角色技能/测试/S_bad.md",
-        )
-        m = ra_mod._measure_role(role_path)
         report = ra_mod._format_measurements([m])
-        assert "trigger 缺失" in report
-        # 数量未超限，[SHRINK?] 不应出现
         assert "[SHRINK?]" not in report
+        assert "软上限" not in report
 
-    def test_format_measurements_over_limit_shrink(self, tmp_vault):
-        for i in range(6):
-            _write_skill(
-                tmp_vault.path, f"20-知识/角色技能/测试/T{i}.md",
-                "type: skill\ntrigger:\n  always: true",
-            )
-        refs = "\n".join(f"  - 20-知识/角色技能/测试/T{i}.md" for i in range(6))
+    def test_missing_trigger_gap_says_never_reaches_prompt(self, tmp_vault):
+        """废弃后 trigger 是唯一通道 → 告警必须说清后果，不只说「缺失」。"""
+        _write_skill(
+            tmp_vault.path, "20-知识/角色技能/触发器空/S_no_trigger.md",
+            "type: skill",
+        )
         role_path = _write_role(
-            tmp_vault.path, "角色-太多.md",
-            f"role: 太多\ndomain: 元\nmodel: claude-sonnet-4-6\nmax_tokens: 4096\nstyle: 测\naliases: []\nupstream: []\ndownstream: []\nmonitors: []\ninputs: []\noutputs: []\ntools: []\nskill_refs:\n{refs}",
+            tmp_vault.path, "角色-触发器空.md", f"role: 触发器空\n{_FM_BASE}",
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["skill_file_count"] == 1
+        assert len(m["skill_trigger_gaps"]) == 1
+        gap = m["skill_trigger_gaps"][0]
+        assert "S_no_trigger.md" in gap
+        assert "永不进 prompt" in gap
+
+    def test_underscore_and_dot_files_skipped(self, tmp_vault):
+        """`_通用` 类前缀与隐藏文件不参与（与 discover_role_skills 口径一致）。"""
+        _write_skill(
+            tmp_vault.path, "20-知识/角色技能/跳过/_模板.md", "type: skill",
+        )
+        _write_skill(
+            tmp_vault.path, "20-知识/角色技能/跳过/S.md",
+            "type: skill\ntrigger:\n  always: true",
+        )
+        role_path = _write_role(
+            tmp_vault.path, "角色-跳过.md", f"role: 跳过\n{_FM_BASE}",
+        )
+        m = ra_mod._measure_role(role_path)
+        assert m["skill_file_count"] == 1
+        assert m["skill_trigger_gaps"] == []
+
+    def test_format_measurements_includes_trigger_gap(self, tmp_vault):
+        _write_skill(
+            tmp_vault.path, "20-知识/角色技能/报告/S_bad.md", "type: skill",
+        )
+        role_path = _write_role(
+            tmp_vault.path, "角色-报告.md", f"role: 报告\n{_FM_BASE}",
         )
         m = ra_mod._measure_role(role_path)
         report = ra_mod._format_measurements([m])
-        assert "[SHRINK?]" in report
-        assert "skill_refs 数量 6" in report
+        assert "外迁 skill 触发器不合法" in report
+        assert "S_bad.md" in report
 
 
 # ── 2026-08-13 新增三条 lint 的正控 ────────────────────────────────────

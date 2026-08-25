@@ -127,17 +127,12 @@ class Role:
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]
 
-    # 外迁的技能引用（vault 相对路径），load_role 时已 inline 拼到 body 末尾
-    skill_refs: tuple[str, ...]
-
     # 规则章节按需引用（wikilink 字符串），形如 "[[架构分解规则#§3 分解步骤]]"。
     # **不**拼进 body（避免膨胀 system_prompt 触发 audit 阈值）；调用方自己
     # 用 engine.wikilink.expand_wikilinks 展开后注入到 user_prompt 的 context。
-    # 与 skill_refs 的差异：skill 全文进 system 用于稳定方法论；
-    # rule_refs 按章节进 user 用于任务相关的规则节选。
     rule_refs: tuple[str, ...]
 
-    # 笔记正文（含 DYNAMIC 区域 + 已 inline 的 skill 内容）
+    # 笔记正文（含 DYNAMIC 区域）
     body: str
 
     # 完整 frontmatter（debug/扩展用）
@@ -192,34 +187,57 @@ def _seq(value, default=()) -> tuple[str, ...]:
     return (str(value),)
 
 
-def _resolve_skill_refs(refs: tuple[str, ...], vault_root: Path) -> str:
-    """读取每个 skill 文件，去掉自身 frontmatter，用分隔符拼成单段。
+# ── skill_refs 废弃守卫（2026-08-25）────────────────────────
+# 该字段原本的机制是：frontmatter 列 vault 相对路径，load_role 把文件全文 inline
+# 拼到 body 末尾（`## 引用技能（来自 skill_refs）` + 每份一个 `=== Skill: {rel} ===`
+# 信封），供「稳定方法论」进 system prompt。
+#
+# 废弃依据（全部实测，见 [[编排器改造-skill_refs废弃-2026-08-25]]）：
+#   ① 注入侧 **0/14 生效**。skill 块拼在 body 末尾（§8 版本历史之后），而
+#      `common._extract_role_prompt_sections` 对业务角色严格只取 §1–§6（T2.7 白名单），
+#      从 §7 起整段丢弃。元角色走全 body 但 4 个元角色 skill_refs 全为 `[]`。
+#      唯一可能透出的路径是 TL Detail call 的 `build_system_prompt_no_skills`，
+#      而它的存在目的恰好是**把这个块剥掉**。
+#   ② 作为索引 100% 冗余。5 个有值角色里 4 个的声明集合与
+#      `20-知识/角色技能/{domain}/{角色}/` 目录内容完全相同（后端 4/4、架构师 5/5、
+#      技术主管 2/2、前端 1/1）；UI设计师声明 2 张而目录有 17 张，是**欠声明**而非补充。
+#   ③ 不影响可达性。上述 5 个目录共 29 张 skill **全部**带合法 trigger，
+#      触发器路径（`discover_role_skills` 扫目录）本就能召回，删声明不丢任何一张。
+#
+# 保留告警而非静默忽略：一个仍被声明、却已无任何消费者的字段，正是本项目在治的
+# 「沉默失效」形态本身（第 10 例就是它自己）。字段还在 → 必须有人喊。
+_SKILL_REFS_DEPRECATED_HINT = (
+    "skill_refs 已废弃（2026-08-25）：不再读取、不再注入。"
+    "skill 文件靠 frontmatter.trigger 被 skill_trigger 扫目录召回；"
+    "请从角色 frontmatter 删除该字段，并确认目标 skill 带 trigger.keywords。"
+)
 
-    缺失文件 → 占位 `[SKILL MISSING: <path>]` + stderr 警告，不 fail。
-    """
+
+def _warn_deprecated_skill_refs(fm: dict, note_path: Path) -> None:
+    """frontmatter 仍带非空 skill_refs → stderr + audit warn。空 `[]` 不告警。"""
+    raw = fm.get("skill_refs")
+    if isinstance(raw, str):
+        refs = [raw.strip()] if raw.strip() else []
+    elif isinstance(raw, (list, tuple)):
+        refs = [str(x).strip() for x in raw if x is not None and str(x).strip()]
+    else:
+        refs = []
     if not refs:
-        return ""
-    parts: list[str] = []
-    for ref in refs:
-        rel = ref.strip()
-        if not rel:
-            continue
-        path = (vault_root / rel).resolve()
-        if not path.is_file():
-            print(f"⚠️ skill_refs 缺文件：{rel}", file=sys.stderr)
-            parts.append(f"=== Skill: {rel} ===\n[SKILL MISSING: {rel}]")
-            continue
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except Exception as e:
-            print(f"⚠️ skill_refs 读失败 {rel}：{e}", file=sys.stderr)
-            parts.append(f"=== Skill: {rel} ===\n[SKILL READ ERROR: {e}]")
-            continue
-        _, sk_body = split_frontmatter(raw)
-        parts.append(f"=== Skill: {rel} ===\n{sk_body.strip()}")
-    if not parts:
-        return ""
-    return "\n\n## 引用技能（来自 skill_refs）\n\n" + "\n\n".join(parts)
+        return
+    print(
+        f"⚠️ {note_path.name} 声明了 {len(refs)} 条 skill_refs 但不会生效。"
+        f"{_SKILL_REFS_DEPRECATED_HINT}",
+        file=sys.stderr,
+    )
+    try:
+        from .llm import _append_token_audit
+        _append_token_audit("warn", "skill_refs_deprecated_declared", {
+            "role_note": note_path.name,
+            "count": len(refs),
+            "refs": refs[:10],
+        })
+    except Exception:
+        pass
 
 
 # ── 契约解析（P5a 影子模式）─────────────────────────────
@@ -461,9 +479,7 @@ def _build_role(
     fm, body = split_frontmatter(content)
     if not fm.get("role"):
         raise ValueError(f"{note_path} 缺少 frontmatter.role 字段")
-    skill_refs = _seq(fm.get("skill_refs"))
-    skill_block = _resolve_skill_refs(skill_refs, VAULT_ROOT) if skill_refs else ""
-    body_with_skills = body + ("\n\n" + skill_block if skill_block else "")
+    _warn_deprecated_skill_refs(fm, note_path)
     rule_refs = _seq(fm.get("rule_refs"))
     capability_refs = _seq(fm.get("capability_refs"))
     if capability_refs:
@@ -565,10 +581,9 @@ def _build_role(
         monitors=_seq(fm.get("monitors")),
         inputs=declared_inputs,
         outputs=declared_outputs,
-        skill_refs=skill_refs,
         capability_refs=capability_refs,
         rule_refs=rule_refs,
-        body=body_with_skills,
+        body=body,
         frontmatter=fm,
         budget_input_tokens=(int(fm["budget_input_tokens"])
                              if fm.get("budget_input_tokens") else None),

@@ -140,7 +140,7 @@ class TestBuildSystemPromptIntegration:
             max_tokens=1024, tools=(), version="0.0.0",
             upstream=(), downstream=(), monitors=(),
             inputs=(), outputs=(),
-            skill_refs=(), rule_refs=(), body="# fake\n\n## 1. x\n",
+            rule_refs=(), body="# fake\n\n## 1. x\n",
             frontmatter={}, capability_refs=("[[huashu-design/manifest]]",),
         )
         # monkeypatch load_role 返回 fake role
