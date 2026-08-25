@@ -222,22 +222,6 @@ def _build_dynamic_segment(role) -> str:
     return "\n".join(dynamic_parts)
 
 
-# ── 内部：skill_refs 剥离辅助 ────────────────────────────
-_SKILL_BLOCK_RE = re.compile(
-    r"\n\n## 引用技能（来自 skill_refs）\n\n.*",
-    re.DOTALL,
-)
-
-
-def _strip_skill_refs_block(body: str) -> str:
-    """从已内联 skill_refs 的 body 中剥除 skill 块，只保留角色笔记主体。
-
-    role_loader._resolve_skill_refs 拼接的标记固定为
-    `## 引用技能（来自 skill_refs）` ，匹配到该标题后截断即可。
-    """
-    return _SKILL_BLOCK_RE.sub("", body)
-
-
 _VERSION_HISTORY_RE = re.compile(
     r"(?:\r?\n)?##\s+8\..*",
     re.DOTALL,
@@ -312,42 +296,19 @@ def build_system_prompt_no_skills(
     role_name_or_alias: str,
     project: str | None = None,
 ) -> tuple[str, str]:
-    """与 build_system_prompt 相同，但 static 中不内联 skill_refs 文件内容。
+    """已退化为 build_system_prompt 的别名。**保留仅为调用点语义自证**。
 
-    返回 (static_no_skills, dynamic)。
-    供需要按任务动态裁剪 skill 的调用方使用（如 technical_lead Detail call）：
-    调用方拿到 static_no_skills 后，自行调用 build_task_skill_block 拼接
-    只与当前任务相关的 skill 文本，替代全量注入。
+    历史：本函数的全部差异是从 body 里剥掉 `role_loader._resolve_skill_refs`
+    inline 进来的 `## 引用技能（来自 skill_refs）` 块，供 technical_lead 的
+    Detail call 换成 build_task_skill_block 的按任务裁剪版本。
 
-    token 收益：每个 Detail call 少注入 ~(N-k) × avg_skill_size tokens，
-    其中 N = 角色全量 skill 数，k = 当前任务实际命中数（通常 1-2）。
+    2026-08-25 skill_refs 废弃后 load_role 不再 inline 任何 skill，"剥除"无对象，
+    两个函数逐字符相同。**不合并**是因为 technical_lead 的调用点
+    （`system_prompt_no_skills` + `build_task_skill_block`）表达的是
+    「这一路的 skill 由我按任务自己挑」这一契约；换回 build_system_prompt
+    会让那段代码读起来像是在拿全量注入，反而更容易被改错。
     """
-    role = load_role(role_name_or_alias)
-
-    summary = [
-        f"角色：{role.name}",
-        f"领域：{role.domain}",
-        f"风格：{role.style}",
-    ]
-    if role.skills:
-        summary.append(f"技能:{', '.join(role.skills)}")
-
-    # 从 body 剥除已内联的 skill_refs 块 + 过滤自身 DYNAMIC + 剥 §8 版本历史
-    body_no_skills = _strip_skill_refs_block(role.body)
-    body_no_skills = _filter_self_dynamic(body_no_skills.strip())
-    body_no_skills = _strip_version_history(body_no_skills)
-
-    static_parts = [
-        "## 角色摘要",
-        "\n".join(summary),
-        "",
-        _strip_evidence_lines(body_no_skills),
-        OUTPUT_FORMAT_SPEC,
-    ]
-    static = "\n".join(static_parts)
-
-    dynamic = _build_dynamic_segment(role)
-    return static, dynamic
+    return build_system_prompt(role_name_or_alias, project=project)
 
 
 def build_task_skill_block(
@@ -401,13 +362,13 @@ def build_task_skill_block(
         # 解析路径（使用 engine.wikilink resolve）
         path = resolve_target(target, vault_root=root)
         if path is None or not path.is_file():
-            print(f"[skill_refs] ⚠️ 未找到 skill 文件：{target}", file=sys.stderr)
+            print(f"[task_skill] ⚠️ 未找到 skill 文件：{target}", file=sys.stderr)
             continue
 
         try:
             raw = path.read_text(encoding="utf-8")
         except OSError as e:
-            print(f"[skill_refs] ⚠️ 读取 skill 失败 {target}：{e}", file=sys.stderr)
+            print(f"[task_skill] ⚠️ 读取 skill 失败 {target}：{e}", file=sys.stderr)
             continue
 
         _, body = split_frontmatter(raw)

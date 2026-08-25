@@ -572,9 +572,10 @@ def _run_pass_split(
             written.append(rel_target)
             continue
 
-        # ── skill_refs 动态裁剪：解析 summary wikilink，注入当前任务相关 skill ─
-        # 扫描 summary 里的 [[BN-xxx]] / [[FN-xxx]] wikilink，只注入命中的 skill，
-        # 把每 detail call 的 system prompt 体积从全量降到只含相关技能。
+        # ── 按任务裁剪 skill：解析 summary wikilink，只注入当前任务相关的 ─────
+        # 扫描 summary 里的 [[BN-xxx]] / [[FN-xxx]] wikilink，只注入命中的 skill。
+        # 注：机制是 wikilink 驱动的，与（已于 2026-08-25 废弃的）frontmatter
+        # `skill_refs` 字段无关 —— 原注释写「skill_refs 动态裁剪」是误导。
         task_wikilinks = [wl.target for wl in parse_wikilinks(summary)]
         skill_block = build_task_skill_block(task_wikilinks, side) if task_wikilinks else ""
         if skill_block:
@@ -882,7 +883,10 @@ def main() -> int:
 
     # 上游补丁：架构师的 DYNAMIC 区域已在 build_system_prompt 内自动注入
     system_prompt = build_system_prompt(ROLE, project=project)
-    # Plan+Detail 拆分使用不含 skill_refs 全量内联的版本，skill 按任务动态注入
+    # Detail call 用「本路 skill 由我按任务自己挑」的版本（下方 build_task_skill_block
+    # 按 summary wikilink 拼）。2026-08-25 skill_refs 废弃后 load_role 不再 inline
+    # 任何 skill，本函数已退化为 build_system_prompt 的别名 —— 保留调用是为了让
+    # 这一路的契约在代码里可读，见 prompt_builder 里的说明。
     system_prompt_no_skills = build_system_prompt_no_skills(ROLE, project=project)
 
     # Phase 4c-3 + 2026-05-16 token 优化：脑暴笔记只读末轮裁决段，

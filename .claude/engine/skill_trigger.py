@@ -38,8 +38,10 @@ files + 项目代码自动召回。
   预算用尽即止。**由预算决定升级几个，不引入 top-N 阈值。**
 
 ⚠️ 排序维度与载荷分级**均为纯序数比较，不含任何权重或数字阈值** —— 刻意如此，
-避免再造一个像 `role_auditor.LIMITS["skill_refs_max"]` 那样「上限 = 现最高值」
-的循环论证阈值（2026-08-17 复盘）。
+避免再造一个「上限 = 现最高值」的循环论证阈值（2026-08-17 复盘）。当时的反面
+样本是 `role_auditor.LIMITS["skill_refs_max"] = 5`（= 当时最多的架构师 5 张），
+该阈值已于 2026-08-25 随 skill_refs 废弃一并删除 —— **删掉而不是重新定值**，
+因为换成扫目录后没有任何数据能支撑「一个角色该有几张 skill」。
 
 ⚠️⚠️ 但 `render_triggered_block` 的三个**预算参数**（`max_chars_per_skill` /
 `max_chars_per_pointer` / `total_char_budget`）依据全部不成立，已按项目 CLAUDE.md
@@ -491,7 +493,8 @@ def render_triggered_block(
 
     - `max_chars_per_skill=3000` / `total_char_budget=12_000`
       原写「沿用改造前既有值，**非本次新增**」——**「既有」不是依据**，与本轮刚
-      批倒的 `role_auditor.LIMITS["skill_refs_max"] = 现最高值` 是同一个循环论证。
+      批倒的 `skill_refs_max = 现最高值` 是同一个循环论证（该阈值已于 2026-08-25
+      删除，见模块 docstring）。
       而且更糟：两遍填充让**预算直接决定多少真知识进 prompt**，本改造对这两个数的
       依赖比改造前重得多，却用"非本次新增"把它豁免了审查。来源尚未核实。
     - `max_chars_per_pointer=500`

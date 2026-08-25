@@ -35,7 +35,7 @@ class TestB1SystemPromptTuple3:
             max_tokens=1024, tools=(), version="0.0.0",
             upstream=(), downstream=(), monitors=(),
             inputs=(), outputs=(),
-            skill_refs=(), rule_refs=(), body="# fake\n\n## 1. x\n",
+            rule_refs=(), body="# fake\n\n## 1. x\n",
             frontmatter={}, capability_refs=(),
         )
         monkeypatch.setattr(common_mod, "load_role", lambda *a, **kw: role)
@@ -62,7 +62,7 @@ class TestB1SystemPromptTuple3:
             max_tokens=1024, tools=(), version="0.0.0",
             upstream=(), downstream=(), monitors=(),
             inputs=(), outputs=(),
-            skill_refs=(), rule_refs=(), body="# fake\n\n## 1. x\n",
+            rule_refs=(), body="# fake\n\n## 1. x\n",
             frontmatter={}, capability_refs=(),
         )
         monkeypatch.setattr(common_mod, "load_role", lambda *a, **kw: role)

@@ -269,18 +269,25 @@ def main() -> int:
             f"4. frontmatter `version` 升次版本号；`## 9. 版本历史`（或同等章节）加一行说明\n"
             f"5. **承载分离判断**（规范 §6.8 + §10）：融入 [GRADUATE] 后，估算目标章节字符数。若 ≥ 1500 chars 或单条补丁正文 ≥ 1200 chars，**应外迁到 skill 文件**而非全文塞进主体：\n"
             f"   - 主体只留\"一句话核心约束 + skill 指针\"（如 \"详见 skill `B5-空集守卫.md`\"）\n"
-            f"   - frontmatter `skill_refs` 列表新增对应路径\n"
-            f"   - 新建 skill 文件输出为额外 FILE 块（路径 `20-知识/角色技能/{role_name}/<patch_id>-<短标题>.md`），含 type: skill / role / patch_id 的 frontmatter + 核心约束 + 详细规则 + grep gate + 跨项目证据\n"
+            f"   - **不要**动角色 frontmatter 的 refs 类字段：`skill_refs` 已废弃，"
+            f"外迁 skill 靠自己的 `trigger` 被扫目录召回，不需要在角色里登记\n"
+            f"   - 新建 skill 文件输出为额外 FILE 块（路径 `20-知识/角色技能/{domain}/{role_name}/<patch_id>-<短标题>.md`"
+            f"——**域段 `{domain}` 不可省**，省了就落在引擎扫描根之外、永远进不了 prompt），"
+            f"frontmatter 必含 type: skill / role / patch_id **以及 `trigger.keywords`**；"
+            f"正文含核心约束 + 详细规则 + grep gate + 跨项目证据\n"
+            f"   - ⚠️ `trigger.keywords` 是硬性的：**没有它这份 skill 永远不会进任何 prompt**"
+            f"（外迁即等于删除）。keyword 要写「什么任务需要它」而不是「它属于哪类」，"
+            f"且必须与同目录其它 skill 有区分度 —— 全同的 keyword 集合会让触发器只能靠文件名字典序挑\n"
             f"6. 输出 FILE 块（角色笔记必填 + 可选多份 skill 文件）：\n\n"
             f"<!-- FILE: {role_gene_rel} -->\n"
-            f"（整份重写后内容；超限时主体已收窄 + frontmatter `skill_refs` 已添加新路径）\n"
+            f"（整份重写后内容；超限时主体已收窄为「一句话约束 + skill 指针」）\n"
             f"<!-- /FILE -->\n\n"
-            f"<!-- FILE: 20-知识/角色技能/{role_name}/<patch_id>-<短标题>.md -->\n"
+            f"<!-- FILE: 20-知识/角色技能/{domain}/{role_name}/<patch_id>-<短标题>.md -->\n"
             f"（仅在判定为外迁时输出；否则省略本块）\n"
             f"<!-- /FILE -->\n\n"
             f"**绝对不要**：\n"
             f"- 触碰其它无关章节 / 修改自己（晋升者）的角色笔记 / 合并多份角色到一份输出\n"
-            f"- 输出 `20-知识/角色技能/{role_name}/` 以外路径的 FILE 块（其它路径会被引擎拒写）\n"
+            f"- 输出 `20-知识/角色技能/{domain}/{role_name}/` 以外路径的 FILE 块（其它路径会被引擎拒写）\n"
             f"- 主体未超 1500 / 补丁正文未超 1200 时强行外迁（产生零碎短 skill 文件违反规范 §10.6 反例）"
         )
 
@@ -317,8 +324,16 @@ def main() -> int:
             skipped.append(role_name)
             continue
 
-        # 5) 收集可选 skill 文件：仅允许 `20-知识/角色技能/{role_name}/` 子树
-        skill_prefix = f"20-知识/角色技能/{role_name}/"
+        # 5) 收集可选 skill 文件：仅允许 `20-知识/角色技能/{domain}/{role_name}/` 子树
+        #
+        # ⚠️ 2026-08-25 修：原为 `20-知识/角色技能/{role_name}/`，**缺 domain 段**。
+        # 引擎的扫描根是 `ability_loader` 里的
+        # `VAULT_ROOT/20-知识/角色技能/{domain}/{role_name}/`，所以按老前缀写出来的
+        # skill 文件落在扫描根之外 —— 生成即失联，永远进不了 prompt。
+        # 该缺陷在 skill_refs 废弃前被掩盖（名义上还有声明这条路），废弃后 trigger
+        # 是唯一通道，路径写错就等于白写。vault 里不存在任何无域段的角色技能目录，
+        # 说明这条路径此前从未真正产出过文件（或产出后被人工搬过）。
+        skill_prefix = f"20-知识/角色技能/{domain}/{role_name}/"
         skill_files: list[tuple[str, str]] = []
         rejected_paths: list[str] = []
         for rel_path, content in files.items():
