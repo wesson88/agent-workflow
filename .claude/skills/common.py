@@ -811,6 +811,7 @@ def build_system_prompt_ex(
 from engine.ability_loader import (  # noqa: E402,F401
     load_rule_block,
     load_genre_skill_block,
+    load_genre_primitive_block,
     load_skill_block,
 )
 

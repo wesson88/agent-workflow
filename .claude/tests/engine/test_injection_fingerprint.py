@@ -57,6 +57,11 @@ _REGISTRY: tuple[tuple[str, str, str, str, str], ...] = (
      "=== [[F-技术主管#6. 可用技能索引]] ==="),
     ("engine/ability_loader.py", "=== Skill (wikilink:[[{}]] · full) ===", "emit", "skill_wikilink",
      "=== Skill (wikilink:[[M1-频谱能量分配]] · full) ==="),
+    # 2026-08-26 新增：music 流派 primitive 独立通道（独立预算，见
+    # ability_loader.TOTAL_PRIMITIVE_BUDGET 的实测依据注释）。
+    # via 有两种：`wikilink`（简报 primitive_refs 点名）/ `auto-trigger:keyword:X`
+    ("engine/ability_loader.py", "=== Primitive ({} · {}): [[{}]] ===", "emit", "genre_primitive",
+     "=== Primitive (wikilink · sections): [[F-国风]] ==="),
     # 已退役：`engine/role_loader.py` 的 `=== Skill: {vault相对路径} ===`（静态
     # skill_refs）。2026-08-25 随字段废弃拆除产出点，故注册表里不再有它 ——
     # 若它回来了，`test_scan_matches_registry` 会以「扫到未注册的产出点」报红。

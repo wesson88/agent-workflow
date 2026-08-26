@@ -36,7 +36,7 @@ from common import (
     parse_args, resolve_project, build_system_prompt, read_input_files,
     write_output_atomic, parse_claude_output_to_files,
     call_claude, append_audit, utc_now, render_required_outputs,
-    load_rule_block, load_genre_skill_block,
+    load_rule_block, load_genre_skill_block, load_genre_primitive_block,
 )
 from engine import (
     set_role_status, role_is_blocked,
@@ -132,6 +132,13 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
     if rule_block:
         context = context + "\n\n" + rule_block
 
+    # primitive 在 skill 之前：它带着「该流派全部角色技能的索引」，是下面挑
+    # skill wikilink 的依据（见 user_prompt 里的 B1 约束）。顺序即阅读顺序。
+    prim_block, prim_hint = load_genre_primitive_block(ROLE, task, context)
+    print(f"[{ROLE}] 流派 primitive：{prim_hint}")
+    if prim_block:
+        context = context + "\n\n" + prim_block
+
     skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
     print(f"[{ROLE}] skill_trigger：{skill_hint}")
     if skill_block:
@@ -183,6 +190,11 @@ def _run_aggregation(
     print(f"[{ROLE}] rule_refs 注入（汇编模式）：{source_hint}")
     if rule_block:
         context = context + "\n\n" + rule_block
+
+    prim_block, prim_hint = load_genre_primitive_block(ROLE, task, context)
+    print(f"[{ROLE}] 流派 primitive（汇编模式）：{prim_hint}")
+    if prim_block:
+        context = context + "\n\n" + prim_block
 
     skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
     print(f"[{ROLE}] skill_trigger（汇编模式）：{skill_hint}")

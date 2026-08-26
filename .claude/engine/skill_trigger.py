@@ -231,6 +231,26 @@ class SkillMatch:
         )
 
 
+def _append_tie_audit(
+    rank_key: tuple[int, ...], got: list[str], lost: list[str],
+) -> None:
+    """把 rank_key 平局落 audit.jsonl（side channel，任何失败都不拦主链）。
+
+    与 stderr 那行同源同时机；分开写是因为 stderr 跨轮不聚合，而这条需要能
+    统计「一次全链跑里发生了多少次任意选择、都在哪些 skill 之间」。
+    """
+    try:
+        from .llm import _append_token_audit
+        _append_token_audit("warn", "skill_rank_key_tie", {
+            "rank_key": list(rank_key),
+            "group_size": len(got) + len(lost),
+            "full_payload": got,
+            "pointer_only": lost,
+        })
+    except Exception:
+        pass
+
+
 def _sort_matches(matches: Iterable[SkillMatch]) -> list[SkillMatch]:
     """按相关度降序；全等时按文件名升序（可复现，且保持改造前的字典序语义）。"""
     return sorted(
@@ -606,6 +626,15 @@ def render_triggered_block(
                 f"请给每张补至少 1 个本目录独有的任务性 keyword。",
                 file=sys.stderr,
             )
+            # 只打 stderr 统计不到（run_chain 的 stderr 不落盘、跨轮不聚合），
+            # 而这条恰恰是 P1.1 的**真实**失效条件 —— 比 lint 的口径更准：
+            # lint 比的是 frontmatter 声明的 keyword 全集，rank_key 只由**任务
+            # 文本实际命中**的词决定。2026-08-26 实测 D1-R&B（16 个 keyword）与
+            # 一张 12 个 keyword 的同流派 skill 声明集不同、lint 判「有独立签名」，
+            # 但任务写「R&B 70%」时只命中交集里的 `R&B` → rank_key 全等。故
+            # 「76/131 无独有 keyword」那个基线是**下界**，不是实数。先能统计，
+            # 再谈要不要重写那 76 张的 keyword。
+            _append_tie_audit(key, got, lost)
 
     # ── 渲染 ─────────────────────────────────────────────────
     parts: list[str] = []

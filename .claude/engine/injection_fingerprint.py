@@ -16,12 +16,13 @@ engine/injection_fingerprint.py — 注入指纹（P0.1 · 2026-08-24）
 从巧合升级为受测契约（见 tests/engine/test_injection_fingerprint.py 的
 `_REGISTRY`：新增注入点必须登记，否则测试红）。
 
-## 信封格式（全部 6 种，含产出点）
+## 信封格式（全部 7 种，含产出点）
 
 | kind             | 形状                                              | 产出点 |
 |------------------|---------------------------------------------------|--------|
 | `skill_trigger`  | `=== Skill (auto-trigger:{reason} · {tier}): [[stem]] ===` | skill_trigger.py |
 | `skill_wikilink` | `=== Skill (wikilink:[[target]] · full) ===`       | ability_loader.py |
+| `genre_primitive`| `=== Primitive ({via} · {tier}): [[stem]] ===`      | ability_loader.py（music 流派 primitive，独立预算） |
 | `skill_task`     | `=== Skill: [[target]] ===`                        | prompt_builder.py（TL 子任务） |
 | `skill_cite`     | `=== Skill 引用: [[target]] ({文件名}) ===`         | dev_backend / dev_frontend |
 | `rule_ref`       | `=== [[F-角色#章节]] ===`                           | ability_loader.py |
@@ -63,6 +64,11 @@ _AUTO_TRIGGER_RE = re.compile(
     r"^Skill \(auto-trigger:(?P<reason>.*?) · (?P<tier>\w+)\): \[\[(?P<stem>[^\[\]]+)\]\]$"
 )
 _WIKILINK_SKILL_RE = re.compile(r"^Skill \(wikilink:\[\[(?P<target>[^\[\]]+)\]\] · (?P<tier>\w+)\)$")
+# 流派 primitive（2026-08-26 新增产出点 ability_loader.load_genre_primitive_block）。
+# via = `wikilink`（简报 primitive_refs 点名）/ `auto-trigger:keyword:X`（流派名兜底）
+_PRIMITIVE_RE = re.compile(
+    r"^Primitive \((?P<via>.*?) · (?P<tier>\w+)\): \[\[(?P<stem>[^\[\]]+)\]\]$"
+)
 # 文件名：含扩展名（`.md` / `.py` / …），可带尾部括注（TL 的「（仅末轮决议）」）
 _FILENAME_RE = re.compile(r"^[^\[\]]*\.[0-9A-Za-z]{1,6}(?:\s*[（(].*[）)])?$")
 
@@ -74,7 +80,10 @@ _DEGRADE_MARKERS: tuple[tuple[str, str], ...] = (
 SKILL_KINDS = frozenset({
     "skill_trigger", "skill_wikilink", "skill_task", "skill_cite",
 })
-ALL_KINDS = SKILL_KINDS | {"rule_ref", "input_file", "unknown"}
+# genre_primitive **不算** SKILL_KINDS：它走独立通道、独立预算，和角色技能是
+# 两种东西（流派 idiom 卡 + 技能索引 vs 工程细则）。混进 SKILL_KINDS 会让
+# 「skill 占了多少输入」这个口径失真，而那正是 P1.2 要盯的数。
+ALL_KINDS = SKILL_KINDS | {"genre_primitive", "rule_ref", "input_file", "unknown"}
 
 
 def classify_envelope(label: str) -> dict[str, Any]:
@@ -95,6 +104,15 @@ def classify_envelope(label: str) -> dict[str, Any]:
     m = _WIKILINK_SKILL_RE.match(label)
     if m:
         return {"kind": "skill_wikilink", "name": m.group("target"), "tier": m.group("tier")}
+
+    m = _PRIMITIVE_RE.match(label)
+    if m:
+        return {
+            "kind": "genre_primitive",
+            "name": m.group("stem"),
+            "tier": m.group("tier"),
+            "reason": m.group("via"),
+        }
 
     if label.startswith("Skill 引用:"):
         m = _WIKILINK_FIRST_RE.search(label)
