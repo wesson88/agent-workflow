@@ -722,9 +722,16 @@ def assemble_user_context(
         context = context + "\n\n" + rule_block
 
     if getattr(role, "domain", "") == "music":
-        # primitive 先于 skill：它携带该流派角色技能的索引，是挑 skill 的依据
+        # primitive 先于 skill：它携带该流派角色技能的索引，是挑 skill 的依据。
+        # ⚠️ 传 `base_context` 而不是 `context`（= 已拼上 rule_block 的那个）：
+        # primitive 的显式路径把上游文本里的 `[[F-xxx]]` 当"用户点名了这个流派"。
+        # 而 rule_refs 注入的是**指令文本**，里面的 F-* 是**举例**不是点名 ——
+        # 2026-08-27 实测：`产物schema` §9 编曲方案 §5 的硬约束写着「本节列表项必须以
+        # `[[F-{流派名}]]` 开头（如 `[[F-民谣]]` / `[[F-雷鬼]]`）」，于是 `纸飞机`
+        # （民谣 60% + R&B 40%）的编曲被判定"显式点名了民谣和雷鬼"，F-雷鬼 抢到位置、
+        # 真正需要的 F-R&B 被额度挤掉。规则文本不是项目数据，不能当点名依据。
         prim_block, hints["genre_primitive"] = load_genre_primitive_block(
-            role.name, task, context,
+            role.name, task, base_context,
         )
         if prim_block:
             context = context + "\n\n" + prim_block

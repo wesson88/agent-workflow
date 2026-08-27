@@ -373,6 +373,74 @@ class TestFingerprint:
         assert "genre_primitive" in ALL_KINDS
 
 
+class TestRuleTextNotProjectData:
+    """规则文本里的 `[[F-*]]` 是**举例**，不是用户点名。
+
+    2026-08-27 实测的真 bug：`assemble_user_context` 把已拼上 rule_block 的
+    `context` 传给 primitive loader，而 `产物schema` §9 编曲方案 §5 的硬约束写着
+    「本节列表项必须以 `[[F-{流派名}]]` 开头（如 `[[F-民谣]]` / `[[F-雷鬼]]`）」。
+    于是 `纸飞机`（民谣 60% + R&B 40%）的编曲被判定"点名了民谣和雷鬼"，
+    F-雷鬼 抢到位置、真需要的 F-R&B 被独立额度挤掉。
+    """
+
+    class _Role:
+        name = "编曲"
+        domain = "music"
+        rule_refs = ("[[产物schema#9. 编曲方案]]",)
+
+    @pytest.fixture()
+    def vault(self, tmp_path, monkeypatch):
+        import engine
+        from engine import wikilink as wl_mod
+        monkeypatch.setattr(engine, "VAULT_ROOT", tmp_path)
+        monkeypatch.setattr(wl_mod, "VAULT_ROOT", tmp_path)
+        wl_mod.invalidate_cache()
+        music = tmp_path / "20-知识" / "角色技能" / "music"
+        music.mkdir(parents=True)
+        for g in ("民谣", "R&B", "雷鬼"):
+            _prim(music, g)
+        rules = tmp_path / "00-系统" / "规则" / "music"
+        rules.mkdir(parents=True)
+        # 复刻真实规则文本：把 F-* 当**格式示例**写在硬约束里。
+        (rules / "产物schema.md").write_text(
+            "---\ntype: contract\n---\n\n"
+            "## 9. 编曲方案\n\n"
+            "§5 流派配比溯源：本节列表项必须以 `[[F-{流派名}]]` wikilink 开头"
+            "（如 [[F-民谣]] / [[F-雷鬼]]），标注该元素来自哪份 primitive。\n",
+            encoding="utf-8")
+        yield tmp_path
+        wl_mod.invalidate_cache()
+
+    def test_规则示例不算点名(self, vault):
+        """项目正文只点了 民谣 + R&B → 注入这两份；规则里举例的 雷鬼 不能进来。"""
+        role = self._Role()
+        project = ("- **流派配比**：民谣 60% / R&B 40%\n"
+                   "- **primitive_refs**:\n  - [[F-民谣]]\n  - [[F-R&B]]\n")
+        ctx, hints = al.assemble_user_context(role, "编曲", project, domain="music")
+
+        # 前提校验：rule_block 真的进了 context 且真的带着 F-雷鬼 举例
+        # （否则本测试会因为"规则没注入"而假绿）。
+        assert "9. 编曲方案" in ctx, "rule_block 未注入，本测试失去意义"
+        assert "[[F-雷鬼]]" in (al.load_rule_block(role.rule_refs)[0] or "")
+
+        assert "[[F-民谣]] ===" in ctx and "[[F-R&B]] ===" in ctx
+        assert "[[F-雷鬼]] ===" not in ctx, (
+            f"规则文本的举例被当成点名了：{hints['genre_primitive']}")
+
+    def test_三份都塞得下_排除了额度巧合(self, vault):
+        """本 fixture 的 primitive 很小，三份合计远小于 TOTAL_PRIMITIVE_BUDGET。
+
+        所以上一条测试里 F-雷鬼 的缺席只可能来自"没被当成点名"，
+        不可能是被额度砍掉的巧合 —— 回归时它一定会真的出现。
+        """
+        role = self._Role()
+        block, hint = al.load_genre_primitive_block(
+            role.name, "编曲",
+            "[[F-民谣]] [[F-R&B]] [[F-雷鬼]]")
+        assert "[[F-雷鬼]] ===" in block, f"三份塞不下，前一条测试的断言不可靠：{hint}"
+        assert "丢弃" not in hint
+
+
 class TestReExport:
     def test_common_identity(self):
         from common import load_genre_primitive_block

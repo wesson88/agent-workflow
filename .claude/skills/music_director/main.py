@@ -126,6 +126,7 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
 
     system_prompt = build_system_prompt(ROLE, project=project)
     context = read_input_files(input_paths)
+    project_text = context   # 拼 rule_block 之前的项目侧文本，primitive 只扫这个
 
     rule_block, source_hint = load_rule_block(role_def.rule_refs)
     print(f"[{ROLE}] rule_refs 注入：{source_hint}")
@@ -134,7 +135,9 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
 
     # primitive 在 skill 之前：它带着「该流派全部角色技能的索引」，是下面挑
     # skill wikilink 的依据（见 user_prompt 里的 B1 约束）。顺序即阅读顺序。
-    prim_block, prim_hint = load_genre_primitive_block(ROLE, task, context)
+    # 扫 `project_text` 而非 `context`：规则文本里的 `[[F-xxx]]` 是举例不是点名，
+    # 详见 ability_loader.assemble_user_context 同位注释的实测。
+    prim_block, prim_hint = load_genre_primitive_block(ROLE, task, project_text)
     print(f"[{ROLE}] 流派 primitive：{prim_hint}")
     if prim_block:
         context = context + "\n\n" + prim_block
@@ -185,13 +188,14 @@ def _run_aggregation(
 
     system_prompt = build_system_prompt(ROLE, project=project)
     context = read_input_files(aggregation_inputs)
+    project_text = context   # 同 first_pass：primitive 只扫项目侧，不扫 rule_block
 
     rule_block, source_hint = load_rule_block(role_def.rule_refs)
     print(f"[{ROLE}] rule_refs 注入（汇编模式）：{source_hint}")
     if rule_block:
         context = context + "\n\n" + rule_block
 
-    prim_block, prim_hint = load_genre_primitive_block(ROLE, task, context)
+    prim_block, prim_hint = load_genre_primitive_block(ROLE, task, project_text)
     print(f"[{ROLE}] 流派 primitive（汇编模式）：{prim_hint}")
     if prim_block:
         context = context + "\n\n" + prim_block
