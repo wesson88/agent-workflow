@@ -427,6 +427,33 @@ class TestRuleTextNotProjectData:
         assert "[[F-雷鬼]] ===" not in ctx, (
             f"规则文本的举例被当成点名了：{hints['genre_primitive']}")
 
+    def test_primitive索引节不参与skill召回(self, vault, tmp_path):
+        """primitive 的「工程参考 skill」索引节是**菜单**，不是「点过的菜」。
+
+        它列着该流派全部角色技能（民谣 29 / R&B 33 条）。让它进 skill 通道的
+        haystack 会倒转 B1：总监从索引里挑、下游只拿被挑的那几张 —— 变成
+        下游按预算顺序拿走菜单前几项。
+        """
+        role = self._Role()
+        skill_dir = tmp_path / "20-知识" / "角色技能" / "music" / "编曲"
+        skill_dir.mkdir(parents=True)
+        # 索引节里那张（_BODY 的 `### 编曲` 写的就是 `Ar1-{genre}-占位技能`）
+        (skill_dir / "Ar1-民谣-占位技能.md").write_text(
+            "---\ntype: skill\n---\n# Ar1\n## 执行细则\n开放调弦。\n",
+            encoding="utf-8")
+        from engine import wikilink as wl_mod
+        wl_mod.invalidate_cache()
+
+        project = "- **流派配比**：民谣 100%\n- **primitive_refs**:\n  - [[F-民谣]]\n"
+        ctx, hints = al.assemble_user_context(role, "编曲", project, domain="music")
+
+        # 前提：primitive 真进来了、真带着那张技能的 wikilink（否则测试假绿）
+        assert "[[F-民谣]] ===" in ctx
+        assert "[[Ar1-民谣-占位技能]]" in ctx, "索引节没进 context，本测试失去意义"
+        # 但它不能因此被当成「已点名」拿到完整载荷
+        assert "Skill (wikilink:" not in ctx, (
+            f"索引节被当成点名了：{hints['skill']}")
+
     def test_三份都塞得下_排除了额度巧合(self, vault):
         """本 fixture 的 primitive 很小，三份合计远小于 TOTAL_PRIMITIVE_BUDGET。
 
@@ -439,6 +466,61 @@ class TestRuleTextNotProjectData:
             "[[F-民谣]] [[F-R&B]] [[F-雷鬼]]")
         assert "[[F-雷鬼]] ===" in block, f"三份塞不下，前一条测试的断言不可靠：{hint}"
         assert "丢弃" not in hint
+
+
+class TestWikilinkBudgetScope:
+    """skill 的 wikilink 预算不能花在别角色的技能上。
+
+    2026-08-27 之前 `load_genre_skill_block` 传给 `expand_wikilinks` 的 filter
+    只判命名正则，`e.path.parent != role_dir` 在**返回之后**才做，而
+    `total_char_budget=12_000` 是在 expand_wikilinks **内部**扣的 —— 别角色的
+    技能先被读出来记账、再被丢掉。实测 `纸飞机`/编曲：11046 char 预算里
+    6905（63%）花在读完就丢的别角色技能上，总监点名的 7 张只有 2 张拿到细则。
+    """
+
+    @pytest.fixture()
+    def skills(self, tmp_path, monkeypatch):
+        import engine
+        from engine import wikilink as wl_mod
+        monkeypatch.setattr(engine, "VAULT_ROOT", tmp_path)
+        monkeypatch.setattr(wl_mod, "VAULT_ROOT", tmp_path)
+        wl_mod.invalidate_cache()
+        music = tmp_path / "20-知识" / "角色技能" / "music"
+        music.mkdir(parents=True)
+        _prim(music, "民谣")          # 域根要有 F-*，否则派生不出流派名
+        fat = "占" * 3000            # 每张都够撑满 max_chars_per_link
+
+        def mk(role, name):
+            d = music / role
+            d.mkdir(exist_ok=True)
+            (d / f"{name}.md").write_text(
+                f"---\ntype: skill\n---\n# {name}\n## 执行细则\n{fat}\n",
+                encoding="utf-8")
+
+        # 别角色 5 张（够单独吃满 12000），本角色 4 张
+        for i in range(1, 6):
+            mk("音乐总监", f"D{i}-民谣-总监技能{i}")
+        for i in range(1, 5):
+            mk("编曲", f"Ar{i}-民谣-编曲技能{i}")
+        yield tmp_path
+        wl_mod.invalidate_cache()
+
+    def test_别角色技能不吃本角色预算(self, skills):
+        """点名顺序刻意把别角色的 5 张放在前面 —— 旧实现会被它们吃光预算。"""
+        named = (
+            "".join(f"[[D{i}-民谣-总监技能{i}]]\n" for i in range(1, 6))
+            + "".join(f"[[Ar{i}-民谣-编曲技能{i}]]\n" for i in range(1, 5))
+        )
+        block, hint = al.load_genre_skill_block("编曲", "编曲", named)
+        got = _re_findall_wikilink(block)
+        assert got == [f"Ar{i}-民谣-编曲技能{i}" for i in range(1, 5)], (
+            f"本角色点名的 4 张没全拿到：{hint} / {got}")
+        assert not any(g.startswith("D") for g in got), "别角色的技能混进来了"
+
+
+def _re_findall_wikilink(block: str) -> list[str]:
+    import re
+    return re.findall(r"=== Skill \(wikilink:\[\[([^\]]+)\]\] · full\) ===", block)
 
 
 class TestReExport:

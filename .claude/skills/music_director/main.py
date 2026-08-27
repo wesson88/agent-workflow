@@ -126,7 +126,10 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
 
     system_prompt = build_system_prompt(ROLE, project=project)
     context = read_input_files(input_paths)
-    project_text = context   # 拼 rule_block 之前的项目侧文本，primitive 只扫这个
+    # 拼 rule_block 之前的项目侧文本。封闭规则：**召回只看项目侧文本，规则文本
+    # 与已注入的参考资料不参与召回**。两条通道都扫这个，详见
+    # ability_loader.assemble_user_context 同位注释的实测。
+    project_text = context
 
     rule_block, source_hint = load_rule_block(role_def.rule_refs)
     print(f"[{ROLE}] rule_refs 注入：{source_hint}")
@@ -134,15 +137,14 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
         context = context + "\n\n" + rule_block
 
     # primitive 在 skill 之前：它带着「该流派全部角色技能的索引」，是下面挑
-    # skill wikilink 的依据（见 user_prompt 里的 B1 约束）。顺序即阅读顺序。
-    # 扫 `project_text` 而非 `context`：规则文本里的 `[[F-xxx]]` 是举例不是点名，
-    # 详见 ability_loader.assemble_user_context 同位注释的实测。
+    # skill wikilink 的依据（见 user_prompt 里的 B1 约束）。顺序即阅读顺序 ——
+    # 但**索引节不参与 skill 召回**，否则「菜单」会被读成「点过的菜」。
     prim_block, prim_hint = load_genre_primitive_block(ROLE, task, project_text)
     print(f"[{ROLE}] 流派 primitive：{prim_hint}")
     if prim_block:
         context = context + "\n\n" + prim_block
 
-    skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
+    skill_block, skill_hint = load_genre_skill_block(ROLE, task, project_text)
     print(f"[{ROLE}] skill_trigger：{skill_hint}")
     if skill_block:
         context = context + "\n\n" + skill_block
@@ -188,7 +190,7 @@ def _run_aggregation(
 
     system_prompt = build_system_prompt(ROLE, project=project)
     context = read_input_files(aggregation_inputs)
-    project_text = context   # 同 first_pass：primitive 只扫项目侧，不扫 rule_block
+    project_text = context   # 同 first_pass：两条通道都只扫项目侧
 
     rule_block, source_hint = load_rule_block(role_def.rule_refs)
     print(f"[{ROLE}] rule_refs 注入（汇编模式）：{source_hint}")
@@ -200,7 +202,7 @@ def _run_aggregation(
     if prim_block:
         context = context + "\n\n" + prim_block
 
-    skill_block, skill_hint = load_genre_skill_block(ROLE, task, context)
+    skill_block, skill_hint = load_genre_skill_block(ROLE, task, project_text)
     print(f"[{ROLE}] skill_trigger（汇编模式）：{skill_hint}")
     if skill_block:
         context = context + "\n\n" + skill_block

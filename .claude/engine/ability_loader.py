@@ -142,6 +142,34 @@ def _music_skill_re(domain: str = "music"):
     return _re.compile(rf"(?:^|/)({_MUSIC_SKILL_PREFIXES})\d+-(?:{alt})-")
 
 
+def _wanted_music_skill(wl, skill_re, role_dir) -> bool:
+    """wikilink 是否值得展开：命名正则 ∧ 落在本角色目录。
+
+    2026-08-27 把「本角色目录」从**展开后过滤**挪进 filter。原先 filter 只判正则，
+    `e.path.parent != role_dir` 在 expand_wikilinks 返回之后才做 —— 而
+    `total_char_budget=12_000` 是在 expand_wikilinks **内部**扣的。结果是别的角色
+    的技能先被读出来记到账上，再被丢掉。
+
+    实测 `纸飞机` / 编曲（总监在 vision + 指令里点了 7 张编曲技能）：
+      11046 char 预算里 6905（63%）花在读完就丢的别角色技能上
+        —— D1-民谣 1197 / D2-民谣 1889 / D1-R&B 3051（音乐总监）+ Ma1-民谣 1136（母带）
+      点名的 7 张里只有 2 张拿到完整细则，5 张 reason=budget 拿 0 字符
+    挪进 filter 后这 6905 char 让给本角色自己的技能。
+
+    只判文件是否存在、不走 resolve_target：stem 唯一性由 DuplicateStemError 兜底，
+    这里要的就是「本目录有没有这张」，跨目录同名不该借道进来。
+    """
+    if not skill_re.search(wl.target):
+        return False
+    stem = wl.target.rsplit("/", 1)[-1].split("#", 1)[0].strip()
+    if not stem:
+        return False
+    try:
+        return (role_dir / f"{stem}.md").is_file()
+    except OSError:
+        return False
+
+
 def load_genre_skill_block(
     role_name: str,
     task_text: str,
@@ -179,7 +207,7 @@ def load_genre_skill_block(
         try:
             result = expand_wikilinks(
                 haystack,
-                filter=lambda wl: bool(skill_re.search(wl.target)),
+                filter=lambda wl: _wanted_music_skill(wl, skill_re, role_dir),
                 max_chars_per_link=3000,
                 total_char_budget=12_000,
                 max_depth=0,
@@ -189,6 +217,8 @@ def load_genre_skill_block(
                 if e.reason != "ok" or not e.content or not e.path:
                     continue
                 try:
+                    # 冗余护栏：filter 已按 role_dir 收过，这里只防
+                    # resolve_target 把同名 stem 解析到别处去。
                     if e.path.parent != role_dir:
                         continue
                 except Exception:
@@ -722,23 +752,40 @@ def assemble_user_context(
         context = context + "\n\n" + rule_block
 
     if getattr(role, "domain", "") == "music":
-        # primitive 先于 skill：它携带该流派角色技能的索引，是挑 skill 的依据。
-        # ⚠️ 传 `base_context` 而不是 `context`（= 已拼上 rule_block 的那个）：
-        # primitive 的显式路径把上游文本里的 `[[F-xxx]]` 当"用户点名了这个流派"。
-        # 而 rule_refs 注入的是**指令文本**，里面的 F-* 是**举例**不是点名 ——
-        # 2026-08-27 实测：`产物schema` §9 编曲方案 §5 的硬约束写着「本节列表项必须以
-        # `[[F-{流派名}]]` 开头（如 `[[F-民谣]]` / `[[F-雷鬼]]`）」，于是 `纸飞机`
-        # （民谣 60% + R&B 40%）的编曲被判定"显式点名了民谣和雷鬼"，F-雷鬼 抢到位置、
-        # 真正需要的 F-R&B 被额度挤掉。规则文本不是项目数据，不能当点名依据。
+        # ⚠️ music 两个通道都传 `base_context`，不传 `context`（= 已拼上
+        # rule_block、随后又拼上 primitive block 的那个）。封闭规则：
+        #
+        #   **召回只看项目侧文本。规则文本与已注入的参考资料不参与召回。**
+        #
+        # 两次实测都是同一类错 —— 把「碰巧也在 context 里」当成「用户要这个」：
+        # ① primitive 通道（2026-08-27 修）：`产物schema` §9 编曲方案 §5 的硬约束
+        #    写着「本节列表项必须以 `[[F-{流派名}]]` 开头（如 `[[F-民谣]]` /
+        #    `[[F-雷鬼]]`）」，于是 `纸飞机`（民谣 60% + R&B 40%）的编曲被判定
+        #    "点名了民谣和雷鬼"，F-雷鬼 抢到位置、真需要的 F-R&B 被额度挤掉。
+        # ② skill 通道（2026-08-27 修）：primitive 的「工程参考 skill」索引节是
+        #    **该流派全部角色技能的清单**（民谣 29 / R&B 33 条），被读成"已点名"
+        #    正好倒转 B1（总监从索引里挑，下游只拿被挑的那几张）。实测 9 组合
+        #    6/9 没变（项目点名排在前面把预算吃完），3/9 变了、全是 0 点名的
+        #    `成为父亲那年`（注入块 11951→14935 / 3889→10288 / 8406→11507 char）。
+        #
+        # primitive 仍**排在 skill 之前拼进 context**：它携带索引节，是角色挑
+        # skill 的阅读依据。进 prompt 的顺序和参与召回的范围是两件事。
         prim_block, hints["genre_primitive"] = load_genre_primitive_block(
             role.name, task, base_context,
         )
         if prim_block:
             context = context + "\n\n" + prim_block
         skill_block, hints["skill"] = load_genre_skill_block(
-            role.name, task, context,
+            role.name, task, base_context,
         )
     else:
+        # se 侧**刻意未改**：它的 filter 是 `lambda wl: True`（允许跨目录，
+        # 如架构师写 [[B7-…]] 给后端用），rule_block 里的 wikilink 因此也会被
+        # 展开。2026-08-27 实测 10 个 se 角色，rule_block 含 16-72 个 wikilink、
+        # 其中 4-15 个可展开；产品经理 / UI设计师 / UX设计师 更是 4/4 全是
+        # 规则文档被当 skill 再注一遍（`通用执行原则` 3040 char 已经在 rule_block
+        # 里了，又以 `=== Skill (wikilink:…) ===` 进来一次），吃掉整个 12000 额度。
+        # 同一类问题、量比 music 更大，但改法影响 se 全域 → 待单独拍板，不顺手改。
         skill_block, hints["skill"] = load_skill_block(
             role.name, task, context, code_root=code_root,
         )
