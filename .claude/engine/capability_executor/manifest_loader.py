@@ -23,7 +23,14 @@ _ALLOWED_RUNTIME_TYPES = frozenset({
 _ALLOWED_INPUT_TYPES = frozenset({
     "text", "file_ref", "file_content", "number", "boolean", "url",
 })
-_ALLOWED_OUTPUT_TYPES = frozenset({"file", "text", "url", "json"})
+# 规范 §3.1 写了四种，但引擎**只实现了 `file`**（2026-09-03 收窄）。
+# `resolve_artifact_paths` 对 text/url/json 直接 `continue`，注释写「executor
+# 从 stdout 拿」—— 而全仓没有任何一处按 output spec 从 stdout 提取。结果是：
+# 声明 `type: json` 的 manifest 能通过校验、能跑完、`artifact_paths` 是空列表、
+# 不报错。声明的产物就这么不存在了，与本轮在修的其它「沉默失效」同型。
+# fail-closed：校验期就拒，等哪天真实现了再放开（放开时同步改规范 §3.1）。
+_SPEC_OUTPUT_TYPES = frozenset({"file", "text", "url", "json"})
+_ALLOWED_OUTPUT_TYPES = frozenset({"file"})
 _ALLOWED_NETWORK = frozenset({"disabled", "read_only", "enabled"})
 
 # 依据：capability 注册表规范 §3.1 `id` 格式约束
@@ -181,6 +188,13 @@ def validate_manifest(manifest: dict) -> None:
         _check_required(
             item, ["name", "type", "path_pattern"], f"manifest.outputs[{i}]"
         )
+        if item["type"] in _SPEC_OUTPUT_TYPES - _ALLOWED_OUTPUT_TYPES:
+            raise _err(
+                f"manifest.outputs[{i}].type = '{item['type']}' 规范里有、但引擎"
+                f"尚未实现（只实现了 'file'）。若放行，本产物会通过校验、跑完、"
+                f"artifact_paths 为空且不报错 —— 声明的产物静默不存在。"
+                f"改用 type='file'，或先实现 stdout 提取再放开本枚举。"
+            )
         _check_enum(
             item["type"], _ALLOWED_OUTPUT_TYPES, f"manifest.outputs[{i}].type"
         )

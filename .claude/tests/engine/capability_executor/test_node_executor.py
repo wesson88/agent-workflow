@@ -132,6 +132,83 @@ class TestNodeExecutorFailure:
         assert "timeout" in result.error
 
 
+class TestNpmDepsCheck:
+    """docstring 一直写着「runtime.deps ... 只验证存在」，但全仓没有一处读它。
+
+    不是假想缺陷：`huashu-design/manifest.json` 实打实声明
+    `deps: ["playwright"]`，其 working_dir 下**没有** node_modules，
+    用户拿到的是 node 的 MODULE_NOT_FOUND 栈而不是这里承诺的那句人话。
+    """
+
+    @staticmethod
+    def _wd(tmp_path, monkeypatch):
+        wd = tmp_path / "wd"
+        wd.mkdir()
+        (wd / "render.js").write_text("console.log(1)", encoding="utf-8")
+        monkeypatch.setattr(
+            "engine.capability_executor.executors.node_executor.shutil.which",
+            lambda _: "/usr/bin/node",
+        )
+        return wd
+
+    def test_缺包时给人话而不是让node报栈(self, tmp_path, monkeypatch):
+        wd = self._wd(tmp_path, monkeypatch)
+        m = _make_manifest("render.js", str(wd))
+        m["runtime"]["deps"] = ["playwright"]
+
+        def _boom(*a, **kw):
+            raise AssertionError("缺包时不该起 subprocess")
+        monkeypatch.setattr(subprocess, "run", _boom)
+
+        result = NodeExecutor().invoke(m, {"brief": "x"}, "demo")
+        assert result.exit_code == -2
+        assert "playwright" in result.error
+        assert "npm install" in result.error
+
+    def test_装了就放行(self, tmp_path, monkeypatch):
+        wd = self._wd(tmp_path, monkeypatch)
+        (wd / "node_modules" / "playwright").mkdir(parents=True)
+        m = _make_manifest("render.js", str(wd))
+        m["runtime"]["deps"] = ["playwright"]
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: MagicMock(returncode=0, stdout="", stderr=""))
+        assert NodeExecutor().invoke(m, {"brief": "x"}, "demo").exit_code == 0
+
+    def test_上级目录的node_modules也算(self, tmp_path, monkeypatch):
+        """monorepo / npm workspaces 把依赖提升到仓根，只看 working_dir 会误报。"""
+        wd = self._wd(tmp_path, monkeypatch)
+        (tmp_path / "node_modules" / "playwright").mkdir(parents=True)
+        m = _make_manifest("render.js", str(wd))
+        m["runtime"]["deps"] = ["playwright"]
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: MagicMock(returncode=0, stdout="", stderr=""))
+        assert NodeExecutor().invoke(m, {"brief": "x"}, "demo").exit_code == 0
+
+    def test_无deps时不受影响(self, tmp_path, monkeypatch):
+        wd = self._wd(tmp_path, monkeypatch)
+        m = _make_manifest("render.js", str(wd))
+        assert "deps" not in m["runtime"]
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: MagicMock(returncode=0, stdout="", stderr=""))
+        assert NodeExecutor().invoke(m, {"brief": "x"}, "demo").exit_code == 0
+
+    @pytest.mark.parametrize("dep,expected", [
+        ("playwright", "playwright"),
+        ("playwright@^1.40", "playwright"),
+        ("@playwright/test", "@playwright/test"),
+        ("@playwright/test@1.40.0", "@playwright/test"),
+    ])
+    def test_包名解析剥版本但保住scope(self, dep, expected):
+        """scope 包本身以 `@` 开头，无脑 split('@')[0] 会切成空串。"""
+        from engine.capability_executor.executors.node_executor import (
+            npm_package_name,
+        )
+        assert npm_package_name(dep) == expected
+
+
 class TestRegistryDispatch:
     def test_get_executor_node_dispatches_to_node_executor(self):
         from engine.capability_executor.executors import get_executor

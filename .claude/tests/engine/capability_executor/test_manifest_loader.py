@@ -98,6 +98,30 @@ class TestValidateEnumViolations:
         with pytest.raises(ManifestValidationError, match="dir"):
             validate_manifest(m)
 
+    @pytest.mark.parametrize("t", ["text", "url", "json"])
+    def test_规范里有但引擎没实现的output类型被拒(self, t):
+        """`resolve_artifact_paths` 对 text/url/json 直接 continue，注释写
+        「executor 从 stdout 拿」—— 而全仓没有任何一处按 output spec 从 stdout
+        提取。放行的话：通过校验、跑完、artifact_paths 为空、不报错，声明的产物
+        静默不存在。fail-closed 到实现为止。"""
+        m = json.loads(json.dumps(_VALID_MANIFEST))
+        m["outputs"][0]["type"] = t
+        with pytest.raises(ManifestValidationError, match="尚未实现"):
+            validate_manifest(m)
+
+    def test_file仍然放行(self):
+        m = json.loads(json.dumps(_VALID_MANIFEST))
+        m["outputs"][0]["type"] = "file"
+        validate_manifest(m)
+
+    def test_两个真manifest不被本次收窄误伤(self):
+        """vault 现有 huashu-design / web-scraper 都是 type=file。"""
+        from engine.capability_executor.manifest_loader import (
+            _ALLOWED_OUTPUT_TYPES, _SPEC_OUTPUT_TYPES,
+        )
+        assert _ALLOWED_OUTPUT_TYPES == {"file"}
+        assert _ALLOWED_OUTPUT_TYPES < _SPEC_OUTPUT_TYPES
+
     def test_sandbox_network_out_of_enum_raises(self):
         m = json.loads(json.dumps(_VALID_MANIFEST))
         m["sandbox"]["network"] = "half_open"

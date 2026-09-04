@@ -6,12 +6,19 @@ capability_executor/executors/node_executor.py — runtime.type=node 分派器�
 - runtime.deps 是 npm 包（node_executor 不做自动 install，只验证存在）
 
 subprocess 执行主体在 `_common.run_capability_subprocess`（2026-07-18 评审去重）。
+
+2026-09-03：上面那句「只验证存在」曾是**空头支票** —— 全仓没有任何一处读
+`runtime.deps`，manifest_loader 也只把它当 list 类型校验一下。而
+`huashu-design/manifest.json` 实打实声明了 `deps: ["playwright"]`：没装的话
+用户拿到的是 node 的 `MODULE_NOT_FOUND` 栈，而不是这里承诺的那句人话。
+本次把检查补上（见 `_missing_npm_deps`），让 docstring 与实现对齐。
 """
 
 from __future__ import annotations
 
 import shlex
 import shutil
+from pathlib import Path
 from typing import Any
 
 from ..base import ExecutorResult
@@ -21,6 +28,47 @@ from ._common import (
     resolve_working_dir,
     run_capability_subprocess,
 )
+
+
+def npm_package_name(dep: str) -> str:
+    """从 `runtime.deps` 条目取包名，剥掉版本区间。
+
+    npm 的 scope 包本身以 `@` 开头（`@playwright/test@^1.4`），所以不能无脑
+    split("@")[0] —— scope 包会被切成空串。
+    """
+    dep = dep.strip()
+    if dep.startswith("@"):
+        head, sep, _tail = dep[1:].partition("@")
+        return "@" + head if sep else dep
+    return dep.partition("@")[0]
+
+
+def _missing_npm_deps(deps: list, working_dir: Path) -> list[str]:
+    """按 node 的解析规则逐级向上找 `node_modules/<pkg>`，返回找不到的。
+
+    向上找是必须的：monorepo / npm workspaces 把依赖提升到仓根的
+    `node_modules/`，只看 `working_dir/node_modules` 会把装好的包误报为缺失。
+    只判目录存在、不读 package.json 版本 —— 版本区间求解是 npm 自己的活，
+    这里要的是「早点给一句人话」，不是重做一个包管理器。
+    """
+    missing: list[str] = []
+    for dep in deps:
+        if not isinstance(dep, str) or not dep.strip():
+            continue
+        name = npm_package_name(dep)
+        if not name:
+            continue
+        found = False
+        for base in (working_dir, *working_dir.parents):
+            try:
+                if (base / "node_modules" / name).exists():
+                    found = True
+                    break
+            except OSError:
+                break
+        if not found:
+            missing.append(name)
+    return missing
 
 
 class NodeExecutor:
@@ -41,6 +89,14 @@ class NodeExecutor:
         working_dir = resolve_working_dir(manifest)
         if not working_dir.is_dir():
             return error_result(f"runtime.working_dir 不存在：{working_dir}")
+
+        missing = _missing_npm_deps(runtime.get("deps") or [], working_dir)
+        if missing:
+            return error_result(
+                f"runtime.deps 声明的 npm 包未安装：{missing}"
+                f"（在 {working_dir} 或其上级目录的 node_modules 下都没找到）。"
+                f"先 `npm install` 再重试 —— 本执行器不做自动安装。"
+            )
 
         entry_tokens = shlex.split(entry_raw, posix=True)
         if not entry_tokens:
