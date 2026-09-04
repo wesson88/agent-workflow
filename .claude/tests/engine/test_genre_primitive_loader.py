@@ -313,6 +313,65 @@ class TestSectionSelection:
         assert "泄漏哨兵ABC" not in block, "围栏内伪标题被当真 → 非选取章节泄漏进来了"
 
 
+class TestSectionKeyCasing:
+    """标题键大小写不敏感 + 部分命中必告警（2026-09-03 F-嘻哈 实测）。"""
+
+    @staticmethod
+    def _rename(root: Path, genre: str, old: str, new: str) -> None:
+        p = root / f"F-{genre}.md"
+        t = p.read_text(encoding="utf-8")
+        assert old in t, f"造例前提不成立：{old!r} 不在文档里"
+        p.write_text(t.replace(old, new), encoding="utf-8")
+
+    def test_大写Fusion也命中(self, music_root):
+        """F-嘻哈.md 把第 9 节写成「Fusion 友好度与配比红线」（大写 F），另四份
+        都是小写。大小写敏感的旧实现下五份里只有它选中 6 节、少的正是 fusion，
+        而返回值与全命中完全相同 → 一路静默。"""
+        _prim(music_root, "嘻哈")
+        self._rename(music_root, "嘻哈",
+                     "## 七、fusion 友好度", "## 9. Fusion 友好度与配比红线")
+        block, _ = al.load_genre_primitive_block("音乐总监", "嘻哈 100%")
+        assert "好融的搭档：Pop" in block, "大写 Fusion 标题下 fusion 节没进 prompt"
+        assert "Fusion 友好度与配比红线" in block
+
+    def test_大写Skill索引节也命中(self, music_root):
+        """索引节键靠的是同一种字面巧合，五份恰好都写对了 —— 不靠"现在没有"保证。"""
+        _prim(music_root, "嘻哈")
+        self._rename(music_root, "嘻哈", "工程参考 skill（1 条",
+                     "工程参考 SKILL（1 条")
+        block, _ = al.load_genre_primitive_block("音乐总监", "嘻哈 100%")
+        assert "下游消费规则" in block
+        assert "[[Ar1-嘻哈-占位技能]]" in block
+
+    def test_全命中时无缺节告警(self, music_root, capsys):
+        _prim(music_root, "民谣")
+        block, _ = al.load_genre_primitive_block("音乐总监", "民谣 100%")
+        assert block
+        assert "缺 schema 要求的" not in capsys.readouterr().err
+
+    def test_真缺一节时告警且点名缺哪节(self, music_root, capsys):
+        """大小写不敏感只解决"写错大小写"，解决不了"整节没写"。后者只能靠告警
+        暴露 —— 否则又是一次「看起来在工作，实际没有」。"""
+        _prim(music_root, "民谣")
+        self._rename(music_root, "民谣",
+                     "## 七、fusion 友好度", "## 七、跨界搭配建议")
+        block, _ = al.load_genre_primitive_block("音乐总监", "民谣 100%")
+        err = capsys.readouterr().err
+        assert block, "缺一节仍应注入其余六节，不是整份跳过"
+        assert "缺 schema 要求的 1 节" in err
+        assert al._PRIMITIVE_FUSION_KEY in err
+        # 没缺的键不该被点名
+        assert "节奏型" not in err.split("缺 schema 要求的", 1)[1].split("——", 1)[0]
+
+    def test_中文键不受lower影响(self, music_root):
+        """`.lower()` 对中文是恒等 —— 加了大小写不敏感不该动摇原有的中文键。"""
+        _prim(music_root, "民谣")
+        _, sections, _, missing = al._select_primitive_payload(
+            (music_root / "F-民谣.md").read_text(encoding="utf-8"))
+        assert missing == []
+        assert len(sections) == 7
+
+
 class TestBudget:
     """独立预算：不与角色技能通道抢 total_char_budget=12_000。"""
 

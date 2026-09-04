@@ -331,12 +331,33 @@ def load_genre_skill_block(
 MAX_CHARS_PER_PRIMITIVE = 7000
 TOTAL_PRIMITIVE_BUDGET = 14_000
 
-# 「必需三块」的章节标题关键词。**按标题子串匹配、不按编号**：四份 primitive
-# 编号风格不一（F-R&B/F-国风 用汉字「一、二、」，F-民谣/F-雷鬼 用「1. 2.」），
+# 「必需三块」的章节标题关键词。**按标题子串匹配、不按编号**：五份 primitive
+# 编号风格不一（F-R&B/F-国风 用汉字「一、二、」，F-民谣/F-雷鬼/F-嘻哈 用「1. 2.」），
 # 且 F-国风 在中间插了「子流派演化与年代」使后续编号整体偏移。
+#
+# **匹配大小写不敏感**（2026-09-03）。原为大小写敏感 `in`，而 `F-嘻哈.md`
+# 2026-09-03 就位时把第 9 节写成「9. **F**usion 友好度与配比红线」—— 另四份都是
+# 小写 `fusion 友好度`。实测五份里只有 F-嘻哈 选中 6 节（另四份 7 节），少的正是
+# fusion，载荷 6501 char 不含任何配比信息。而嘻哈恰是最常做 fusion 的流派
+# （Trap-Soul / Lo-Fi / 国风说唱），`Ar4-嘻哈-Fusion配比` 那张技能的上游依据就在
+# 这一节，总监 / 作曲 / 编曲 三个决策角色全拿不到。
+# 该节标题里的「配比红线」也不等于 idiom 键「流派红线」，两条都落空 → 全静默。
+# 改判据而不是改那一行标题：下一份 primitive 还会踩同一个坑，而「加一份 F-* 就
+# 自动生效、不必改引擎」是本通道的既定封闭形式（见 _music_genre_names）。
 _PRIMITIVE_IDIOM_KEYS = ("节奏型", "标志性配器", "调性", "主题", "流派红线")
 _PRIMITIVE_FUSION_KEY = "fusion 友好度"
 _PRIMITIVE_INDEX_KEY = "工程参考 skill"
+# schema 要求的全部七块。缺任一块 → 告警（不跳过：残缺也比不注入强，但不能静默）。
+# 大小写不敏感只解决了"写错大小写"，解决不了"整节没写 / 标题改了别的词"——
+# 后者只能靠告警暴露，否则又是一次「看起来在工作，实际没有」。
+_PRIMITIVE_REQUIRED_KEYS = (
+    *_PRIMITIVE_IDIOM_KEYS, _PRIMITIVE_FUSION_KEY, _PRIMITIVE_INDEX_KEY,
+)
+
+
+def _title_has(title: str, key: str) -> bool:
+    """章节标题是否含 key，**大小写不敏感**。中文键不受影响（`.lower()` 是恒等）。"""
+    return key.lower() in title.lower()
 # 索引节去重的偏好标记：F-民谣 / F-雷鬼 各有**两个**「工程参考 skill」节
 # （旧版只有一句「详见各角色 skill」／新版带「下游消费规则」硬约束）。取新版。
 _PRIMITIVE_INDEX_PREFER = "下游消费规则"
@@ -386,12 +407,16 @@ def _h2_sections(text: str) -> list[tuple[str, str]]:
 
 def _select_primitive_payload(
     text: str, max_chars: int = MAX_CHARS_PER_PRIMITIVE,
-) -> tuple[str, list[str], bool]:
+) -> tuple[str, list[str], bool, list[str]]:
     """取 primitive 的「必需三块」：idiom 五节 + fusion 友好度 + 工程参考 skill 索引。
 
-    返回 (payload, 命中的章节标题, 是否截断)。一节都没命中 → ("", [], False)，
-    调用方告警并跳过 —— 一份连 idiom 都抽不出的 primitive 说明章节结构已偏离
-    [[流派primitive-schema]]，注入残片比不注入更误导（角色会以为自己拿到了 idiom）。
+    返回 (payload, 命中的章节标题, 是否截断, **未命中的 schema 键**)。
+    一节都没命中 → ("", [], False, 全部键)，调用方告警并跳过 —— 一份连 idiom 都
+    抽不出的 primitive 说明章节结构已偏离 [[流派primitive-schema]]，注入残片比不
+    注入更误导（角色会以为自己拿到了 idiom）。
+
+    第四个返回值是 2026-09-03 加的：部分命中（如 F-嘻哈 少一个 fusion）原先与
+    全部命中**返回值完全相同**，调用方无从区分，于是少一节这件事一路静默到底。
 
     **索引节受保护，永不被截**：它在文档里排在最后（F-R&B 在第八节），而截断
     是取前 N 字符 —— 若不单独保住，`max_chars` 一收紧就正好把它切掉。而它是
@@ -401,23 +426,31 @@ def _select_primitive_payload(
     """
     secs = _h2_sections(text)
     if not secs:
-        return "", [], False
+        return "", [], False, list(_PRIMITIVE_REQUIRED_KEYS)
 
     body_parts: list[tuple[str, str]] = []
+    hit_keys: set[str] = set()
     for title, body in secs:
-        if any(k in title for k in _PRIMITIVE_IDIOM_KEYS) or _PRIMITIVE_FUSION_KEY in title:
+        keys = [k for k in _PRIMITIVE_IDIOM_KEYS if _title_has(title, k)]
+        if _title_has(title, _PRIMITIVE_FUSION_KEY):
+            keys.append(_PRIMITIVE_FUSION_KEY)
+        if keys:
+            hit_keys.update(keys)
             body_parts.append((title, body))
 
     # 索引节可能有多个（F-民谣 / F-雷鬼 各有旧版 + 带「下游消费规则」的新版）
-    idx_cands = [(t, b) for t, b in secs if _PRIMITIVE_INDEX_KEY in t]
+    idx_cands = [(t, b) for t, b in secs if _title_has(t, _PRIMITIVE_INDEX_KEY)]
     index_sec: tuple[str, str] | None = None
     if idx_cands:
         index_sec = next(
             (x for x in idx_cands if _PRIMITIVE_INDEX_PREFER in x[1]), idx_cands[-1],
         )
+        hit_keys.add(_PRIMITIVE_INDEX_KEY)
+
+    missing = [k for k in _PRIMITIVE_REQUIRED_KEYS if k not in hit_keys]
 
     if not body_parts and index_sec is None:
-        return "", [], False
+        return "", [], False, missing
 
     index_text = index_sec[1].rstrip() if index_sec else ""
     body_text = "\n".join(b.rstrip() for _, b in body_parts)
@@ -435,7 +468,7 @@ def _select_primitive_payload(
 
     payload = "\n".join(x for x in (body_text, index_text) if x)
     titles = [t for t, _ in body_parts] + ([index_sec[0]] if index_sec else [])
-    return payload, titles, truncated
+    return payload, titles, truncated, missing
 
 
 def _primitive_consumers(path) -> tuple[tuple[str, ...], str]:
@@ -545,13 +578,22 @@ def load_genre_primitive_block(
             print(f"[load_genre_primitive_block:{role_name}] ⚠️ {msg}", file=sys.stderr)
             _warn_audit("genre_primitive_read", role_name, msg)
             continue
-        payload, sections, truncated = _select_primitive_payload(text)
+        payload, sections, truncated, missing = _select_primitive_payload(text)
         if not payload:
             msg = (f"{path.name} 抽不出「必需三块」任一节（章节结构偏离 "
                    f"流派primitive-schema）→ 跳过，不回退全文")
             print(f"[load_genre_primitive_block:{role_name}] ⚠️ {msg}", file=sys.stderr)
             _warn_audit("genre_primitive_sections", role_name, msg)
             continue
+        if missing:
+            # 部分命中：注入但必须暴露。见 _PRIMITIVE_REQUIRED_KEYS 注释里
+            # F-嘻哈 少一个 fusion 却一路静默的实测。
+            msg = (f"{path.name} 缺 schema 要求的 {len(missing)} 节："
+                   f"{missing} —— 已注入命中的 {len(sections)} 节，但该流派的这几块"
+                   f"信息不会进 prompt。核对 [[流派primitive-schema]] 的标题写法"
+                   f"（标题匹配按子串、大小写不敏感，但词本身要对得上）")
+            print(f"[load_genre_primitive_block:{role_name}] ⚠️ {msg}", file=sys.stderr)
+            _warn_audit("genre_primitive_missing_sections", role_name, msg)
         tier = "truncated" if truncated else "sections"
         if truncated:
             msg = (f"{path.name} 必需三块超单份上限 {MAX_CHARS_PER_PRIMITIVE}，"
