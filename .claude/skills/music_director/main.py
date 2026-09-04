@@ -54,6 +54,11 @@ from engine.role_runner import (  # noqa: E402
     _SUNO_STYLE_HARD_LIMIT, is_suno_prompt_output, measure_style_chars,
 )
 
+# 超限即判失败的那一份产物。只有它 —— 它是 user 直接复制进 Suno 的终稿。
+# 上游的 `Suno-prompt.md` 是基线，总监本来就会收窄它，在那儿拦等于把正常
+# 中间态判成失败。
+_BLOCKING_ARTIFACT = "final-Suno-prompt.md"
+
 # 汇编模式 5 必要文件（命中即进汇编模式）
 _AGGREGATION_REQUIRED = (
     "Suno-prompt.md",
@@ -334,6 +339,35 @@ def _call_and_write(
             "final_style_char_count": style_chars,
             "final_style_oversized": style_oversized,
         })
+
+        if style_oversized and Path(style_path).name == _BLOCKING_ARTIFACT:
+            # 2026-09-03：只拦总监的终稿，不拦中间产物。
+            #
+            # 依据：`final-Suno-prompt.md` 是 user 直接复制进 Suno 的那一份，
+            # 超 1000 就是 Suno 侧截断 —— 拿到手才发现。而作曲的
+            # `Suno-prompt.md` 是基线，总监下游本来就会收窄（实测
+            # 1025→909 / 2314→868），在那儿拦等于把正常中间态判成失败。
+            #
+            # 文件**已经落盘**才拦：那份超限稿是排查依据（要看超在哪、砍哪段），
+            # 删掉它等于把 LLM 这一轮的产出丢了。落盘 + 失败 = 证据留下、闸门关上。
+            print(
+                f"[{ROLE}] ❌ {style_path} 的 Style 段 {style_chars} char "
+                f"超硬上限 {_SUNO_STYLE_HARD_LIMIT}。这是 user 直接复制进 Suno "
+                f"的终稿，超限即被 Suno 截断。文件已落盘供排查，但本步判失败。"
+                f"按 [[Suno-汇编次序]] 的优先级裁剪后重跑。",
+                file=sys.stderr,
+            )
+            set_role_status(
+                ROLE, status="failed",
+                increment_consecutive_failures=True, increment_error=True,
+                enforce_transition=False,
+            )
+            append_audit({
+                "timestamp": utc_now(), "role": ROLE, "project": project,
+                "task": task, "result": "failed", "error": "style_oversized",
+                "outputs": written, **extra_audit,
+            })
+            return 1
 
     set_role_status(ROLE, status="success", reset_counters=True)
     set_role_status(ROLE, status="idle")
