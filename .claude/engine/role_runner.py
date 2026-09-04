@@ -101,19 +101,43 @@ def _detect_dormant(instruction_path: Path | None) -> bool:
 # 依据：Suno v4.5 Style 字段按 JavaScript String.length 计数（= Python len()），
 # 硬上限 1000；LLM 自估不可靠（W5 L2-B 实测自报 1090 实际 1507，偏差 +38%），
 # 必须工程层实测落 audit（[[Style字符数偏差-LLM自估vs工程层兜底]]）。
+#
+# `_SUNO_STYLE_HARD_LIMIT` 是这个 1000 的**唯一出处**（2026-09-03 收敛）。此前它
+# 在三处各写一遍：本常量、`skills/music_director/main.py:308` 的字面量 1000、
+# 以及规则文档 `00-系统/规则/music/Suno-UI-字符上限.md`（该文档 0 条 rule_refs
+# 指向、谁都没读过）。改一处漏两处的形状，先把代码这两处并了。
 _STYLE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
 _SUNO_STYLE_HARD_LIMIT = 1000
 
+# 「算 Suno prompt 产物」的判据：文件名以此结尾。
+# 覆盖 作曲 的 `Suno-prompt.md` 与 音乐总监 的 `final-Suno-prompt.md`；
+# 刻意**不**覆盖各环节补丁（`编曲-Suno补丁.md` / `混音-Suno-retry补丁.md` 等）
+# —— 那些是片段，整份抽首个代码块量出来的数没有意义。
+_SUNO_PROMPT_SUFFIX = "Suno-prompt.md"
+
+
+def is_suno_prompt_output(rel_path: str) -> bool:
+    return Path(rel_path).name.endswith(_SUNO_PROMPT_SUFFIX)
+
+
+def measure_style_chars(content: str) -> int | None:
+    """单份产物的 Style 段字符数（Python len()）；无 ``` 代码块返回 None。"""
+    m = _STYLE_BLOCK_RE.search(content)
+    return None if not m else len(m.group(1))
+
 
 def _measure_suno_style_chars(output_files: dict[str, str]) -> int | None:
-    """从 Suno-prompt.md 抽 Style 段，返回 Python len()；无该产物/无代码块返回 None。"""
+    """从 `Suno-prompt.md` 抽 Style 段；无该产物 / 无代码块返回 None。
+
+    **只认精确文件名** `Suno-prompt.md`：总监的 `final-Suno-prompt.md` 由
+    `skills/music_director/main.py` 自己在汇编路径上量（那里量的是合入补丁后的
+    定稿，与作曲的基线是两个数，audit 里也是两组字段）。这条排除是有意的，
+    2026-07-26 的测试就锁着它。
+    """
     for rel_path, content in output_files.items():
         if Path(rel_path).name != "Suno-prompt.md":
             continue
-        m = _STYLE_BLOCK_RE.search(content)
-        if not m:
-            return None
-        return len(m.group(1))
+        return measure_style_chars(content)
     return None
 
 
@@ -500,10 +524,21 @@ def run_role(
             and style_char_count > _SUNO_STYLE_HARD_LIMIT
         )
         if style_char_count is not None:
-            marker = "⚠️ 超 1000" if style_oversized else "✅"
+            marker = (f"⚠️ 超 {_SUNO_STYLE_HARD_LIMIT}" if style_oversized else "✅")
             print(
                 f"[{role.name}] Suno Style 段字符数（Python len()）: "
                 f"{style_char_count} {marker}"
+            )
+        elif has_suno_prompt:
+            # 2026-09-03：产物在、但抽不出 Style 段 —— 原先与「压根没这个产物」
+            # 走同一条 `None` 分支，**什么都不打印**，audit 记 null，整轮报 success。
+            # 实测 `10-项目/music/湖向/Suno-prompt.md` 正文就是 `'x\n'`（2 字节），
+            # 一路静默通过。度量拿不到数不等于没问题，恰恰是最该喊的时候。
+            print(
+                f"[{role.name}] ⚠️ 产出了 Suno-prompt.md 但抽不出 Style 段"
+                f"（正文无 ``` 代码块）—— 该产物大概率不可用，audit 的 "
+                f"style_char_count 记为 null 不代表合规。",
+                file=sys.stderr,
             )
         suno_audit = {
             "has_suno_prompt": has_suno_prompt,

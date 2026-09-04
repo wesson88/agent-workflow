@@ -214,6 +214,74 @@ class TestSunoStyleMeasurement:
         finally:
             _shutil.rmtree(proj, ignore_errors=True)
 
+    def test_产物在但抽不出Style段时告警(self, monkeypatch, capsys):
+        """2026-09-03：原先「产物在但正文没代码块」与「压根没这个产物」都走
+        `None` 分支，**什么都不打印**，audit 记 null，整轮 success。实测
+        `10-项目/music/湖向/Suno-prompt.md` 正文就是 `'x\\n'`（2 字节）。"""
+        import shutil as _shutil
+
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        proj = VAULT_ROOT / "10-项目" / "music" / PROJECT
+        (proj / "指令").mkdir(parents=True, exist_ok=True)
+        (proj / "指令" / "给作曲.md").write_text("# 给作曲\n民谣", encoding="utf-8")
+        (proj / "词作.md").write_text("# 词作\n歌词", encoding="utf-8")
+
+        captured: dict = {"audit": []}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", captured["audit"].append)
+        monkeypatch.setattr(rr, "call_claude", lambda s, u, r: (
+            "<!-- FILE: 10-项目/music/{project}/曲作.md -->\n# 曲作\n<!-- /FILE -->\n"
+            "<!-- FILE: 10-项目/music/{project}/Suno-prompt.md -->\n"
+            "x\n<!-- /FILE -->\n"
+        ))
+        try:
+            result = run_role("作曲", "写歌", PROJECT)
+            assert result.ok, "仍算成功（本条只管告警，拦不拦是另一件事）"
+            audit = captured["audit"][-1]
+            assert audit["has_suno_prompt"] is True
+            assert audit["style_char_count"] is None
+            err = capsys.readouterr().err
+            assert "抽不出 Style 段" in err
+            assert "不代表合规" in err
+        finally:
+            _shutil.rmtree(proj, ignore_errors=True)
+
+    def test_没有该产物时不告警(self, runner_env, capsys):
+        """母带（outputs 不含 Suno-prompt.md）跑完不该冒出这条告警。"""
+        from engine.role_runner import run_role
+
+        run_role(ROLE, "常规母带", PROJECT)
+        assert "抽不出 Style 段" not in capsys.readouterr().err
+
+    def test_限额只有一个出处(self):
+        """1000 此前在 role_runner 常量 / music_director 字面量 / 规则文档
+        三处各写一遍。代码这两处已并到 `_SUNO_STYLE_HARD_LIMIT`。"""
+        from pathlib import Path as _P
+
+        import engine.role_runner as rr
+
+        assert rr._SUNO_STYLE_HARD_LIMIT == 1000
+        src = _P(rr.__file__).parent.parent / "skills" / "music_director" / "main.py"
+        text = src.read_text(encoding="utf-8")
+        assert "_SUNO_STYLE_HARD_LIMIT" in text
+        code = [ln for ln in text.split("\n")
+                if not ln.lstrip().startswith("#") and "> 1000" in ln]
+        assert code == [], f"music_director 仍有字面量 1000 比较：{code}"
+
+    def test_final前缀也算Suno产物(self):
+        """判据从「精确等于 Suno-prompt.md」放宽到「以它结尾」，
+        覆盖总监的 final-Suno-prompt.md；各环节补丁仍排除在外。"""
+        from engine.role_runner import is_suno_prompt_output
+
+        assert is_suno_prompt_output("10-项目/music/x/Suno-prompt.md")
+        assert is_suno_prompt_output("10-项目/music/x/final-Suno-prompt.md")
+        assert not is_suno_prompt_output("10-项目/music/x/编曲-Suno补丁.md")
+        assert not is_suno_prompt_output("10-项目/music/x/混音-Suno-retry补丁.md")
+        assert not is_suno_prompt_output("10-项目/music/x/W5-L1-Suno-prompt候选.md")
+
 
 class TestFrontmatterLinkNormalization:
     """落盘前 frontmatter 链接规范化（治理三层的"主循环层"）。

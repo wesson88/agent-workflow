@@ -26,7 +26,6 @@ CLI：
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -46,8 +45,14 @@ from engine.role_loader import load_role
 
 ROLE = "音乐总监"
 
-# Style 段约定：Suno-prompt.md 内首个 ``` ... ``` 代码块
-_STYLE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+# Style 段约定与 1000 硬上限统一从 role_runner 取（2026-09-03）。
+# 此前这里有一份 `_STYLE_BLOCK_RE` 副本 + 字面量 `1000`，与 role_runner 的
+# `_SUNO_STYLE_HARD_LIMIT` 各写各的；再加上规则文档
+# `00-系统/规则/music/Suno-UI-字符上限.md`（0 条 rule_refs 指向、谁都没读过），
+# 同一个数在三处存在。改一处漏两处的形状，先把代码这两处并了。
+from engine.role_runner import (  # noqa: E402
+    _SUNO_STYLE_HARD_LIMIT, is_suno_prompt_output, measure_style_chars,
+)
 
 # 汇编模式 5 必要文件（命中即进汇编模式）
 _AGGREGATION_REQUIRED = (
@@ -59,16 +64,18 @@ _AGGREGATION_REQUIRED = (
 )
 
 
-def _measure_style_chars(output_files: dict[str, str]) -> int | None:
-    """从 final-Suno-prompt.md 抽 Style 段，返回 Python len()。"""
+def _measure_style_chars(output_files: dict[str, str]) -> tuple[str | None, int | None]:
+    """从本轮写出的 Suno prompt 产物抽 Style 段。返回 (文件相对路径, 字符数)。
+
+    没有该类产物 → (None, None)；有产物但抽不出代码块 → (路径, None)。
+    **两种情况必须分开**：原实现都返回 `None`，调用方无从区分，于是「产物在但
+    正文是 2 字节垃圾」与「本轮压根没这个产物」走同一条静默路径。
+    """
     for rel_path, content in output_files.items():
-        if "final-Suno-prompt.md" not in rel_path and "Suno-prompt.md" not in rel_path:
+        if not is_suno_prompt_output(rel_path):
             continue
-        m = _STYLE_BLOCK_RE.search(content)
-        if not m:
-            return None
-        return len(m.group(1))
-    return None
+        return rel_path, measure_style_chars(content)
+    return None, None
 
 
 def _detect_aggregation_mode(project: str) -> tuple[bool, list[Path]]:
@@ -251,13 +258,12 @@ def _run_aggregation(
             "mode": "aggregation",
             "has_feedback": has_feedback,
         },
-        measure_style=True,
     )
 
 
 def _call_and_write(
     system_prompt, user_prompt, task: str, project: str,
-    audit_extras: dict, measure_style: bool = False,
+    audit_extras: dict,
 ) -> int:
     """LLM 调用 + 解析 FILE 块 + 落盘 + audit。两模式共享路径。"""
     try:
@@ -303,13 +309,28 @@ def _call_and_write(
         written.append(rel_resolved)
 
     extra_audit: dict = dict(audit_extras)
-    if measure_style:
-        style_chars = _measure_style_chars(output_files)
-        style_oversized = style_chars is not None and style_chars > 1000
+    # 2026-09-03 去掉 `measure_style` 开关，改按**本轮实际写了什么**判定。
+    # 原先只有 aggregation 调用点传 True；量不量取决于调用点记不记得传，
+    # 与产物本身无关 —— 与 `commit_and_push(paths=None)` 同一类形状。
+    style_path, style_chars = _measure_style_chars(output_files)
+    if style_path is not None:
+        style_oversized = (
+            style_chars is not None and style_chars > _SUNO_STYLE_HARD_LIMIT
+        )
         if style_chars is not None:
-            marker = "⚠️ 超 1000" if style_oversized else "✅"
-            print(f"[{ROLE}] final Style 段字符数（Python len()）: {style_chars} {marker}")
+            marker = (f"⚠️ 超 {_SUNO_STYLE_HARD_LIMIT}"
+                      if style_oversized else "✅")
+            print(f"[{ROLE}] final Style 段字符数（Python len()）: "
+                  f"{style_chars} {marker}")
+        else:
+            print(
+                f"[{ROLE}] ⚠️ 产出了 {style_path} 但抽不出 Style 段"
+                f"（正文无 ``` 代码块）—— 该产物大概率不可用，audit 的 "
+                f"final_style_char_count 记为 null 不代表合规。",
+                file=sys.stderr,
+            )
         extra_audit.update({
+            "final_style_path": style_path,
             "final_style_char_count": style_chars,
             "final_style_oversized": style_oversized,
         })
