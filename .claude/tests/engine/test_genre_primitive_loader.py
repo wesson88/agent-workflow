@@ -405,18 +405,28 @@ class TestBudget:
         src = Path(al.__file__).read_text(encoding="utf-8")
         assert "7009" in src and "13780" in src, "配额依据数字不在源码注释里"
 
-    def test_总额等于两份上限(self):
-        """总额不再是独立的魔数：单份 8000 抬上去后，两份必须塞得下，
-        否则「两个流派的项目」会因为额度误丢一份（现状 7009+6771=13780，
-        14000 只剩 220 char 余量，任何一份再长一点就踩）。"""
+    def test_总额够两份不够三份(self):
+        """总额不再是独立的魔数：单份 8000 抬上去后**两份必须塞得下**
+        （现状 7009+6771=13780；旧值 14000 只剩 220 char 余量，
+        任何一份再长一点就误丢）。
+
+        三份则**刻意塞不下**：名额放开到 3 不等于载荷放开，显式点名三份大卡
+        （最坏 7009+6771+5245=19025）仍会被字符预算砍掉第三份并告警。
+        """
+        assert al.TOTAL_PRIMITIVE_BUDGET == al.MAX_CHARS_PER_PRIMITIVE * 2
         assert (al.TOTAL_PRIMITIVE_BUDGET
-                == al.MAX_CHARS_PER_PRIMITIVE * al.MAX_PRIMITIVES_PER_RUN)
+                < al.MAX_CHARS_PER_PRIMITIVE * al.MAX_PRIMITIVES_PER_RUN)
 
     def test_份数上限是显式常量而非字符预算的副作用(self):
-        """「不要第三个流派」此前是 TOTAL=14000 **顺带实现**的（两份 13191
+        """「几个流派算过多」此前是 TOTAL=14000 **顺带实现**的（两份 13191
         塞得下、第三份必然越额）。那是巧合机制：随 primitive 变胖 / 阈值变动
-        而失效，且日志报「额度用尽」，把语义问题伪装成资源不够。"""
-        assert al.MAX_PRIMITIVES_PER_RUN == 2
+        而失效，且日志报「额度用尽」，把语义问题伪装成资源不够。
+
+        两档取值依据 [[01-流派词汇体系]]：§12.4 rule 1「fusion 最多 3 流派」→ 3；
+        keyword 那档更严（2）是因为纯子串匹配读不出否定语境。
+        """
+        assert al.MAX_PRIMITIVES_PER_RUN == 3
+        assert al.MAX_KEYWORD_PRIMITIVES_PER_RUN == 2
 
 
 class TestFingerprint:
@@ -546,15 +556,35 @@ class TestRuleTextNotProjectData:
         assert "[[F-雷鬼]] ===" in block, f"雷鬼本身就进不来，前一条断言不可靠：{hint}"
         assert "丢弃" not in hint and "份数上限" not in hint
 
-    def test_超两份时报份数上限而不是额度用尽(self, vault, capsys):
-        """语义问题不许伪装成资源不够：本 fixture 三份合计远小于总额。"""
+    def test_显式点名三份都放行(self, vault, capsys):
+        """§12.4 rule 1「fusion 最多 3 流派」—— 显式点名的配拿到第 3 个名额。
+        本 fixture 三份很小，合计远低于总额，能与「被字符预算砍掉」区分开。"""
         role = self._Role()
         block, hint = al.load_genre_primitive_block(
             role.name, "编曲", "[[F-民谣]] [[F-R&B]] [[F-雷鬼]]")
+        for g in ("民谣", "R&B", "雷鬼"):
+            assert f"[[F-{g}]] ===" in block, hint
+        assert "超份数上限" not in hint and "越额丢弃" not in hint
+
+    def test_keyword兜底仍收在两份(self, vault, capsys):
+        """keyword 是纯子串匹配、读不出否定语境 —— 实测 `纸飞机` 黑名单表格写
+        「Dub 风格延时」就召回了 F-雷鬼。这一档不跟着放到 3。"""
+        role = self._Role()
+        block, hint = al.load_genre_primitive_block(
+            role.name, "民谣 R&B 雷鬼 三个流派都提到")
         assert "超份数上限未注入 1 份" in hint
         assert "越额丢弃" not in hint
         err = capsys.readouterr().err
         assert "这不是额度不够" in err
+        assert "keyword 兜底最多占 2 个名额" in err
+
+    def test_显式两份加keyword一份也放行(self, vault):
+        """混合场景：显式占 2 个名额，keyword 再占 1 个（未到 keyword 上限）。"""
+        role = self._Role()
+        block, hint = al.load_genre_primitive_block(
+            role.name, "还要一点雷鬼味", "[[F-民谣]] [[F-R&B]]")
+        for g in ("民谣", "R&B", "雷鬼"):
+            assert f"[[F-{g}]] ===" in block, hint
 
 
 class TestWikilinkBudgetScope:

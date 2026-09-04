@@ -482,7 +482,19 @@ def load_genre_skill_block(
 MAX_CHARS_PER_PRIMITIVE = 8000
 TOTAL_PRIMITIVE_BUDGET = 16_000      # = 2 × 单份上限，见下方 MAX_PRIMITIVES_PER_RUN
 
-# 一轮最多注入几份 primitive。**这条是"不要第三个流派"的显式表达**。
+# 一轮最多注入几份 primitive。**这两条是"几个流派算过多"的显式表达**。
+#
+# 2026-09-03 拆成显式 / keyword 两档，依据 [[01-流派词汇体系]]：
+#   §12.4 rule 1「fusion 最多 3 流派；3+ 必失焦」→ 上限 3
+#   §11「流派叠加过多…最多 2 个 fusion」→ 同一份文档里这两条本来对不上，
+#        用户 2026-09-03 拍板取 3，§11 已同步改。
+# 但**只有显式点名的才配拿到第 3 个名额**，与本模块通篇的「显式 > 隐式」一致：
+#   - `primitive_refs: [[F-xxx]]` 是用户写下来的，零猜测 → 放到 3
+#   - keyword 兜底是纯子串匹配、读不出否定语境 → 仍收在 2
+# 实测差别就在这：`纸飞机`（民谣+R&B）黑名单表格写「Dub 风格延时」→ 命中
+# `Dub` → 召回 F-雷鬼；`凌晨四点` 同型。两处都走 keyword，收在 2 就挡住了。
+# 若真是三流派项目，在简报 §3 写 `primitive_refs` 三条即可 —— 这也顺带把
+# 「三流派」变成一件必须显式声明的事，而不是 keyword 猜出来的。
 #
 # 2026-09-03 从字符预算里拆出来。此前没有这个常量，"最多两份"是
 # `TOTAL_PRIMITIVE_BUDGET = 14000` **顺带实现**的 —— 两份最坏 13191 塞得下、
@@ -501,7 +513,12 @@ TOTAL_PRIMITIVE_BUDGET = 16_000      # = 2 × 单份上限，见下方 MAX_PRIMI
 # 依据：实测 7 个走流程项目全是 1-2 流派；≥3 流派简报 schema 另有附加要求。
 # 真需要三份时正解是简报 §3 写 `primitive_refs` 显式点名（走 wikilink 路径、
 # 排在 keyword 之前），而不是调大本常量。
-MAX_PRIMITIVES_PER_RUN = 2
+#
+# ⚠️ 上限 3 与 TOTAL_PRIMITIVE_BUDGET=16000 是**两道独立的闸**：显式点名三份
+# 大卡（实测最坏 7009+6771+5245=19025）仍会被字符预算砍掉第三份并告警。
+# 那是有意的 —— 名额放开不等于载荷放开。真撞上了就精简 primitive，不是调总额。
+MAX_PRIMITIVES_PER_RUN = 3            # 含显式点名；总名额
+MAX_KEYWORD_PRIMITIVES_PER_RUN = 2    # 其中 keyword 兜底最多占几个
 
 # 「必需三块」的章节标题关键词。**按标题子串匹配、不按编号**：五份 primitive
 # 编号风格不一（F-R&B/F-国风 用汉字「一、二、」，F-民谣/F-雷鬼/F-嘻哈 用「1. 2.」），
@@ -743,6 +760,7 @@ def load_genre_primitive_block(
     dropped: list[str] = []
     over_count: list[str] = []
     used = 0
+    n_keyword = 0
     for path, via in ordered:
         try:
             text = path.read_text(encoding="utf-8")
@@ -773,8 +791,11 @@ def load_genre_primitive_block(
                    f"idiom / fusion 段已截（索引节受保护未截）")
             print(f"[load_genre_primitive_block:{role_name}] ⚠️ {msg}", file=sys.stderr)
             _warn_audit("genre_primitive_truncated", role_name, msg)
-        if len(loaded) >= MAX_PRIMITIVES_PER_RUN:
-            # 份数上限：拦的是「不要第三个流派」这件语义事，与字符够不够无关。
+        is_explicit = via == "wikilink"
+        if len(loaded) >= MAX_PRIMITIVES_PER_RUN or (
+            not is_explicit and n_keyword >= MAX_KEYWORD_PRIMITIVES_PER_RUN
+        ):
+            # 份数上限：拦的是「几个流派算过多」这件语义事，与字符够不够无关。
             # 与下面那条越额丢弃分开报，别再让语义问题伪装成资源不够。
             over_count.append(path.stem)
             continue
@@ -783,6 +804,8 @@ def load_genre_primitive_block(
             continue
         used += len(payload)
         loaded.append(path.stem)
+        if not is_explicit:
+            n_keyword += 1
         parts.append(
             f"=== Primitive ({via} · {tier}): [[{path.stem}]] ===\n"
             f"（本节为流派 idiom + fusion 友好度 + 该流派角色技能索引；"
@@ -790,15 +813,19 @@ def load_genre_primitive_block(
         )
 
     if over_count:
-        msg = (f"本轮已注入 {MAX_PRIMITIVES_PER_RUN} 份 primitive（上限），"
-               f"第 {MAX_PRIMITIVES_PER_RUN + 1} 份起不再注入："
-               f"{over_count}（已注入 {loaded}）。**这不是额度不够**"
-               f"（还剩 {TOTAL_PRIMITIVE_BUDGET - used} char）—— 是「一个项目通常"
-               f"不超过两个流派」这条约定在拦。实测排在后面的多半来自反锚点 / "
-               f"黑名单里提到的流派名（纯子串匹配读不出「不要这个」）。"
+        why = (f"keyword 兜底最多占 {MAX_KEYWORD_PRIMITIVES_PER_RUN} 个名额"
+               if n_keyword >= MAX_KEYWORD_PRIMITIVES_PER_RUN
+               and len(loaded) < MAX_PRIMITIVES_PER_RUN
+               else f"一轮最多 {MAX_PRIMITIVES_PER_RUN} 份")
+        msg = (f"份数上限（{why}）—— 未注入：{over_count}（已注入 {loaded}，"
+               f"其中 keyword 兜底 {n_keyword} 份）。**这不是额度不够**"
+               f"（还剩 {TOTAL_PRIMITIVE_BUDGET - used} char）。"
+               f"依据 [[01-流派词汇体系]] §12.4 rule 1「fusion 最多 3 流派；"
+               f"3+ 必失焦」；keyword 那档更严是因为它是纯子串匹配、读不出否定"
+               f"语境 —— 实测排在后面的多半来自反锚点 / 黑名单里提到的流派名。"
                f"若本项目确实要三个流派，在简报 §3 写 "
-               f"`primitive_refs: [[F-xxx]]` 显式点名 —— wikilink 路径排在 "
-               f"keyword 之前，会优先占掉这两个名额")
+               f"`primitive_refs: [[F-xxx]]` 显式点名 —— 显式路径排在 keyword "
+               f"之前，且不受那条更严的 keyword 名额限制")
         print(f"[load_genre_primitive_block:{role_name}] ℹ️ {msg}", file=sys.stderr)
         _warn_audit("genre_primitive_count", role_name, msg)
 
