@@ -142,6 +142,89 @@ def _music_skill_re(domain: str = "music"):
     return _re.compile(rf"(?:^|/)({_MUSIC_SKILL_PREFIXES})\d+-(?:{alt})-")
 
 
+def _normalize_genre(name: str) -> str:
+    """`R%26B` → `R&B`。域根派生会同时给出两种写法，比较前先归一。"""
+    return name.replace("%26", "&")
+
+
+def _skill_genre(stem: str, domain: str = "music") -> str | None:
+    """从技能文件名取流派段；不合本域命名规范 → None。
+
+    返回 None 的一律**不参与流派闸门**（fail-open）。闸门是为了拦掉"明显不是
+    这个流派的"，把"看不懂名字的"一起拦掉会造出新的静默失效。
+    """
+    genres = _music_genre_names(domain)
+    if not genres:
+        return None
+    alt = "|".join(_re.escape(g) for g in genres)
+    m = _re.match(rf"(?:{_MUSIC_SKILL_PREFIXES})\d+-({alt})-", stem)
+    return _normalize_genre(m.group(1)) if m else None
+
+
+def active_genres(
+    task_text: str, upstream_text: str = "", domain: str = "music",
+) -> tuple[frozenset[str], str]:
+    """本轮项目**声明或命中**的流派集合。返回 (集合, 判定说明)。
+
+    空集 = 判不出流派，调用方**不设闸**（fail-open）。
+
+    与 `load_genre_primitive_block` 的两条路径同源，但刻意**不按 consumed_by
+    收窄**：「这个项目是什么流派」是项目级事实，与哪个角色在跑无关。
+    混音师 / 母带工程师 / 录音师 都不在任何 primitive 的 consumed_by 名单里
+    （PRD §11.4 只让决策层三角色读 primitive），而实测污染最重的恰恰是它们
+    ——嘻哈任务下混音师命中 27/29 张、其中 R&B 6 + 民谣 6 + 雷鬼 6。
+
+    ## 为什么把流派判定收到 5 份 primitive 上
+
+    2026-09-03 实测：嘻哈任务在混词场景下命中 110/123 张技能，其中 87 张是错
+    流派。根因不是机制坏了（域外「报税软件」对照组 0/123），是 123 张技能各自
+    的 `trigger.keywords` 用了裸泛词 —— `Soul` 33 张 / `Folk` 29 / `Roots` 25 /
+    `dub` 25 各自声明。要靠收紧 keyword 解决，得改 123 个文件、112 处。
+
+    改成闸门之后职责分开了：
+      - **是不是这个流派** —— 只由 5 份 `F-*.md` 的 `trigger.keywords` 决定
+      - **这个流派内选哪张** —— 才由技能自己的 keyword 决定
+    单点控制从 123 个文件收到 5 个。实测 primitive 侧的词本来就干净得多：
+    F-雷鬼 只声明 `Roots Reggae` / `roots reggae`，**没有**裸 `Roots`，
+    所以「roots 感的采样」这句在闸门下直接不再召回雷鬼的 25 张。
+
+    仍未解决**否定语境**（「不要 dub」照样命中 `dub`）—— 那是纯子串匹配的固有
+    缺陷，与本闸门正交，见 MAX_CHARS_PER_PRIMITIVE 注释里的湖向 / 纸飞机实测。
+    """
+    from engine import score_skill
+    from engine.skill_trigger import _keyword_df
+    from engine.wikilink import parse_wikilinks
+
+    prims = _primitive_files(domain)
+    if not prims:
+        return frozenset(), f"域根无 F-*.md：{_music_domain_root(domain)}"
+
+    by_stem = {p.stem: p for p in prims}
+
+    # 路径 1：显式点名（简报 §3 primitive_refs）—— 有就只认它，零猜测
+    haystack = (task_text or "") + "\n" + (upstream_text or "")
+    explicit = {
+        by_stem[t].stem[2:]
+        for wl in parse_wikilinks(haystack)
+        if (t := wl.target.rsplit("/", 1)[-1]) in by_stem
+    }
+    if explicit:
+        got = frozenset(_normalize_genre(g) for g in explicit)
+        return got, f"显式点名 {sorted(got)}"
+
+    # 路径 2：primitive 的 trigger.keywords 命中
+    df = _keyword_df(prims)
+    hit = {
+        p.stem[2:]
+        for p in prims
+        if score_skill(p, task_text, upstream_text, None, keyword_df=df).matched
+    }
+    if not hit:
+        return frozenset(), "简报未点名 primitive、也无流派 keyword 命中 → 不设闸"
+    got = frozenset(_normalize_genre(g) for g in hit)
+    return got, f"keyword 命中 {sorted(got)}"
+
+
 def _wanted_music_skill(wl, skill_re, role_dir) -> bool:
     """wikilink 是否值得展开：命名正则 ∧ 落在本角色目录。
 
@@ -246,6 +329,34 @@ def load_genre_skill_block(
     _scored = discover_role_skills_scored(role_dir, task_text, upstream_text)
     _loaded = set(wikilink_loaded)
     dedup_hits = [m for m in _scored if m.path.stem not in _loaded]
+
+    # ── 流派互斥闸门（2026-09-03）─────────────────────────────────
+    # 只闸 keyword 路径，**不闸 wikilink**：上游显式写了 `[[Ar1-民谣-…]]` 就是
+    # 直接指令，「显式 > 隐式」是本模块既定原则（见 skill_trigger docstring）。
+    # 流派判定见 active_genres —— 收到 5 份 primitive 上，123 张技能的 keyword
+    # 只负责「流派内选哪张」。
+    genres, gate_reason = active_genres(task_text, upstream_text, domain)
+    gate_note = ""
+    if genres:
+        kept, blocked = [], []
+        for m in dedup_hits:
+            g = _skill_genre(m.path.stem, domain)
+            (kept if (g is None or g in genres) else blocked).append(m)
+        if blocked:
+            by_genre: dict[str, int] = {}
+            for m in blocked:
+                g = _skill_genre(m.path.stem, domain) or "?"
+                by_genre[g] = by_genre.get(g, 0) + 1
+            msg = (f"流派闸门（{gate_reason}）挡下 {len(blocked)} 张非本项目流派的"
+                   f"技能：{by_genre}。被挡的不进 prompt、也不占预算。"
+                   f"若其中有本项目真需要的，在上游产物里写 `[[技能名]]` 显式点名"
+                   f"（wikilink 路径不受闸门约束），或把该流派写进简报 §3 "
+                   f"`primitive_refs`")
+            print(f"[load_genre_skill_block:{role_name}] ℹ️ {msg}", file=sys.stderr)
+            _warn_audit("genre_skill_gate", role_name, msg)
+            gate_note = f"gated={len(blocked)}"
+        dedup_hits = kept
+
     keyword_block, keyword_loaded = render_triggered_block(dedup_hits)
     keyword_body = ""
     if keyword_block:
@@ -254,6 +365,9 @@ def load_genre_skill_block(
 
     if not wikilink_parts and not keyword_body:
         hint = "双路径均空"
+        if gate_note:
+            # 别把「被闸门挡光了」报成「本来就没命中」—— 两种完全不同的处置。
+            hint += f"（{gate_note}：keyword 命中的全是非本项目流派，{gate_reason}）"
         if wikilink_unresolved:
             hint += f"（wikilink unresolved={wikilink_unresolved}）"
         return "", hint
@@ -276,6 +390,8 @@ def load_genre_skill_block(
     ]
     if wikilink_unresolved:
         hint_parts.append(f"unresolved={len(wikilink_unresolved)}")
+    if gate_note:
+        hint_parts.append(gate_note)
     return block, " / ".join(hint_parts)
 
 

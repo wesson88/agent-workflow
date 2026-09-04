@@ -582,6 +582,112 @@ def _re_findall_wikilink(block: str) -> list[str]:
     return re.findall(r"=== Skill \(wikilink:\[\[([^\]]+)\]\] · full\) ===", block)
 
 
+class TestGenreGate:
+    """流派互斥闸门：keyword 路径只放行本项目流派的技能（2026-09-03）。
+
+    实测背景：嘻哈任务混词场景命中 110/123 张，其中 87 张错流派。机制没坏
+    （域外「报税软件」对照 0/123），是 123 张技能各自的 `trigger.keywords` 用了
+    裸泛词。闸门把「是不是这个流派」的判定从 123 个文件收到 5 份 primitive 上，
+    技能自己的 keyword 只决定「这个流派内选哪张」。
+    """
+
+    @pytest.fixture()
+    def vault(self, tmp_path, monkeypatch):
+        import engine
+        from engine import wikilink as wl_mod
+        monkeypatch.setattr(engine, "VAULT_ROOT", tmp_path)
+        monkeypatch.setattr(wl_mod, "VAULT_ROOT", tmp_path)
+        wl_mod.invalidate_cache()
+        music = tmp_path / "20-知识" / "角色技能" / "music"
+        music.mkdir(parents=True)
+        # 三份 primitive：民谣 与 嘻哈 的 kw2 刻意各不相同
+        _prim(music, "民谣", kw2="folk")
+        _prim(music, "嘻哈", kw2="说唱")
+        _prim(music, "雷鬼", kw2="Roots Reggae")   # 刻意**不**声明裸 Roots
+
+        d = music / "编曲"
+        d.mkdir()
+        # 每张技能都声明裸词 `roots` —— 复刻 vault 里 25 张雷鬼技能的现状
+        for genre in ("民谣", "嘻哈", "雷鬼"):
+            for i in (1, 2):
+                (d / f"Ar{i}-{genre}-技能{i}.md").write_text(
+                    "---\ntype: skill\ntrigger:\n  keywords:\n"
+                    f"    - {genre}\n    - roots\n---\n"
+                    f"# Ar{i}-{genre}\n## 执行细则\n细则正文\n",
+                    encoding="utf-8")
+        yield tmp_path
+        wl_mod.invalidate_cache()
+
+    def test_裸词召回的别流派被挡下(self, vault, capsys):
+        """任务只提民谣，但三个流派的技能都声明了裸词 `roots`。"""
+        task = "写一首民谣，roots 感的木吉他"
+        assert al.active_genres(task)[0] == {"民谣"}
+        block, hint = al.load_genre_skill_block("编曲", task, "")
+        assert "Ar1-民谣" in block and "Ar2-民谣" in block
+        assert "嘻哈" not in block and "雷鬼" not in block
+        assert "gated=4" in hint
+        assert "流派闸门" in capsys.readouterr().err
+
+    def test_雷鬼不声明裸Roots所以不进闸门集(self, vault):
+        """真 vault 里 F-雷鬼 只声明 `Roots Reggae`，而 25 张雷鬼技能声明裸
+        `Roots`/`roots` —— 判定收到 primitive 上，这 25 张就不再被 `roots` 召回。"""
+        got, why = al.active_genres("roots 感的采样")
+        assert got == frozenset(), why
+
+    def test_融合项目两个流派都放行(self, vault):
+        # 带上 `roots` 让三个流派的技能都命中，才能看出闸门只放行两个
+        task = "民谣 60% + 嘻哈 40% 的融合，roots 感的编配"
+        assert al.active_genres(task)[0] == {"民谣", "嘻哈"}
+        block, hint = al.load_genre_skill_block("编曲", task, "")
+        for g in ("民谣", "嘻哈"):
+            assert f"Ar1-{g}" in block
+        assert "雷鬼" not in block
+        assert "gated=2" in hint
+
+    def test_显式点名primitive时只认它(self, vault):
+        """简报 §3 写了 primitive_refs 就零猜测 —— 哪怕正文提到别的流派名。"""
+        got, why = al.active_genres("[[F-嘻哈]] 的项目，参考一点民谣的叙事")
+        assert got == {"嘻哈"}
+        assert "显式点名" in why
+
+    def test_判不出流派时不设闸(self, vault):
+        """fail-open：闸门是为了拦「明显不是这个流派的」，不是为了拦「判不出的」。"""
+        task = "帮我做一个报税软件的需求分析"
+        assert al.active_genres(task)[0] == frozenset()
+        block, hint = al.load_genre_skill_block("编曲", task, "")
+        assert "gated" not in hint
+
+    def test_wikilink显式点名不受闸门约束(self, vault):
+        """「显式 > 隐式」：上游写了 [[Ar1-雷鬼-技能1]] 就是直接指令。"""
+        block, hint = al.load_genre_skill_block(
+            "编曲", "写一首民谣", "参考 [[Ar1-雷鬼-技能1]]")
+        assert "Ar1-雷鬼-技能1" in _re_findall_wikilink(block)
+
+    def test_名字不合规范的技能不被误挡(self, vault):
+        """fail-open：解析不出流派段的一律放行，否则闸门自己变成新的静默失效。"""
+        (vault / "20-知识" / "角色技能" / "music" / "编曲" / "杂项-通用技巧.md").write_text(
+            "---\ntype: skill\ntrigger:\n  keywords:\n    - roots\n---\n"
+            "# 杂项\n## 执行细则\n通用\n", encoding="utf-8")
+        assert al._skill_genre("杂项-通用技巧") is None
+        block, _ = al.load_genre_skill_block("编曲", "写一首民谣，roots 感", "")
+        assert "杂项" in block
+
+    def test_全被挡时hint不谎报双路径均空(self, vault):
+        """「被闸门挡光了」与「本来就没命中」是两种完全不同的处置。"""
+        block, hint = al.load_genre_skill_block(
+            "编曲", "写一首嘻哈说唱，roots 感的采样", "")
+        # 先坐实本例确实有被挡的
+        assert "gated=" in hint
+        # 再造一个全被挡的：任务是民谣，但把民谣技能挪走
+        d = vault / "20-知识" / "角色技能" / "music" / "编曲"
+        for i in (1, 2):
+            (d / f"Ar{i}-民谣-技能{i}.md").unlink()
+        block, hint = al.load_genre_skill_block("编曲", "写一首民谣，roots 感", "")
+        assert block == ""
+        assert "双路径均空" in hint and "gated=" in hint
+        assert "全是非本项目流派" in hint
+
+
 class TestReExport:
     def test_common_identity(self):
         from common import load_genre_primitive_block
