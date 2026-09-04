@@ -392,13 +392,31 @@ class TestBudget:
         assert "总额" in err and str(al.TOTAL_PRIMITIVE_BUDGET) in err
 
     def test_配额有实测依据(self):
-        """依据写在模块常量注释里（四份必需三块 3715-6772 / 两份最坏 13191）。
-        这两个数与 render_triggered_block 那三个自陈『拍脑袋初值』的参数不同源，
-        改动时不要混为一谈。"""
-        assert al.MAX_CHARS_PER_PRIMITIVE == 7000
-        assert al.TOTAL_PRIMITIVE_BUDGET == 14_000
+        """依据写在模块常量注释里（2026-09-03 五份必需三块 3715-7009 /
+        两份最坏 13780）。这两个数与 render_triggered_block 那三个自陈
+        『拍脑袋初值』的参数不同源，改动时不要混为一谈。
+
+        2026-09-03 单份上限 7000 → 8000：原依据是四份实测最大 6772，注释写
+        「+3.4% 余量够容纳同量级的新流派」—— 第五份 F-嘻哈 补回 fusion 节后
+        7009 就越了 9 char。8000 按五份实测最大值重定。
+        """
+        assert al.MAX_CHARS_PER_PRIMITIVE == 8000
+        assert al.TOTAL_PRIMITIVE_BUDGET == 16_000
         src = Path(al.__file__).read_text(encoding="utf-8")
-        assert "6772" in src and "13191" in src, "配额依据数字不在源码注释里"
+        assert "7009" in src and "13780" in src, "配额依据数字不在源码注释里"
+
+    def test_总额等于两份上限(self):
+        """总额不再是独立的魔数：单份 8000 抬上去后，两份必须塞得下，
+        否则「两个流派的项目」会因为额度误丢一份（现状 7009+6771=13780，
+        14000 只剩 220 char 余量，任何一份再长一点就踩）。"""
+        assert (al.TOTAL_PRIMITIVE_BUDGET
+                == al.MAX_CHARS_PER_PRIMITIVE * al.MAX_PRIMITIVES_PER_RUN)
+
+    def test_份数上限是显式常量而非字符预算的副作用(self):
+        """「不要第三个流派」此前是 TOTAL=14000 **顺带实现**的（两份 13191
+        塞得下、第三份必然越额）。那是巧合机制：随 primitive 变胖 / 阈值变动
+        而失效，且日志报「额度用尽」，把语义问题伪装成资源不够。"""
+        assert al.MAX_PRIMITIVES_PER_RUN == 2
 
 
 class TestFingerprint:
@@ -513,18 +531,30 @@ class TestRuleTextNotProjectData:
         assert "Skill (wikilink:" not in ctx, (
             f"索引节被当成点名了：{hints['skill']}")
 
-    def test_三份都塞得下_排除了额度巧合(self, vault):
-        """本 fixture 的 primitive 很小，三份合计远小于 TOTAL_PRIMITIVE_BUDGET。
+    def test_雷鬼单独点名时进得来_排除了额度巧合(self, vault):
+        """上一条测试里 F-雷鬼 的缺席必须来自"没被当成点名"，而不是被额度或
+        份数上限砍掉的巧合 —— 所以这里单独点它，它一定得真的出现。
 
-        所以上一条测试里 F-雷鬼 的缺席只可能来自"没被当成点名"，
-        不可能是被额度砍掉的巧合 —— 回归时它一定会真的出现。
+        2026-09-03 前这条是「三份一起点、三份都塞得下」。加了
+        `MAX_PRIMITIVES_PER_RUN=2` 之后三份必被截到两份，那个造法就分辨不出
+        "没点名" 与 "第三份被份数上限拦下" 了 —— 改成点两份（含雷鬼），
+        既在上限内、又能坐实雷鬼本身进得来。
         """
         role = self._Role()
         block, hint = al.load_genre_primitive_block(
-            role.name, "编曲",
-            "[[F-民谣]] [[F-R&B]] [[F-雷鬼]]")
-        assert "[[F-雷鬼]] ===" in block, f"三份塞不下，前一条测试的断言不可靠：{hint}"
-        assert "丢弃" not in hint
+            role.name, "编曲", "[[F-民谣]] [[F-雷鬼]]")
+        assert "[[F-雷鬼]] ===" in block, f"雷鬼本身就进不来，前一条断言不可靠：{hint}"
+        assert "丢弃" not in hint and "份数上限" not in hint
+
+    def test_超两份时报份数上限而不是额度用尽(self, vault, capsys):
+        """语义问题不许伪装成资源不够：本 fixture 三份合计远小于总额。"""
+        role = self._Role()
+        block, hint = al.load_genre_primitive_block(
+            role.name, "编曲", "[[F-民谣]] [[F-R&B]] [[F-雷鬼]]")
+        assert "超份数上限未注入 1 份" in hint
+        assert "越额丢弃" not in hint
+        err = capsys.readouterr().err
+        assert "这不是额度不够" in err
 
 
 class TestWikilinkBudgetScope:
@@ -644,11 +674,28 @@ class TestGenreGate:
         assert "雷鬼" not in block
         assert "gated=2" in hint
 
-    def test_显式点名primitive时只认它(self, vault):
-        """简报 §3 写了 primitive_refs 就零猜测 —— 哪怕正文提到别的流派名。"""
+    def test_三条证据取并集_显式不一票定音(self, vault):
+        """反例来自真项目 `湖向`（R&B + 国风）：vision 的 primitive_refs 只写了
+        `[[F-R&B]]`，国风那半边是以 `[[D1-国风-…]]` 技能名点的。若「有显式就只认
+        显式」，该项目**全部国风技能会被闸门挡掉** —— 正是本轮在修的那类静默失效。
+        """
         got, why = al.active_genres("[[F-嘻哈]] 的项目，参考一点民谣的叙事")
-        assert got == {"嘻哈"}
-        assert "显式点名" in why
+        assert got == {"嘻哈", "民谣"}
+        assert "primitive_refs" in why and "keyword" in why
+
+    def test_点名技能自带的流派也算(self, vault):
+        """复刻 `湖向` 的形状：primitive_refs 只点一个，另一个靠技能名带出来。"""
+        got, why = al.active_genres(
+            "[[F-嘻哈]] 主导", "编配参考 [[Ar1-雷鬼-技能1]]")
+        assert got == {"嘻哈", "雷鬼"}
+        assert "点名技能" in why
+
+    def test_点名技能带的流派不被闸门挡掉自己(self, vault):
+        """上游点了 [[Ar1-雷鬼-技能1]]，那 Ar2-雷鬼 也该能靠 keyword 进来 ——
+        闸门不该把「上游明确在用的流派」判成外来流派。"""
+        block, hint = al.load_genre_skill_block(
+            "编曲", "写一首民谣，roots 感", "编配参考 [[Ar1-雷鬼-技能1]]")
+        assert "Ar2-雷鬼" in block, hint
 
     def test_判不出流派时不设闸(self, vault):
         """fail-open：闸门是为了拦「明显不是这个流派的」，不是为了拦「判不出的」。"""

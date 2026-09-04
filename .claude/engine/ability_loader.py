@@ -168,6 +168,17 @@ def active_genres(
 
     空集 = 判不出流派，调用方**不设闸**（fail-open）。
 
+    三条证据取**并集**，与 `load_genre_primitive_block` 的「显式 ∪ keyword」一致：
+      ① 上游写的 `[[F-{流派}]]`（简报 §3 primitive_refs）
+      ② 上游点名的技能自带的流派段（`[[D1-国风-三条工程铁律与鉴别法]]`）
+      ③ primitive 的 `trigger.keywords` 命中
+
+    **②③ 不能省，① 也不能一票定音**。2026-09-03 差点漏掉的反例：`湖向` 是
+    R&B + 国风，但 vision 的 primitive_refs 只写了 `[[F-R&B]]`，国风那半边是
+    以 `[[D1-国风-…]]` / 技能名的形式点的。若按「有显式就只认显式」，
+    这个项目的**全部国风技能会被闸门挡掉** —— 那正是本轮在修的那类静默失效，
+    不能在修它的代码里造一个新的。
+
     与 `load_genre_primitive_block` 的两条路径同源，但刻意**不按 consumed_by
     收窄**：「这个项目是什么流派」是项目级事实，与哪个角色在跑无关。
     混音师 / 母带工程师 / 录音师 都不在任何 primitive 的 consumed_by 名单里
@@ -200,29 +211,42 @@ def active_genres(
         return frozenset(), f"域根无 F-*.md：{_music_domain_root(domain)}"
 
     by_stem = {p.stem: p for p in prims}
-
-    # 路径 1：显式点名（简报 §3 primitive_refs）—— 有就只认它，零猜测
     haystack = (task_text or "") + "\n" + (upstream_text or "")
-    explicit = {
-        by_stem[t].stem[2:]
-        for wl in parse_wikilinks(haystack)
-        if (t := wl.target.rsplit("/", 1)[-1]) in by_stem
-    }
-    if explicit:
-        got = frozenset(_normalize_genre(g) for g in explicit)
-        return got, f"显式点名 {sorted(got)}"
 
-    # 路径 2：primitive 的 trigger.keywords 命中
+    # ① 显式 [[F-{流派}]]   ② 点名技能自带的流派段
+    from_prim: set[str] = set()
+    from_skill: set[str] = set()
+    for wl in parse_wikilinks(haystack):
+        target = wl.target.rsplit("/", 1)[-1].split("#", 1)[0].strip()
+        if target in by_stem:
+            from_prim.add(by_stem[target].stem[2:])
+            continue
+        g = _skill_genre(target, domain)
+        if g:
+            from_skill.add(g)
+
+    # ③ primitive 的 trigger.keywords 命中
     df = _keyword_df(prims)
-    hit = {
+    from_kw = {
         p.stem[2:]
         for p in prims
         if score_skill(p, task_text, upstream_text, None, keyword_df=df).matched
     }
-    if not hit:
-        return frozenset(), "简报未点名 primitive、也无流派 keyword 命中 → 不设闸"
-    got = frozenset(_normalize_genre(g) for g in hit)
-    return got, f"keyword 命中 {sorted(got)}"
+
+    parts = []
+    if from_prim:
+        parts.append(f"primitive_refs {sorted(_normalize_genre(g) for g in from_prim)}")
+    if from_skill:
+        parts.append(f"点名技能 {sorted(from_skill)}")
+    if from_kw:
+        parts.append(f"keyword {sorted(_normalize_genre(g) for g in from_kw)}")
+    if not parts:
+        return frozenset(), "无 primitive_refs / 无点名技能 / 无流派 keyword 命中 → 不设闸"
+
+    got = frozenset(
+        _normalize_genre(g) for g in (from_prim | from_skill | from_kw)
+    )
+    return got, " ∪ ".join(parts)
 
 
 def _wanted_music_skill(wl, skill_re, role_dir) -> bool:
@@ -422,10 +446,21 @@ def load_genre_skill_block(
 # skill wikilink 写入指令文档，禁止编造文件名**」—— 这句约束一直没到过总监手上。
 # 实测 `成为父亲那年` 7 份指令 0 条技能点名，全链退化成 keyword 猜。
 
-# 配额依据（2026-08-26 实测四份 primitive 的「必需三块」体量，去重后）：
-#   F-R&B 6772 ／ F-国风 6419 ／ F-雷鬼 5244 ／ F-民谣 3715
-#   单份最大 6772 → 上限 7000（+3.4% 余量，够容纳同量级的新流派）
-#   两份最坏 6772+6419=13191 → 总额 14000
+# 配额依据（2026-09-03 实测**五份** primitive 的「必需三块」体量，去重后）：
+#   F-嘻哈 7009 ／ F-R&B 6771 ／ F-国风 6418 ／ F-雷鬼 5245 ／ F-民谣 3715
+#   单份最大 7009 → 上限 8000（+14% 余量）
+#   两份最坏 7009+6771=13780 → 总额 14000（余量仅 220 char，见下方 ⚠️）
+#
+# 上限 2026-09-03 从 7000 抬到 8000。原依据是 2026-08-26 的四份实测
+# （最大 6772 → 7000，注释里写「+3.4% 余量，够容纳同量级的新流派」）——
+# **第五份就越了**：`F-嘻哈` 补回 fusion 节后必需三块 7009 char，越限 9 char，
+# 触发截断且切在表格行中间（丢 `分段交替触发 |`）。8000 是按五份实测最大值
+# 重新定的，不是拍脑袋放大；`+14%` 这个余量比原来的 +3.4% 实在。
+#
+# ⚠️ **TOTAL_PRIMITIVE_BUDGET 刻意不跟着抬**（理由见下段耦合说明）。代价是
+# 两份最坏 13780 只剩 220 char 余量 —— 下一份 primitive 若也在 7000 量级，
+# 「两份都是大份」的组合就会触发越额丢弃。届时正解仍是简报 §3 写
+# `primitive_refs` 显式点名，不是把总额调大。
 # 实测 7 个走流程项目**全是 1-2 流派**；≥3 流派简报 schema 另有附加要求，
 # 三份最坏 18435 会越额 → 告警并截，不静默。
 # （对比：render_triggered_block 那三个预算参数的 docstring 自陈「拍脑袋初值，
@@ -444,8 +479,29 @@ def load_genre_skill_block(
 # 若某轮上游把错流派提得更密，它就会排到前面、把真流派挤掉。
 # 想要确定性，正解是在简报 §3 写 `primitive_refs` 显式点名（走 wikilink 路径，
 # 不参与 keyword 竞争），**不是**把额度调大。
-MAX_CHARS_PER_PRIMITIVE = 7000
-TOTAL_PRIMITIVE_BUDGET = 14_000
+MAX_CHARS_PER_PRIMITIVE = 8000
+TOTAL_PRIMITIVE_BUDGET = 16_000      # = 2 × 单份上限，见下方 MAX_PRIMITIVES_PER_RUN
+
+# 一轮最多注入几份 primitive。**这条是"不要第三个流派"的显式表达**。
+#
+# 2026-09-03 从字符预算里拆出来。此前没有这个常量，"最多两份"是
+# `TOTAL_PRIMITIVE_BUDGET = 14000` **顺带实现**的 —— 两份最坏 13191 塞得下、
+# 第三份必然越额。这是个巧合机制：它随任何一份 primitive 变胖 / 阈值变动而失效，
+# 且日志里报的是"额度用尽"，读起来像资源不够，实际拦的是语义问题。
+#
+# 拆开的直接诱因：单份上限抬到 8000 后，总额若仍是 14000，两份 8000 的
+# primitive 就塞不下（现状 7009+6771=13780 只剩 220 char 余量，任何一份再长
+# 一点就触发误丢）。总额跟着抬到 16000 消掉这个坑，而"不要第三个"由本常量接管。
+#
+# 实测（2026-09-03，6 个真项目 × 3 消费角色）：只抬总额到 16000 而不加本常量，
+# `纸飞机` 与 `凌晨四点` 会各自多注入 F-雷鬼 5245 char —— 两处都是**否定语境**
+# 召回的（纸飞机黑名单表格写「Dub 风格延时 | 儿歌要近距亲密感」→ 命中 `Dub`），
+# 而 14000 那个巧合是当时唯一在拦它的东西。加上本常量后 6/6 项目与抬阈值前一致。
+#
+# 依据：实测 7 个走流程项目全是 1-2 流派；≥3 流派简报 schema 另有附加要求。
+# 真需要三份时正解是简报 §3 写 `primitive_refs` 显式点名（走 wikilink 路径、
+# 排在 keyword 之前），而不是调大本常量。
+MAX_PRIMITIVES_PER_RUN = 2
 
 # 「必需三块」的章节标题关键词。**按标题子串匹配、不按编号**：五份 primitive
 # 编号风格不一（F-R&B/F-国风 用汉字「一、二、」，F-民谣/F-雷鬼/F-嘻哈 用「1. 2.」），
@@ -685,6 +741,7 @@ def load_genre_primitive_block(
     parts: list[str] = []
     loaded: list[str] = []
     dropped: list[str] = []
+    over_count: list[str] = []
     used = 0
     for path, via in ordered:
         try:
@@ -716,6 +773,11 @@ def load_genre_primitive_block(
                    f"idiom / fusion 段已截（索引节受保护未截）")
             print(f"[load_genre_primitive_block:{role_name}] ⚠️ {msg}", file=sys.stderr)
             _warn_audit("genre_primitive_truncated", role_name, msg)
+        if len(loaded) >= MAX_PRIMITIVES_PER_RUN:
+            # 份数上限：拦的是「不要第三个流派」这件语义事，与字符够不够无关。
+            # 与下面那条越额丢弃分开报，别再让语义问题伪装成资源不够。
+            over_count.append(path.stem)
+            continue
         if used + len(payload) > TOTAL_PRIMITIVE_BUDGET:
             dropped.append(path.stem)
             continue
@@ -726,6 +788,19 @@ def load_genre_primitive_block(
             f"（本节为流派 idiom + fusion 友好度 + 该流派角色技能索引；"
             f"命中章节：{' / '.join(sections)}）\n{payload}"
         )
+
+    if over_count:
+        msg = (f"本轮已注入 {MAX_PRIMITIVES_PER_RUN} 份 primitive（上限），"
+               f"第 {MAX_PRIMITIVES_PER_RUN + 1} 份起不再注入："
+               f"{over_count}（已注入 {loaded}）。**这不是额度不够**"
+               f"（还剩 {TOTAL_PRIMITIVE_BUDGET - used} char）—— 是「一个项目通常"
+               f"不超过两个流派」这条约定在拦。实测排在后面的多半来自反锚点 / "
+               f"黑名单里提到的流派名（纯子串匹配读不出「不要这个」）。"
+               f"若本项目确实要三个流派，在简报 §3 写 "
+               f"`primitive_refs: [[F-xxx]]` 显式点名 —— wikilink 路径排在 "
+               f"keyword 之前，会优先占掉这两个名额")
+        print(f"[load_genre_primitive_block:{role_name}] ℹ️ {msg}", file=sys.stderr)
+        _warn_audit("genre_primitive_count", role_name, msg)
 
     if dropped:
         msg = (f"primitive 总额 {TOTAL_PRIMITIVE_BUDGET} 用尽，丢弃 "
@@ -748,6 +823,8 @@ def load_genre_primitive_block(
         + "\n"
     )
     hint = f"注入 {len(loaded)} 份（{'/'.join(loaded)}），共 {used} char"
+    if over_count:
+        hint += f"；超份数上限未注入 {len(over_count)} 份（{'/'.join(over_count)}）"
     if dropped:
         hint += f"；越额丢弃 {len(dropped)} 份（{'/'.join(dropped)}）"
     return block, hint
