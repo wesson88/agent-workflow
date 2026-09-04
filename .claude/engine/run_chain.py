@@ -34,7 +34,7 @@ except (AttributeError, ValueError):
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.config import PROJECT_NAME
-from engine.git_sync import sync_after_run
+from engine.git_sync import changed_since, dirty_paths, sync_after_run
 from engine.human_gate import list_gates as list_human_gates
 from engine.workflow import load_workflow, list_workflows
 from engine.graph import build_graph
@@ -152,6 +152,16 @@ def main() -> int:
         "halted": False,
     }
 
+    # 跑之前的 vault 脏路径快照。工作流只提交**它自己动过**的文件 —— 跑之前就脏
+    # 的一律不碰（哪怕本轮也改了它）。见 git_sync.changed_since 的依据。
+    # 取不到（vault 不是 git 仓 / git 不可用）时置 None，跑完时按"无法界定范围"
+    # 跳过 git 同步，而不是回落成 add -A。
+    try:
+        dirty_before: set[str] | None = dirty_paths()
+    except Exception as e:
+        dirty_before = None
+        print(f"⚠️ 取 vault 脏路径快照失败，本轮跑完将跳过 git 同步：{e}")
+
     final_state = graph.invoke(initial_state)
 
     succeeded = final_state.get("succeeded", [])
@@ -172,6 +182,10 @@ def main() -> int:
         print("（--skip-git 已设置，不推送）")
         return 1 if failed else 0
 
+    if dirty_before is None:
+        print("（未能界定本轮改动范围，跳过 git 同步；产出文件不受影响）")
+        return 1 if failed else 0
+
     try:
         summary = (
             f"工作流：{template.name}\n"
@@ -180,7 +194,17 @@ def main() -> int:
             f"失败：{failed or '无'}\n"
             f"跳过：{skipped or '无'}"
         )
-        url = sync_after_run(project=project, summary=summary)
+        touched = changed_since(dirty_before)
+        if not touched:
+            # vault 的 .gitignore 排掉了 10-项目/ 等工作流正常产出目录，所以
+            # 「本轮没有可提交路径」是常态而非异常，不当失败处理。
+            print("\nℹ️ 本轮未产生 vault 可提交改动（产出落在 gitignore 目录内），"
+                  "跳过 git 同步。")
+            return 1 if failed else 0
+        print(f"\n本轮改动 {len(touched)} 个路径，仅提交这些：")
+        for rel in touched:
+            print(f"  · {rel}")
+        url = sync_after_run(project=project, summary=summary, paths=touched)
         if url:
             print(f"\n📌 审阅入口：{url}")
     except Exception as e:

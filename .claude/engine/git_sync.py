@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from .config import VAULT_ROOT
@@ -42,6 +43,59 @@ def _current_branch() -> str:
 def _has_uncommitted() -> bool:
     out = _run("status", "--porcelain", capture=True).stdout
     return bool(out.strip())
+
+
+def dirty_paths() -> set[str]:
+    """vault 当前所有未提交路径（含 untracked、含改名两端），仓库相对 posix 形式。
+
+    用途见 `changed_since` —— 工作流只提交**它自己动过**的文件，不能把用户手上
+    的活一起卷走。
+
+    `-z` + `core.quotepath=false`：vault 路径几乎全是中文，porcelain 默认会把
+    非 ASCII 整条路径加引号并做 `\\346\\210\\221` 式八进制转义，直接拿去 `git add`
+    是加不上的。`-uall` 让新目录展开到文件级而不是只报一个目录名（否则「用户新建
+    的目录里工作流写了一个文件」会整目录进来）。
+    """
+    out = _run(
+        "-c", "core.quotepath=false",
+        "status", "--porcelain", "-z", "-uall", capture=True,
+    ).stdout
+    fields = [f for f in out.split("\0") if f]
+    paths: set[str] = set()
+    i = 0
+    while i < len(fields):
+        rec = fields[i]
+        i += 1
+        if len(rec) < 4:
+            continue
+        xy, path = rec[:2], rec[3:]
+        paths.add(path)
+        if "R" in xy or "C" in xy:
+            # 改名 / 复制：紧跟的下一个字段是**源**路径，两端都得算动过
+            if i < len(fields):
+                paths.add(fields[i])
+                i += 1
+    return paths
+
+
+def changed_since(before: set[str]) -> list[str]:
+    """本轮新出现的未提交路径 = 现在脏的 − 跑之前就脏的。
+
+    2026-09-03 收窄 `add -A` 的实现基础。原先 `sync_after_run` 不传 paths →
+    `commit_and_push` 走 `add -A`，而 vault 的 `.gitignore` 把工作流的正常产出
+    **全部**排除在外（`10-项目/` / `99-临时/` / `00-系统/.runtime-state/` /
+    `98-待办/`）—— 也就是说 `add -A` 在正常运行时能扫到的，**只剩用户自己没提交
+    的活**，然后以 `agent: <project> — 工作流：…` 的名义提交掉。
+
+    刻意用 porcelain 差集而不是 audit 里的 `outputs`：audit 是带 buffer 的
+    （`_BUFFER_FLUSH_THRESHOLD`，靠 atexit 落盘），run_chain 在同进程内读不到本轮
+    条目；且 subprocess 模式的角色产出根本不回到 graph state。git 自己的脏路径
+    集合是唯一不依赖这两条链路的事实来源。
+
+    **跑之前就脏的一律不碰**，即使本轮也改了它：宁可漏提交也不覆盖用户在编辑的
+    文件 —— 漏了用户 `git add` 一下就行，卷走了得从 reflog 捞。
+    """
+    return sorted(dirty_paths() - before)
 
 
 def _gh_available() -> bool:
@@ -83,16 +137,33 @@ def ensure_on_agent_branch() -> None:
 
 def commit_and_push(
     message: str,
-    paths: list[str | Path] | None = None,
+    paths: Sequence[str | Path],
     *,
     rebase_main: bool = True,
 ) -> bool:
     """提交并推送到 origin/agent。
 
-    - paths：限定 add 的子路径（vault 相对或绝对均可）。None 表示 add -A
+    - paths：限定 add 的子路径（vault 相对或绝对均可）。**必填**，空列表 =
+      本轮无可提交内容，直接返回 False
     - rebase_main：push 前 fetch & rebase origin/main，避免 agent 持续落后
     返回是否真的产生了新 commit（无变更则返回 False）。
+
+    2026-09-03 去掉 `paths=None → add -A` 那条兜底路径，改为 `None` 直接抛。
+    理由与 `AGENT_BRANCH` 常量同源：真正的护栏是让危险动作**在结构上无法表达**，
+    而不是靠每个调用方记得传参。实测 `sync_after_run` 就没传（run_chain:183），
+    于是每轮工作流都在 `add -A`；而 vault 的 `.gitignore` 排掉了工作流的全部正常
+    产出，`add -A` 能扫到的只剩用户自己没提交的活。详见 `changed_since`。
     """
+    if paths is None:
+        raise ValueError(
+            "commit_and_push 必须显式传 paths —— 不再支持 `add -A` 兜底。"
+            "本轮改动路径用 git_sync.changed_since(before) 取（before 由跑之前的 "
+            "dirty_paths() 快照得到）。"
+            "若确实要提交整个工作区，显式传那些路径。"
+        )
+    if not paths:
+        return False
+
     ensure_on_agent_branch()
 
     if rebase_main:
@@ -108,11 +179,8 @@ def commit_and_push(
             _run("rebase", "--abort", check=False)
 
     # add
-    if paths:
-        for p in paths:
-            _run("add", "--", str(p))
-    else:
-        _run("add", "-A")
+    for p in paths:
+        _run("add", "--", str(p))
 
     if not _has_uncommitted() and _run(
         "diff", "--cached", "--quiet", check=False
@@ -180,19 +248,22 @@ def sync_after_run(
     project: str,
     summary: str,
     *,
-    paths: list[str | Path] | None = None,
+    paths: Sequence[str | Path],
 ) -> str | None:
     """每轮 agent 任务结束后调用。
 
     流程：切 agent → rebase main → commit 改动 → push → 开/更新 PR。
     返回 PR URL（或 compare URL）；如本轮无变更则返回 None。
+
+    `paths` **必填**（2026-09-03）：调用方负责界定"本轮动了什么"。run_chain 用
+    `dirty_paths()` 前后快照差集（见 changed_since）。
     """
     pushed = commit_and_push(
         message=f"agent: {project} — {summary}",
         paths=paths,
     )
     if not pushed:
-        print(f"ℹ️ {project} 本轮无变更，跳过 PR。")
+        print(f"ℹ️ {project} 本轮无可提交改动，跳过 PR。")
         return None
 
     return open_or_update_pr(
