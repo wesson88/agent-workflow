@@ -112,7 +112,17 @@ class TestRunRole:
         assert result.status == "failed" and result.returncode == 1
         assert "blocked" in (result.error or "")
 
-    def test_fanout_expansion_and_dormant_filter(self):
+    def test_fanout_expands_dormant_roles_too(self):
+        """2026-09-06 契约变更：dormant 角色**照样扇出指令**，只是内容标 dormant。
+
+        原用例断言 dormant 角色被从扇出里剔掉。那条路整链必挂：dormant 角色收不到
+        `指令/给<自己>.md` → 角色基因声明的 `consumes: [[给音乐角色]]` 实例缺失 →
+        artifact_check 判 consume:fail → exit -3 → halt_on_failure 中断全链
+        （2026-09-06「黄金三秒」实测，挂在第 3 节点 作词）。
+
+        也不能改成"跳过 dormant 节点"：下游要吃它的产物（`角色-作曲` 的 inputs 含
+        `词作.md`、consumes 含 `[[词作]]`），跳过只是把同一个 consume:fail 挪给作曲。
+        """
         from engine.role_runner import _expand_fanout_outputs, _parse_dormant_roles
 
         text = (
@@ -138,8 +148,56 @@ class TestRunRole:
             rels, dormant = _expand_fanout_outputs(
                 FanRole(), ["x/制作计划.md", "x/指令/给{role}.md"], [f],
             )
+        # dormant 集照常返回（供 prompt 层决定怎么写那份指令）
         assert dormant == {"混音师"}
-        assert rels == ["x/制作计划.md", "x/指令/给作词.md", "x/指令/给作曲.md"]
+        # 但扇出一份都不少 —— 混音师 dormant 也在里面
+        assert rels == [
+            "x/制作计划.md",
+            "x/指令/给作词.md", "x/指令/给作曲.md", "x/指令/给混音师.md",
+        ]
+
+    def test_dormant_fanout_note_carries_marker(self):
+        """扇出说明必须把工程判据（marker）原样交给上游，否则它写的 dormant
+        指令检测不到 —— dormant 角色会当正常角色跑，伪造出一份不该存在的产物。"""
+        from engine.role_runner import _DORMANT_MARKER, _build_user_prompt
+
+        class R:
+            name = "制作人"
+            style = ""
+
+        prompt = _build_user_prompt(
+            R(), "p", "t", "ctx",
+            ["x/指令/给作词.md", "x/指令/给作曲.md"],
+            False, fanout_dormant={"作词"},
+        )
+        assert _DORMANT_MARKER in prompt
+        assert "一份都不能少" in prompt
+        assert "不扇出" not in prompt, "旧措辞会让上游漏写 dormant 角色的指令"
+
+    def test_detect_dormant_ignores_late_mention(self, tmp_path):
+        """裸词 `dormant` 只在**正文开头**才算数。
+
+        改成"照扇出、标 dormant"后，指令文件里讨论 dormant 会变常见（例如制作人
+        在 `给作曲.md` 里说明"作词 dormant，歌词层约束已翻译进 Style 段"）。旧的
+        2000 char 窗口会把这种提及误判成"作曲自己 dormant"，整轮降级输出。
+        """
+        from engine.role_runner import _detect_dormant
+
+        active = tmp_path / "给作曲.md"
+        active.write_text(
+            "---\nrole: 作曲\n---\n\n# 给作曲\n\n"
+            + "正常业务指令。" * 40                      # 推到 300 char 之外
+            + "\n\n## 附注\n本项目 作词 已判 dormant，歌词层约束见 §3。\n",
+            encoding="utf-8",
+        )
+        assert _detect_dormant(active) is False
+
+        真 = tmp_path / "给作词.md"
+        真.write_text(
+            "---\nrole: 作词\n---\n\n**本项目状态：dormant**\n\n理由：instrumental。\n",
+            encoding="utf-8",
+        )
+        assert _detect_dormant(真) is True
 
     def test_no_file_blocks_fails(self, runner_env, monkeypatch):
         import engine.role_runner as rr

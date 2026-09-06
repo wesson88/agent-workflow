@@ -57,7 +57,15 @@ from common import (  # noqa: E402
 from .ability_loader import assemble_user_context  # noqa: E402
 
 # music 扇出 dormant 约定（原 music_mastering_engineer/main.py，收编为通用规则）
-_DORMANT_KEYWORDS = ("dormant", "本项目状态：dormant", "不启动")
+#
+# `_DORMANT_MARKER` 是**唯一出处**：既进 `_DORMANT_KEYWORDS` 供 `_detect_dormant`
+# 识别，也进 `_build_user_prompt` 的扇出说明供上游照写。两处各写一遍字面量的话，
+# 改一处漏一处 = dormant 指令写了但检测不到 = 又一条静默失效。
+_DORMANT_MARKER = "本项目状态：dormant"
+_DORMANT_KEYWORDS = ("dormant", _DORMANT_MARKER, "不启动")
+# `_detect_dormant` 的扫描窗口（正文去 frontmatter 后的前 N char）。见该函数 docstring：
+# 裸词 `dormant` 在宽窗口下会把"提到 dormant"误判成"自己 dormant"。
+_DORMANT_HEAD_CHARS = 300
 
 # frontmatter 链接写法契约（治理三层里的"提示词层"，见 engine/frontmatter_links.py）
 #
@@ -86,13 +94,32 @@ frontmatter 硬约束（写错**不会报错**，但 Obsidian / Dataview 会静�
 
 
 def _detect_dormant(instruction_path: Path | None) -> bool:
-    """读 `指令/给<自身>.md` 开头判断制作人是否明示 dormant。"""
+    """读 `指令/给<自身>.md` **正文开头**判断上游是否明示 dormant。
+
+    2026-09-06：扫描窗口从「全文前 2000 char」收到「正文（去 frontmatter）前
+    {head} char」。此前 2000 char 的窗口足以覆盖大半份指令，而 `_DORMANT_KEYWORDS`
+    里有裸词 `dormant` —— 一份**非** dormant 的指令只要在正文里提一句「本项目
+    dormant 角色见 §4.2」就会被误判成自己 dormant，整轮降级输出。
+    以前这个假阳性碰不到（dormant 角色压根收不到指令文件，见
+    `_expand_fanout_outputs`），改成"照扇出、标 dormant"后指令文件里讨论 dormant
+    会变常见，必须先把判据收紧。
+
+    收到正文开头也与本函数 docstring 一贯的语义一致 —— 判据是「开头明示」，
+    不是「全文任意处提到」。
+    """
     if instruction_path is None or not instruction_path.exists():
         return False
     try:
-        head = instruction_path.read_text(encoding="utf-8")[:2000]
+        text = instruction_path.read_text(encoding="utf-8")
     except Exception:
         return False
+    from .obsidian_io import split_frontmatter
+    try:
+        _, body = split_frontmatter(text)
+    except Exception:
+        # frontmatter YAML 挂了不该连累 dormant 判定：退回整段
+        body = text
+    head = body[:_DORMANT_HEAD_CHARS]
     return any(kw in head for kw in _DORMANT_KEYWORDS)
 
 
@@ -262,10 +289,30 @@ def _parse_dormant_roles(upstream_text: str, candidates: list[str]) -> set[str]:
 def _expand_fanout_outputs(
     role, output_rels: list[str], input_paths: list[Path],
 ) -> tuple[list[str], set[str]]:
-    """产出端 `{role}` 模板 = 扇出（封闭规则）：按 role.downstream 展开，
-    剔除上游 dormant 声明角色（制作人语义，声明驱动形态）。
+    """产出端 `{role}` 模板 = 扇出（封闭规则）：按 role.downstream 展开
+    **全部**下游，dormant 角色也扇（其指令内容标 dormant，见 `_build_user_prompt`）。
 
     返回 (展开后的 output_rels, dormant 角色集)。无 {role} 模板时原样返回。
+
+    ## 2026-09-06：从「剔除 dormant」改为「照扇出、标 dormant」
+
+    此前 dormant 角色被从 `active` 里剔掉、不扇出指令。那让引擎里两套 dormant
+    机制自相矛盾，且整条链必挂：
+
+    1. `_detect_dormant` 要角色**读** `指令/给<自己>.md` 才知道自己 dormant ——
+       文件不扇出，它永远返回 False。`run_role` 里那整条「走降级输出路径」
+       （`is_dormant` → `_build_user_prompt` 降级 scenario）成了死代码。
+    2. 更硬的是 consume 门禁：角色基因声明 `consumes: [[给音乐角色]]`，指令文件
+       缺失 → `artifact_check` 判 `consume:fail` → exit -3，角色连跑都没跑上。
+    3. 而链路调度层（`run_chain.py` / `workflow.py`）**完全不认识 dormant**
+       （grep 零命中），`halt_on_failure=true` 于是中断全链。
+
+    实测（2026-09-06「黄金三秒」，instrumental 项目）：总监判 作词 dormant →
+    制作人扇出 5 份而非 6 份 → 作词 `consume:fail` exit -3 → 全链中断在第 3 节点。
+
+    **为什么不是"跳过 dormant 节点"**：下游还要吃它的产物。`角色-作曲` 的
+    `inputs` 含 `词作.md`、`consumes` 含 `[[词作]]` —— 跳过 作词 只是把同一个
+    `consume:fail` 挪到 作曲 身上。dormant 角色必须照跑、产降级存根，链才是完整的。
     """
     if not any("{role}" in rel for rel in output_rels):
         return output_rels, set()
@@ -278,11 +325,10 @@ def _expand_fanout_outputs(
                 continue
     downstream = list(role.downstream)
     dormant = _parse_dormant_roles(upstream_text, downstream)
-    active = [r for r in downstream if r not in dormant]
     expanded: list[str] = []
     for rel in output_rels:
         if "{role}" in rel:
-            expanded.extend(rel.replace("{role}", r) for r in active)
+            expanded.extend(rel.replace("{role}", r) for r in downstream)
         else:
             expanded.append(rel)
     return expanded, dormant
@@ -321,10 +367,19 @@ def _build_user_prompt(
                 items.append(f"### {i}. `{rel}`\n按角色职责与 style 约束产出。")
         fanout_note = ""
         if fanout_dormant:
+            # 2026-09-06：原文写「这些角色本轮**不扇出指令**」。上游照做，于是
+            # dormant 角色收不到指令 → consume 门禁判 consume:fail → exit -3 →
+            # halt_on_failure 中断全链（「黄金三秒」实测）。改为照扇出、标 dormant：
+            # 角色能读到标记 → `_detect_dormant` 命中 → 走降级输出路径产存根 →
+            # 下游 consume 拿得到文件，链是完整的。
             fanout_note = (
-                f"\n（本项目上游已判 dormant：{sorted(fanout_dormant)}；这些角色"
-                f"本轮**不扇出指令**，其约束翻译进文本层。每份扇出指令按对应"
-                f"下游角色职责定制化，不要复制粘贴。）\n"
+                f"\n（本项目上游已判 dormant：{sorted(fanout_dormant)}。"
+                f"**这些角色的指令仍然要扇出，一份都不能少**，但内容按 dormant 写："
+                f"正文第一行必须是 `**{_DORMANT_MARKER}**`，随后写清 dormant 理由与"
+                f"未来 promote 的触发条件，**不要写业务指令**。"
+                f"该标记是工程层判据（引擎读正文开头识别 dormant 并让该角色走降级"
+                f"输出），漏写会让它按正常角色跑、伪造出一份不该存在的产物。\n"
+                f"其余角色的指令按对应下游职责定制化，不要复制粘贴。）\n"
             )
         elif any("指令/给" in rel for rel in output_rels) and n > 1:
             fanout_note = "\n（每份扇出指令按对应下游角色职责定制化，不要复制粘贴。）\n"
