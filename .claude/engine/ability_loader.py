@@ -702,6 +702,10 @@ def load_genre_primitive_block(
       —— 实测音乐总监侧 7/7 恰好等于简报声明的流派（作曲/编曲 7/11，多召回来自
       上游产物里提到的其他流派名）
 
+    **两条路径互斥，不叠加**（2026-09-06 修）：路径 1 非空 → 路径 2 完全不跑。
+    这是让实现兑现上面那句「零猜测」——此前是叠加的，点名了照样被 keyword 带进
+    别的流派。fusion 不受影响：primitive_refs 是列表，要几份写几份。
+
     只对 `consumed_by` 声明的角色注入。域根无 primitive / 本角色不在消费名单 /
     双路径均空 → ("", 原因)。
     """
@@ -742,12 +746,33 @@ def load_genre_primitive_block(
         if p is not None and p not in explicit:
             explicit.append(p)
 
-    # ── 路径 2：keyword 兜底（去掉已显式点名的）─────────────────
-    rest = [p for p in scoped if p not in explicit]
-    df = _keyword_df(rest)
-    hits = [m for m in (score_skill(p, task_text, upstream_text, None, keyword_df=df)
-                        for p in rest) if m.matched]
-    hits.sort(key=lambda m: (tuple(-v for v in m.rank_key), m.path.name))
+    # ── 路径 2：keyword 兜底 ──────────────────────────────────
+    # **显式点名即互斥**（2026-09-06）：简报 §3 写了 primitive_refs 就完全不跑兜底。
+    #
+    # 此前是叠加的：`rest = [p for p in scoped if p not in explicit]` 只排掉已点名的
+    # 那几份（避免同一文件加载两次），兜底照跑、命中结果照样 `ordered += hits`。
+    # 于是本函数 docstring「用户点名要哪几个流派，就只加载那几个，零猜测」与
+    # `00-系统/规则/music/创作简报.schema.md` §3「写了会怎样：只加载点到的那几份，
+    # 零猜测。上游文本里提到别的流派名也不会被带进来」**两处承诺都是假的**。
+    #
+    # 实测（2026-09-06「黄金三秒」）：简报 §3 只点 `[[F-短视频BGM]]`，因正文写了
+    # "Phonk" 而多注入 F-嘻哈 6771 char。
+    #
+    # 为什么是关掉兜底、而不是放宽额度：keyword 是纯子串匹配、读不出否定语境。
+    # 上面 TOTAL_PRIMITIVE_BUDGET 的耦合说明里那两条实测，召回的都是**用户明确
+    # 拒绝的流派**（湖向反锚点「❌ 一类 city folk 抒情」→ F-民谣；纸飞机黑名单
+    # 「Dub 风格延时」→ F-雷鬼），且靠 rank_key 侥幸被砍，注释自陈「这不保证」。
+    # primitive_refs 是用户唯一能表达确定性的手段，不该被猜测稀释。
+    #
+    # fusion 不受影响：primitive_refs 是列表，要几份写几份；且只有显式点名才拿得到
+    # 第 3 个名额（MAX_KEYWORD_PRIMITIVES_PER_RUN=2 < MAX_PRIMITIVES_PER_RUN=3），
+    # 所以三流派融合本来就只有显式点名这一条路。
+    hits: list = []
+    if not explicit:
+        df = _keyword_df(scoped)
+        hits = [m for m in (score_skill(p, task_text, upstream_text, None, keyword_df=df)
+                            for p in scoped) if m.matched]
+        hits.sort(key=lambda m: (tuple(-v for v in m.rank_key), m.path.name))
 
     ordered: list[tuple] = [(p, "wikilink") for p in explicit]
     ordered += [(m.path, f"auto-trigger:{m.reason}") for m in hits]

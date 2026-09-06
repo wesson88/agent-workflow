@@ -183,17 +183,46 @@ class TestConsumedByScope:
 
 
 class TestDualPath:
-    """wikilink 显式（简报 primitive_refs）∪ keyword 兜底。"""
+    """wikilink 显式（简报 primitive_refs）**互斥** keyword 兜底。
+
+    2026-09-06 前是并集（∪）：点名了照样跑兜底、结果照样追加。本类原来的
+    `test_显式点名只加载点到的` 名字承诺排他，但 task 文本里根本没出现第三个
+    流派名 —— 兜底本来就不会命中，断言在并集实现下也绿。空跑的测试。
+    """
 
     def test_显式点名只加载点到的(self, music_root):
-        """用户说「50% R&B + 50% 国风」→ 只加载这两份，第三份不进。"""
+        """用户说「50% R&B + 50% 国风」→ 只加载这两份，第三份不进。
+
+        第三个流派名**故意出现在文本里且是否定语境** —— 这正是并集实现下的真实
+        失效形态（湖向反锚点「❌ 一类 city folk 抒情」召回 F-民谣、纸飞机黑名单
+        「Dub 风格延时」召回 F-雷鬼，见 ability_loader 常量注释的实测）。
+        keyword 是纯子串匹配，读不出「不要」。
+        """
         for g in ("R&B", "国风", "雷鬼"):
             _prim(music_root, g)
-        brief = "- **primitive_refs**:\n  - [[F-R&B]]\n  - [[F-国风]]\n"
-        block, hint = al.load_genre_primitive_block("音乐总监", "50% R&B + 50% 国风", brief)
+        brief = (
+            "- **primitive_refs**:\n  - [[F-R&B]]\n  - [[F-国风]]\n"
+            "- 黑名单：不要雷鬼，不要 Dub 风格延时\n"
+        )
+        block, hint = al.load_genre_primitive_block(
+            "音乐总监", "50% R&B + 50% 国风（明确避开雷鬼）", brief)
         assert "[[F-R&B]]" in block and "[[F-国风]]" in block
-        assert "[[F-雷鬼]]" not in block
+        assert "[[F-雷鬼]]" not in block, (
+            "点名了 R&B/国风，雷鬼只出现在否定语境里，不该被兜底带进来"
+        )
         assert "wikilink · sections" in block
+        assert "auto-trigger" not in block, "显式点名时兜底应完全不跑"
+
+    def test_点名一份时其他流派名不带入(self, music_root):
+        """2026-09-06「黄金三秒」实跑复现：简报只点 [[F-短视频BGM]]，正文写了
+        "Phonk" → 并集实现把 F-嘻哈 也注进来（6771 char）。"""
+        for g in ("短视频BGM", "嘻哈"):
+            _prim(music_root, g, kw2="Phonk")
+        brief = "- **primitive_refs**:\n  - [[F-短视频BGM]]\n"
+        block, _ = al.load_genre_primitive_block(
+            "音乐总监", "短视频BGM 70% + Phonk 30%", brief)
+        assert "[[F-短视频BGM]]" in block
+        assert "[[F-嘻哈]]" not in block
 
     def test_keyword兜底(self, music_root):
         for g in ("民谣", "雷鬼"):
@@ -578,11 +607,32 @@ class TestRuleTextNotProjectData:
         assert "这不是额度不够" in err
         assert "keyword 兜底最多占 2 个名额" in err
 
-    def test_显式两份加keyword一份也放行(self, vault):
-        """混合场景：显式占 2 个名额，keyword 再占 1 个（未到 keyword 上限）。"""
+    def test_显式两份时正文提第三个流派不带入(self, vault):
+        """2026-09-06 契约变更：点名即互斥，正文提到第三个流派也不会被兜底带进来。
+
+        原用例（`test_显式两份加keyword一份也放行`）断言的是并集行为 —— 显式 2 份
+        + keyword 再补 1 份。改为互斥后那条不再成立，且互斥正是 schema 一直承诺的
+        「上游文本里提到别的流派名也不会被带进来」。
+        真要三份，见下一条：写三条 primitive_refs。
+        """
         role = self._Role()
         block, hint = al.load_genre_primitive_block(
             role.name, "还要一点雷鬼味", "[[F-民谣]] [[F-R&B]]")
+        for g in ("民谣", "R&B"):
+            assert f"[[F-{g}]] ===" in block, hint
+        assert "[[F-雷鬼]] ===" not in block, hint
+        assert "auto-trigger" not in block, hint
+
+    def test_显式三份拿满名额(self, vault):
+        """三流派融合的正解：primitive_refs 写三条。
+
+        显式档上限 3（MAX_PRIMITIVES_PER_RUN），keyword 档上限 2 —— 互斥之后
+        「三流派」就只有显式点名这一条路，这正是 ability_loader 常量注释里
+        「把三流派变成一件必须显式声明的事」的意图。
+        """
+        role = self._Role()
+        block, hint = al.load_genre_primitive_block(
+            role.name, "三流派融合", "[[F-民谣]] [[F-R&B]] [[F-雷鬼]]")
         for g in ("民谣", "R&B", "雷鬼"):
             assert f"[[F-{g}]] ===" in block, hint
 
