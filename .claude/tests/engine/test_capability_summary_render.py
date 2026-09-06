@@ -5,9 +5,14 @@ test_capability_summary_render.py — common._render_capability_summary 输出�
 - 无 capability_refs → 空串
 - capability_refs 里的 wikilink 解析成 root（`[[huashu-design/manifest]]` → `huashu-design`）
 - manifest 加载失败 → 静默跳过（不抛）
-- 输出含 id / version / runtime.type / triggers / invoke CLI
-- 每段 ≤ 400 chars（依据：规范 §5.2 关键不变量 + 调用行）
+- 输出含 id / version / runtime.type / triggers / inputs / 调用方式
+- 变长段（triggers / inputs）逐段截断，固定的 CALL 模板永不被切
+- executor 未实现的 runtime 标「无法调用」而不是给调用样例
 - 集成到 build_system_prompt 时被塞进 static part
+
+2026-09-06（3c）：调用方式从 `python -m engine.capability_executor.invoke`
+CLI 改成 CALL 块。原因是角色两条轨都执行不了命令（api 轨无 tool use，cli 轨
+`--disallowed-tools` 封了 Bash），那条 CLI 从来没有、也不可能被角色执行。
 """
 
 from __future__ import annotations
@@ -37,7 +42,19 @@ def tmp_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from engine.capability_executor import manifest_loader as ml
     monkeypatch.setattr(engine_config, "VAULT_ROOT", tmp_path)
     monkeypatch.setattr(ml, "VAULT_ROOT", tmp_path)
-    return tmp_path
+
+    # 两层 lru_cache 必须逐个用例清（2026-09-06 发现）：
+    # `_render_capability_summary_cached` 的 key 是 `(refs_tuple, proj_hint)`，
+    # 本文件多数用例的 refs 和 project 完全一样，只有 manifest 内容不同 ——
+    # 不清 cache 的话，后面的用例拿的是**第一个用例**的渲染结果，断言在别人的
+    # 输出上跑。原 `test_summary_length_bounded` 就是这么"通过"的：它想验证
+    # 超长 triggers 被截断，实际拿到的是一份 triggers 很短的缓存。
+    import common as common_mod
+    common_mod.invalidate_capability_summary_cache()
+    ml.invalidate_cache()
+    yield tmp_path
+    common_mod.invalidate_capability_summary_cache()
+    ml.invalidate_cache()
 
 
 def _write_manifest(vault: Path, root: str, manifest: dict) -> None:
@@ -52,7 +69,13 @@ _VALID = {
     "source": "test",
     "runtime": {"type": "node", "entry": "render.js"},
     "triggers": ["交互原型", "App demo", "产品演示"],
-    "inputs": [{"name": "brief", "type": "text", "required": True}],
+    "inputs": [
+        {"name": "brief", "type": "text", "required": True},
+        # 选填 + 带 {project} 默认值：产出路径这类输入角色猜不出来，
+        # 摘要必须把默认值原样给出，否则它只能编一个（多半跳出沙箱被拒）
+        {"name": "artifact_path", "type": "text", "required": False,
+         "default": "10-项目/{project}/交付物/prototype.html"},
+    ],
     "outputs": [
         {"name": "html", "type": "file",
          "path_pattern": "10-项目/{project}/交付物/x.html"},
@@ -76,8 +99,31 @@ class TestRenderCapabilitySummary:
         assert "v1.0.0" in out
         assert "runtime=node" in out
         assert "交互原型" in out
-        assert "python -m engine.capability_executor.invoke" in out
-        assert "--project demo" in out
+        # 调用方式 = CALL 块模板，且必须完整（起始 + 闭合都在）
+        assert "<!-- CALL: huashu-design/render-prototype -->" in out
+        assert "<!-- /CALL -->" in out
+        # inputs 清单：必填无标记、选填带 `?`、默认值里的 {project} 已解析
+        assert "brief:text" in out
+        assert "artifact_path?:text" in out
+        assert "10-项目/demo/交付物/prototype.html" in out
+
+    def test_unimplemented_runtime_marked_uncallable(self, tmp_vault):
+        """runtime 在规范枚举内但没 executor（mcp/http）→ 明说无法调用。
+
+        以前这类能力和已实现的共用一句「已注册且工程实现完成 / 请优先 invoke」，
+        等于让角色去调一个必然抛 RuntimeMismatchError 的东西 —— 它执行不了，
+        最省事的回应就是在产物里写一句"已调用"。
+        """
+        m = dict(_VALID)
+        m["id"] = "bgm-mcp/pipeline"
+        m["runtime"] = {"type": "mcp", "entry": "bgm_full_pipeline({{brief}})"}
+        _write_manifest(tmp_vault, "bgm-mcp", m)
+        from common import _render_capability_summary
+        out = _render_capability_summary(
+            _make_role(("[[bgm-mcp/manifest]]",)), project="demo",
+        )
+        assert "无法调用" in out
+        assert "<!-- CALL: bgm-mcp/pipeline -->" not in out
 
     def test_missing_manifest_silently_skipped(self, tmp_vault):
         # 不写 manifest → load 失败但不抛
@@ -101,27 +147,46 @@ class TestRenderCapabilitySummary:
         assert "huashu-design/render-prototype" in out
         assert "web-scraper/crawl" in out
 
-    def test_summary_length_bounded(self, tmp_vault):
-        # 极端 triggers 触发字符串上限
+    def test_long_triggers_truncated_but_call_template_intact(self, tmp_vault):
+        """截断必须逐段做，不能整段截。
+
+        整段截断会把末尾的 `<!-- /CALL -->` 切掉，等于给角色一个语法不全的
+        样例照着抄 —— 它照抄出来的块解析不出来，而 CALL 块解析失败是
+        「声明了 N 个只恢复出 M 个」的 stderr 告警，不是硬失败。
+        """
         m = dict(_VALID)
         m["triggers"] = ["超长触发词" * 30] * 10
         _write_manifest(tmp_vault, "huashu-design", m)
         from common import _render_capability_summary
-        r = _make_role(("[[huashu-design/manifest]]",))
-        out = _render_capability_summary(r, project="demo")
-        # 单段截断在 400 chars（含 "…" 后缀 → 断言 ≤ 410）
-        # 找到 `- **huashu-design` 段：
-        section = out.split("- **")[1] if "- **" in out else ""
-        assert len(section) <= 410, (
-            f"每段应 ≤ 400 chars（含调用行）；实际 {len(section)}"
+        out = _render_capability_summary(
+            _make_role(("[[huashu-design/manifest]]",)), project="demo",
         )
+        trig_line = next(ln for ln in out.splitlines() if "triggers:" in ln)
+        assert trig_line.endswith("…") and len(trig_line) <= 140
+        assert "<!-- CALL: huashu-design/render-prototype -->" in out
+        assert "<!-- /CALL -->" in out
+
+    def test_long_inputs_truncated_but_call_template_intact(self, tmp_vault):
+        m = dict(_VALID)
+        m["inputs"] = [
+            {"name": f"输入项{i}" * 5, "type": "text", "required": True}
+            for i in range(10)
+        ]
+        _write_manifest(tmp_vault, "huashu-design", m)
+        from common import _render_capability_summary
+        out = _render_capability_summary(
+            _make_role(("[[huashu-design/manifest]]",)), project="demo",
+        )
+        in_line = next(ln for ln in out.splitlines() if "inputs:" in ln)
+        assert "…" in in_line
+        assert "<!-- /CALL -->" in out
 
     def test_project_defaults_to_placeholder(self, tmp_vault):
         _write_manifest(tmp_vault, "huashu-design", _VALID)
         from common import _render_capability_summary
         r = _make_role(("[[huashu-design/manifest]]",))
         out = _render_capability_summary(r)
-        assert "--project {project}" in out
+        assert "10-项目/{project}/交付物/prototype.html" in out
 
 
 class TestBuildSystemPromptIntegration:

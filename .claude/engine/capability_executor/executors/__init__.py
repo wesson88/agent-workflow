@@ -38,6 +38,17 @@ def get_executor(runtime_type: str) -> Executor:
     return _REGISTRY[runtime_type]
 
 
+def is_runtime_supported(runtime_type: str) -> bool:
+    """该 runtime.type 是否有已实现的 executor。
+
+    摘要注入（skills/common._render_capability_summary）据此分档措辞：已实现的
+    才告诉角色「可调用」，未实现的明说「无法调用，仅作背景知悉」。
+    以前措辞对所有能力一律写「已注册且工程实现完成 / 请优先 invoke」，对
+    runtime=mcp 这种没 executor 的能力就是在诱导角色编造调用记录。
+    """
+    return runtime_type in _REGISTRY
+
+
 def register_executor(runtime_type: str, executor: Executor) -> None:
     """P10 及以后扩展 runtime 时调用（避免修改本 __init__ 硬编码）。"""
     _REGISTRY[runtime_type] = executor

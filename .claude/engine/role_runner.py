@@ -47,6 +47,7 @@ from common import (  # noqa: E402
     append_audit,
     build_system_prompt,
     call_claude,
+    parse_claude_output_to_calls,
     parse_claude_output_to_files,
     read_input_files,
     render_required_outputs,
@@ -347,6 +348,100 @@ def _build_user_prompt(
     )
 
 
+def _run_capability_calls(
+    role, raw_output: str, project: str,
+) -> list[dict]:
+    """执行角色输出里的 CALL 块，返回 audit 记录（每个块一条）。
+
+    3c（2026-09-06）：`capability_executor` 的 executor / sandbox / audit_writer
+    早就写好了，缺的只是这个调用点 —— 角色跑在 api 轨（无 tool use）或 cli 轨
+    （`--disallowed-tools` 封了 Bash），两条轨都执行不了摘要里宣传的那条 CLI，
+    于是「已注册的能力」从来没被任何角色真正调用过。这里由引擎代角色执行，
+    角色本身仍然拿不到 Bash，安全线不动。
+
+    fail-closed 两道（角色不能调没声明的能力）：
+      1. 角色 `capability_refs` 为空 → 任何 CALL 块都拒
+      2. CALL 的 id root 不在声明集里 → 拒
+
+    **任何失败都不中断角色主链**：调用发生在 FILE 产物落盘之后，角色自己的
+    交付物已经安全；能力失败记 audit + stderr 由人复盘，不该把整轮判失败。
+
+    产物**不并入 `written`**：`written` 是角色声明产物（喂 RoleResult.outputs /
+    下游 artifact_check），混进能力产物会让消费端检查看到没声明过的路径。
+    能力产物的可追溯性由两处保证 —— 本函数的 audit 记录 + `write_audit` 写进
+    `20-知识/能力注册表/<root>/调用日志/`。
+    """
+    calls = parse_claude_output_to_calls(raw_output)
+    if not calls:
+        return []
+
+    from .capability_executor.base import CapabilityExecutorError
+    from .capability_executor.invoke import invoke_capability
+    from .role_loader import _extract_capability_ref_root
+
+    allowed = {
+        r for r in (
+            _extract_capability_ref_root(x)
+            for x in getattr(role, "capability_refs", ()) or ()
+        ) if r
+    }
+
+    records: list[dict] = []
+    for call in calls:
+        rec: dict = {"capability_id": call.capability_id}
+        root = call.capability_id.split("/", 1)[0]
+
+        if call.error:
+            rec.update(result="rejected", error=call.error)
+        elif not allowed:
+            rec.update(
+                result="rejected",
+                error=f"{role.name} 未声明 capability_refs，不允许调用任何能力",
+            )
+        elif root not in allowed:
+            rec.update(
+                result="rejected",
+                error=f"'{call.capability_id}' 不在 {role.name}.capability_refs "
+                      f"声明集 {sorted(allowed)} 内",
+            )
+        else:
+            try:
+                res = invoke_capability(
+                    call.capability_id, project, dict(call.inputs),
+                )
+            except CapabilityExecutorError as e:
+                rec.update(result="failed", error=f"{type(e).__name__}: {e}")
+            else:
+                rels = []
+                for p in res.artifact_paths:
+                    try:
+                        rels.append(Path(p).relative_to(VAULT_ROOT).as_posix())
+                    except ValueError:
+                        rels.append(str(p))
+                rec.update(
+                    result="success" if res.ok else "failed",
+                    exit_code=res.exit_code,
+                    duration_s=round(res.duration_s, 3),
+                    artifacts=rels,
+                )
+                if res.error:
+                    rec["error"] = res.error
+
+        if rec["result"] == "success":
+            print(
+                f"[{role.name}] capability {call.capability_id} 调用成功，"
+                f"产物：{rec.get('artifacts')}"
+            )
+        else:
+            print(
+                f"[{role.name}] ⚠️ capability {call.capability_id} "
+                f"{rec['result']}：{rec.get('error')}",
+                file=sys.stderr,
+            )
+        records.append(rec)
+    return records
+
+
 def run_role(
     role_name: str,
     task: str,
@@ -508,6 +603,10 @@ def run_role(
         # 规范化修不了的结构性问题：只能告警，需人工或角色侧修
         print(f"[{role.name}] ⚠️ frontmatter: {problem}", file=sys.stderr)
 
+    # capability 调用块（3c）：放在 FILE 产物落盘**之后** —— 角色交付物先安全，
+    # 能力调用失败不该连累整轮。
+    capability_calls = _run_capability_calls(role, raw_output, project)
+
     # Suno-prompt 必产角色（作曲）：has_suno_prompt 软告警 + Style 段字符实测
     suno_audit: dict = {}
     if any(Path(r).name == "Suno-prompt.md" for r in output_rels):
@@ -554,6 +653,8 @@ def run_role(
         "is_dormant": is_dormant, "runner": "in_process",
         "frontmatter_link_fixes": fm_fixes,
         "frontmatter_problems": fm_problems,
+        # 空列表也写：审计里区分「没写 CALL 块」和「字段压根不存在的旧记录」
+        "capability_calls": capability_calls,
         **suno_audit,
     })
     print(

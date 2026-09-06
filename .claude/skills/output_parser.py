@@ -3,6 +3,7 @@ output_parser.py — Claude 输出解析与原子写入（单一职责：输出�
 
 职责：
 - parse_claude_output_to_files：解析 <!-- FILE: --> 标签
+- parse_claude_output_to_calls：解析 <!-- CALL: --> 标签（capability 调用请求）
 - write_output_atomic：原子写入文件（带 Windows 重试）
 - _strip_outer_code_fence / _normalize_empty_file_placeholder：内部辅助
 
@@ -13,8 +14,11 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine.obsidian_io import _atomic_replace_with_retry  # noqa: E402
@@ -151,3 +155,104 @@ def parse_claude_output_to_files(raw_output: str) -> dict:
     for w in warnings:
         print(f"[parse_output] ⚠️ {w}", file=sys.stderr)
     return results
+
+
+# ── capability 调用块解析（3c · 2026-09-06）──────────────────
+#
+# 背景：capability_executor 的 executor / sandbox / audit 全套早就写好了，缺的
+# 只是一个调用点 —— 角色跑在 api 轨（无 tool use）或 cli 轨（--disallowed-tools
+# 封了 Bash），两条轨都执行不了摘要里宣传的那条 CLI。于是「已注册的能力」从来
+# 没被任何角色调用过。
+#
+# 修法不是给角色发工具权限（要动安全线），而是让角色**吐一个调用块**、引擎代它
+# 执行 —— 与 FILE 块完全同构，provider 无关（deepseek/gemini/ollama 一起生效）。
+_CALL_BLOCK_RE = re.compile(
+    r"<!--\s*CALL:\s*(.+?)\s*-->\n(.*?)<!--\s*/CALL\s*-->",
+    re.DOTALL,
+)
+_CALL_START_RE = re.compile(r"<!--\s*CALL:\s*(.+?)\s*-->")
+
+# invoke_capability 会把输入插进命令行模板，只接受标量。
+_SCALAR_TYPES = (str, int, float, bool)
+
+
+@dataclass(frozen=True)
+class CapabilityCall:
+    """角色输出里的一个 capability 调用请求。
+
+    `error` 非 None = 块本身有问题（YAML 挂 / 值不是标量 / 块体不是映射）。
+    **带错的块照样返回，不在解析层丢弃** —— 调用方要把它写进 audit。
+    静默跳过格式不对的调用请求，正是本仓一直在修的那类失效：角色以为调了、
+    实际没调、产物里看不出来。
+    """
+    capability_id: str
+    inputs: dict = field(default_factory=dict)
+    error: str | None = None
+
+
+def parse_claude_output_to_calls(raw_output: str) -> list[CapabilityCall]:
+    """解析 <!-- CALL: <id> --> ... <!-- /CALL --> 块。
+
+    块体是 YAML 映射（选 YAML 而非 `k: v` 单行，是因为 huashu-design 的
+    `design_brief` 是 3-5 段文本，必须支持 `|` 块标量）：
+
+        <!-- CALL: huashu-design/render-prototype -->
+        design_brief: |
+          做一个简约深色主题的 iOS 待办 App 首页原型。
+          顶部渐变导航栏 + 卡片式列表 + 右下悬浮 + 按钮。
+        artifact_path: 10-项目/{project}/交付物/prototype.html
+        <!-- /CALL -->
+
+    **先挖掉 FILE 块再扫**：角色在产物正文里举例说明调用格式是完全合理的写法，
+    那种 CALL 标记是文档内容，不是调用请求。不挖的话，一份"怎么调用能力"的
+    说明文档会把自己描述的调用真的执行一遍。
+
+    与 `parse_claude_output_to_files` 同款的截断检测：声明块数 > 恢复块数
+    说明末块没闭合（多半是 max_tokens 截断），走 stderr 告警。
+    """
+    scan_area = _FILE_BLOCK_RE.sub("", raw_output)
+
+    calls: list[CapabilityCall] = []
+    warnings: list[str] = []
+
+    for m in _CALL_BLOCK_RE.finditer(scan_area):
+        cid = m.group(1).strip()
+        body = m.group(2)
+        try:
+            data = yaml.safe_load(body)
+        except yaml.YAMLError as e:
+            calls.append(CapabilityCall(cid, error=f"块体 YAML 解析失败：{e}"))
+            continue
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            calls.append(CapabilityCall(
+                cid,
+                error=f"块体必须是 YAML 映射（`输入名: 值`），实际解析出 "
+                      f"{type(data).__name__}",
+            ))
+            continue
+        bad = {
+            k: type(v).__name__ for k, v in data.items()
+            if not isinstance(v, _SCALAR_TYPES)
+        }
+        if bad:
+            calls.append(CapabilityCall(
+                cid,
+                error=f"输入值必须是标量（str/int/float/bool），"
+                      f"以下不是：{bad}",
+            ))
+            continue
+        calls.append(CapabilityCall(cid, {str(k): v for k, v in data.items()}))
+
+    declared = len(_CALL_START_RE.findall(scan_area))
+    if declared > len(calls):
+        warnings.append(
+            f"声明了 {declared} 个 CALL 块但只恢复出 {len(calls)} 个 —— "
+            f"最可能是输出被 max_tokens 截断（末块无 `<!-- /CALL -->`），"
+            f"缺失的调用不会执行"
+        )
+
+    for w in warnings:
+        print(f"[parse_output] ⚠️ {w}", file=sys.stderr)
+    return calls

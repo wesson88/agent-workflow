@@ -81,8 +81,12 @@ class TestR1WordingStrengthened:
         )
         from common import _render_capability_summary_cached
         out = _render_capability_summary_cached(("[[huashu-design/manifest]]",), "demo")
-        # R1 新措辞的关键短语
-        assert "优先 invoke" in out
+        # R1 强推措辞的关键短语。2026-09-06（3c）动词从 "invoke" 换成 "调用"：
+        # "invoke" 原本特指摘要里那条 `python -m engine.capability_executor.invoke`
+        # CLI，而角色两条轨都执行不了命令（api 轨无 tool use，cli 轨封了 Bash），
+        # 调用方式已改为输出 CALL 块由引擎代执行。R1 的**取向**不变 ——
+        # 默认调用、不调需 justify。
+        assert "优先调用而不是自建" in out
         assert "请在你的输出里" in out and "明确说明理由" in out
         assert "工程实现" in out  # 强调稳定/可复用
 

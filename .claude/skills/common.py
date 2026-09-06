@@ -530,6 +530,7 @@ def _render_capability_summary_cached(refs_tuple: tuple[str, ...], proj_hint: st
     """
     import sys as _sys
     from engine.capability_executor.base import ManifestValidationError
+    from engine.capability_executor.executors import is_runtime_supported
     from engine.capability_executor.manifest_loader import (
         load_manifest as _load_manifest,
         validate_manifest as _validate_manifest,
@@ -556,34 +557,77 @@ def _render_capability_summary_cached(refs_tuple: tuple[str, ...], proj_hint: st
         cap_id = manifest["id"]
         ver = manifest["version"]
         rt_type = manifest["runtime"]["type"]
-        triggers = manifest.get("triggers", [])
-        trig_preview = ", ".join(triggers[:5])
-        summary = (
+        trig_preview = ", ".join(manifest.get("triggers", [])[:5])
+        def _fmt_input(spec: dict) -> str:
+            mark = "" if spec.get("required") else "?"
+            base = f"{spec.get('name')}{mark}:{spec.get('type')}"
+            dft = spec.get("default")
+            if dft is None or spec.get("required"):
+                return base
+            # 选填项的默认值直接给出（{project} 已解析）—— 产出路径这类输入
+            # 角色猜不出来，看不到默认值就只能编一个，编出来大概率跳出沙箱被拒
+            return f"{base}(默认 {str(dft).replace('{project}', proj_hint)})"
+
+        in_preview = ", ".join(_fmt_input(i) for i in manifest.get("inputs", []))
+        # 逐段截断而非整段截断：调用模板在末尾，整段截断会把 `<!-- /CALL -->`
+        # 切掉，给角色一个语法不全的样例照着抄。变长的只有 triggers / inputs 两段，
+        # 只截它们，固定模板一定完整。
+        if len(trig_preview) > 120:
+            trig_preview = trig_preview[:120] + "…"
+        if len(in_preview) > 240:
+            in_preview = in_preview[:240] + "…"
+
+        if is_runtime_supported(rt_type):
+            usage = (
+                f"  调用：\n"
+                f"    <!-- CALL: {cap_id} -->\n"
+                f"    <上面的输入名>: <值>\n"
+                f"    <!-- /CALL -->"
+            )
+        else:
+            # runtime 在规范枚举内但 executor 没写（http / claude-code-skill /
+            # mcp）。以前这里和已实现的能力共用一句「已注册且工程实现完成 /
+            # 请优先 invoke」，等于让角色去调一个必然抛 RuntimeMismatchError 的
+            # 东西 —— 它执行不了，最省事的回应就是在产物里写一句"已调用"。
+            usage = (
+                f"  ⚠️ runtime={rt_type} 的 executor 未实现，**你无法调用它**；"
+                f"仅作背景知悉，不要写 CALL 块"
+            )
+
+        summaries.append(
             f"- **{cap_id}** (v{ver}, runtime={rt_type})\n"
             f"  triggers: {trig_preview}\n"
-            f"  invoke: `python -m engine.capability_executor.invoke "
-            f"--id {cap_id} --project {proj_hint} --input k=v`"
+            f"  inputs: {in_preview}（`?` = 选填）\n"
+            f"{usage}"
         )
-        # 硬截断到 400 chars（每段最多 ≈ 200 chars 摘要 + 200 chars 调用示例）
-        # 依据：capability 注册表规范 §5.2 说的"~200 chars 摘要"指的是 manifest.summary
-        # 段本身；含调用方式行后 400 chars 是合理上限
-        if len(summary) > 400:
-            summary = summary[:400] + "…"
-        summaries.append(summary)
 
     if not summaries:
         return ""
 
     # R1 措辞加强（M4 实战驱动 · 2026-07-08）：原措辞"你可按需 invoke（不是总要调）"
     # 太软 → LLM 保守选内建。改为**默认 invoke，不 invoke 需 justify**的强推向措辞。
+    # 3c 措辞重写（2026-09-06）：原文写「已注册且工程实现完成……请优先 invoke」，
+    # 并给出一条 `python -m engine.capability_executor.invoke` 的 CLI。两处都是
+    # 错的 —— 角色跑在 api 轨（无 tool use）或 cli 轨（--disallowed-tools 封了
+    # Bash），根本执行不了任何命令；「工程实现完成」对 runtime=mcp 这种没
+    # executor 的能力更是假话。硬推措辞 + 无法执行 = 诱导角色编造调用记录。
+    # 现在：调用方式改为输出 CALL 块（引擎代执行），能力按 executor 支持情况分档。
     header = (
         "## 【可调用能力（capability_refs）】\n\n"
-        "以下能力已注册且工程实现完成。**若 task 与某能力的 triggers 契合（关键词命中）"
-        "或语义匹配，请优先 invoke 而不是自建**——能力产出的 artifact 是稳定、可复用、可审计的"
-        "工程实现，通常比你临时手写更快、更准、更可维护。\n\n"
-        "**若你判断不 invoke**（如任务过小不值得起子进程 / 能力语义不完全覆盖 / 输入前置条件缺失），"
-        "**请在你的输出里明确说明理由**（一句话即可），便于事后复盘。\n\n"
-        "产出 artifact 直接落 vault，不回流 prompt。\n"
+        "以下能力已在 vault 能力注册表登记。**对标注了「调用」样例的能力**，"
+        "若 task 与其 triggers 契合（关键词命中）或语义匹配，请优先调用而不是自建"
+        "——能力产出的 artifact 是稳定、可复用、可审计的工程实现，通常比你临时"
+        "手写更快、更准、更可维护。\n\n"
+        "**调用方式**：在输出里写 CALL 块，与 FILE 块**平级**，不要嵌在 FILE 块"
+        "内部（嵌进去只会变成产物正文，不会被执行）。块体是 YAML 映射，多行值用 "
+        "`|` 块标量。引擎会代你执行、把产物落 vault 并记审计。\n\n"
+        "**一轮只能调一次，且产出不回流本轮 prompt**——你写完 CALL 块这一轮就结束了，"
+        "看不到产物内容。所以不要写「根据调用结果……」这类依赖回读的话，更不要"
+        "声称自己已经看过或验证过产物。\n\n"
+        "**若你判断不调用**（任务过小不值得起子进程 / 能力语义不完全覆盖 / "
+        "输入前置条件缺失），**请在你的输出里明确说明理由**（一句话即可），"
+        "便于事后复盘。标注「无法调用」的能力不要写 CALL 块——写了会被引擎"
+        "拒绝并记进审计。\n"
     )
     return header + "\n\n".join(summaries)
 
@@ -1000,6 +1044,8 @@ from output_parser import (  # noqa: E402, F401
     _normalize_empty_file_placeholder,
     _split_residual_blocks,
     _strip_outer_code_fence,
+    CapabilityCall,
+    parse_claude_output_to_calls,
     parse_claude_output_to_files,
     write_output_atomic,
 )
