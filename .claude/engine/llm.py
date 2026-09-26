@@ -448,6 +448,10 @@ def _call_anthropic_sdk(
         anthropic.APITimeoutError,
         anthropic.APIConnectionError,
     )
+    # effort：yaml api.effort 可选；未配置则不传（Haiku 4.5 等不支持 effort 的模型传了会报错）
+    stream_extra: dict = {}
+    if api_cfg.get("effort"):
+        stream_extra["output_config"] = {"effort": api_cfg["effort"]}
     base_delay = 5.0
     for attempt in range(4):
         chunks: list[str] = []
@@ -458,6 +462,7 @@ def _call_anthropic_sdk(
                 max_tokens=max_tokens,
                 system=system_block,
                 messages=[{"role": "user", "content": user_prompt}],
+                **stream_extra,
             ) as stream:
                 for text in stream.text_stream:
                     if print_stream:
@@ -785,6 +790,8 @@ def _call_cli(
 
     if cli_cfg.get("model"):
         cmd.extend(["--model", cli_cfg["model"]])
+    if cli_cfg.get("effort"):
+        cmd.extend(["--effort", cli_cfg["effort"]])
 
     use_flag = bool(cli_cfg.get("use_system_prompt_flag", False))
     if use_flag and len(system_prompt) <= _CMD_ARG_LIMIT:
