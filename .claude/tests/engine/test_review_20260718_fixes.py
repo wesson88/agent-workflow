@@ -292,7 +292,7 @@ class TestHaltTopLevelRouting:
         from engine.graph import build as build_mod
         from engine.workflow import WorkflowStep, WorkflowTemplate
 
-        def _stub_factory(step, halt_on_failure, domain=None):
+        def _stub_factory(step, halt_on_failure, domain=None, role_occurrence=None):
             name = step.name
 
             def node(state):

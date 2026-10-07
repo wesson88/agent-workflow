@@ -14,11 +14,15 @@ music_director/main.py — 音乐总监执行入口（音乐域 L2-A 起步 + L3
   输出：final-Suno-prompt.md（user 真正复制到 Suno 的最终版本，Style ≤ 1000 char）
        + 可选 反馈分诊.md（按反馈解析路由到对应角色 retry）
 
+模式判定（`_resolve_mode`）：引擎经 env `AGENT_ROLE_OCCURRENCE` 告知本次是模板里
+第几次出现的总监（1 = 首次，2 = 汇编）；汇编时 5 份 Suno 文档不齐即判失败，
+不退回首次模式。直接 CLI 调用无该 env 时按文件推断，分不清时同样判失败。
+
 汇编模式工程契约：
   - Style 段 ≤ 1000 char（JS String.length = Python len()，硬上限）
   - post-write 实测 final_style_char_count + audit 留痕
   - 汇编次序参 vault 规则 [[Suno-汇编次序]]
-  - 反馈格式参 vault 规则 [[Suno-take-反馈格式]]
+  - 反馈格式参 vault 规则 [[Suno-执行.schema#§5.3 总监汇编节点路径（降级 / 跨会话 / 严肃返工）]]
 
 CLI：
   python .claude/skills/music_director/main.py --task "..." --project myproj
@@ -26,6 +30,7 @@ CLI：
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -52,12 +57,22 @@ ROLE = "音乐总监"
 # 同一个数在三处存在。改一处漏两处的形状，先把代码这两处并了。
 from engine.role_runner import (  # noqa: E402
     _SUNO_STYLE_HARD_LIMIT, is_suno_prompt_output, measure_style_chars,
+    partition_declared_outputs, report_rejected_outputs,
 )
 
 # 超限即判失败的那一份产物。只有它 —— 它是 user 直接复制进 Suno 的终稿。
 # 上游的 `Suno-prompt.md` 是基线，总监本来就会收窄它，在那儿拦等于把正常
 # 中间态判成失败。
 _BLOCKING_ARTIFACT = "final-Suno-prompt.md"
+
+# 首次模式只产这两份。角色基因 `outputs` 自 L3 收尾起列了 4 份（含汇编才产的
+# final-Suno-prompt / 反馈分诊），原先首次模式照抄全量 → 2026-10-07 `对我说好`
+# 第 1 步就凭空写出一份 v0 终稿 + 一份没有任何 take 反馈的「反馈分诊」。
+_FIRST_PASS_OUTPUT_NAMES = ("创作 vision.md", "给制作人.md")
+
+# 模式信号：引擎在同一角色于模板中出现多次时注入（graph/nodes.py），值为
+# 本次是第几次出现（1 起）。本工作流里总监第 1 次 = 首次，第 2 次 = 汇编。
+_OCCURRENCE_ENV = "AGENT_ROLE_OCCURRENCE"
 
 # 汇编模式 5 必要文件（命中即进汇编模式）
 _AGGREGATION_REQUIRED = (
@@ -102,6 +117,37 @@ def _detect_aggregation_mode(project: str) -> tuple[bool, list[Path]]:
     return True, inputs
 
 
+def _missing_aggregation_files(project: str) -> list[str]:
+    base = f"10-项目/music/{project}"
+    return [
+        fname for fname in _AGGREGATION_REQUIRED
+        if not resolve_path(f"{base}/{fname}", project).exists()
+    ]
+
+
+def _resolve_mode(project: str) -> str:
+    """返回 first_pass / aggregation / missing_upstream。
+
+    有引擎信号就照信号走，**不再看文件猜**。原先只按「5 份 Suno 文档齐不齐」
+    推断，两头都会错：
+      - 第 9 步时上游缺一份 → 静默退回首次模式、重写 vision（2026-10-07 `对我说好`
+        实测，混音 / 母带把补丁写到拼错的目录，手动停链才没覆盖成）
+      - 在跑完的项目上从头重跑 → 第 1 步直接进汇编
+    无信号（直接 CLI 调用）时仍按文件推断，但「vision 已在、5 份不齐」这种
+    分不清是哪一步的情况判 missing_upstream，宁可停下也不覆盖。
+    """
+    occurrence = os.environ.get(_OCCURRENCE_ENV, "").strip()
+    missing = _missing_aggregation_files(project)
+    if occurrence == "1":
+        return "first_pass"
+    if occurrence:
+        return "aggregation" if not missing else "missing_upstream"
+    if not missing:
+        return "aggregation"
+    vision = resolve_path(f"10-项目/music/{project}/创作 vision.md", project)
+    return "missing_upstream" if vision.exists() else "first_pass"
+
+
 def _has_take_feedback(aggregation_inputs: list[Path]) -> bool:
     return any(p.name == "take反馈.md" for p in aggregation_inputs)
 
@@ -109,7 +155,10 @@ def _has_take_feedback(aggregation_inputs: list[Path]) -> bool:
 def _run_first_pass(project: str, task: str, role_def) -> int:
     """L2-A 首次模式：读创作简报 → 产 vision + 给制作人指令。"""
     input_paths = [resolve_path(p, project) for p in role_def.inputs]
-    output_rels = [p.replace("{project}", project) for p in role_def.outputs]
+    output_rels = [
+        p.replace("{project}", project) for p in role_def.outputs
+        if Path(p).name in _FIRST_PASS_OUTPUT_NAMES
+    ]
 
     existing_inputs = [p for p in input_paths if p.exists()]
     if not existing_inputs:
@@ -179,7 +228,7 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
     )
 
     return _call_and_write(
-        system_prompt, user_prompt, task, project,
+        system_prompt, user_prompt, task, project, output_rels,
         audit_extras={"mode": "first_pass"},
     )
 
@@ -258,7 +307,7 @@ def _run_aggregation(
     )
 
     return _call_and_write(
-        system_prompt, user_prompt, task, project,
+        system_prompt, user_prompt, task, project, output_rels,
         audit_extras={
             "mode": "aggregation",
             "has_feedback": has_feedback,
@@ -268,7 +317,7 @@ def _run_aggregation(
 
 def _call_and_write(
     system_prompt, user_prompt, task: str, project: str,
-    audit_extras: dict,
+    declared_rels: list[str], audit_extras: dict,
 ) -> int:
     """LLM 调用 + 解析 FILE 块 + 落盘 + audit。两模式共享路径。"""
     try:
@@ -305,13 +354,30 @@ def _call_and_write(
         })
         return 1
 
+    # 声明过的照常落盘，没声明的拒写、本步判失败（同 role_runner）
+    output_files, rejected = partition_declared_outputs(
+        output_files, declared_rels, project,
+    )
     written = []
-    for rel_path, content in output_files.items():
-        rel_resolved = rel_path.replace("{project}", project)
+    for rel_resolved, content in output_files.items():
         dest = resolve_path(rel_resolved, project)
         write_output_atomic(dest, content)
         print(f"[{ROLE}] 写入: {dest}")
         written.append(rel_resolved)
+
+    if rejected:
+        report_rejected_outputs(ROLE, rejected, declared_rels)
+        set_role_status(
+            ROLE, status="failed",
+            increment_consecutive_failures=True, increment_error=True,
+            enforce_transition=False,
+        )
+        append_audit({
+            "timestamp": utc_now(), "role": ROLE, "project": project,
+            "task": task, "result": "failed", "error": "undeclared_output_paths",
+            "rejected_paths": rejected, "outputs": written, **audit_extras,
+        })
+        return 1
 
     extra_audit: dict = dict(audit_extras)
     # 2026-09-03 去掉 `measure_style` 开关，改按**本轮实际写了什么**判定。
@@ -393,12 +459,32 @@ def main() -> int:
 
     role_def = load_role(ROLE)
 
-    # 模式检测：汇编模式优先（5 必要文件齐才进），否则走首次模式
-    is_aggregation, aggregation_inputs = _detect_aggregation_mode(project)
-
-    if is_aggregation:
+    mode = _resolve_mode(project)
+    if mode == "first_pass":
+        return _run_first_pass(project, task, role_def)
+    if mode == "aggregation":
+        _, aggregation_inputs = _detect_aggregation_mode(project)
         return _run_aggregation(project, task, aggregation_inputs, role_def)
-    return _run_first_pass(project, task, role_def)
+
+    # mode == "missing_upstream"：要汇编、5 份文件不齐
+    missing = _missing_aggregation_files(project)
+    print(
+        f"[{ROLE}] ❌ 汇编所需的 Suno 文档缺 {len(missing)} 份：{missing}。"
+        f"本步判失败，不退回首次模式（那会覆盖第 1 步的 vision）。"
+        f"补齐上游后重跑；确要重做第 1 步请设 {_OCCURRENCE_ENV}=1。",
+        file=sys.stderr,
+    )
+    set_role_status(
+        ROLE, status="failed",
+        increment_consecutive_failures=True, increment_error=True,
+        enforce_transition=False,
+    )
+    append_audit({
+        "timestamp": utc_now(), "role": ROLE, "project": project,
+        "task": task, "result": "failed", "error": "aggregation_upstream_missing",
+        "missing": missing, "mode": "aggregation",
+    })
+    return 1
 
 
 if __name__ == "__main__":

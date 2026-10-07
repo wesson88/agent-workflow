@@ -275,6 +275,20 @@ def _collect_rel_paths(project_code_root: Path) -> list[str]:
     return out
 
 
+def _kw_hit(kw_low: str, text_low: str, whole_word: bool) -> bool:
+    """keyword 是否出现在文本里（两者都已 lower）。
+
+    whole_word 时，纯 ASCII 词两侧不得紧贴 ASCII 字母数字。2026-10-07 实测：
+    F-雷鬼 的 `reggae` 子串命中 `Reggaeton`，雷鬼铁律（禁 808 / One Drop）被注入
+    一首 reggaeton 的全部 9 个节点。中文词照旧子串匹配。
+    """
+    if not whole_word or not kw_low.isascii():
+        return kw_low in text_low
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(kw_low)}(?![a-z0-9])", text_low
+    ) is not None
+
+
 def score_skill(
     skill_path: Path,
     task_text: str,
@@ -283,12 +297,16 @@ def score_skill(
     *,
     keyword_df: Counter | None = None,
     rel_paths: list[str] | None = None,
+    whole_word: bool = False,
 ) -> SkillMatch:
     """评估单个 skill 的触发与相关度，**不短路**（改造前首个命中即 return）。
 
     `keyword_df`：同目录 keyword → 声明该词的 skill 数。由 `discover_role_skills`
     预计算并传入；单独调用时省略 → 每个命中词按 df=1 计（不影响单 skill 判定）。
     `rel_paths`：项目代码相对路径清单，避免每个 pattern 重扫。
+    `whole_word`：纯 ASCII keyword 改按整词匹配（中文词不受影响，中文无词界）。
+    默认关 —— 全域技能 keyword 是按子串写的（`api` 要命中 `apis`），只有
+    流派闸门打开，见 `_kw_hit`。
     """
     try:
         content = skill_path.read_text(encoding="utf-8")
@@ -318,9 +336,9 @@ def score_skill(
             if low in seen:
                 continue
             seen.add(low)
-            if low in task_low:
+            if _kw_hit(low, task_low, whole_word):
                 task_hits.append(kw)
-            elif low in up_low:
+            elif _kw_hit(low, up_low, whole_word):
                 # elif：同一个词在两处都出现时只记 task（避免双计虚高）
                 upstream_hits.append(kw)
 

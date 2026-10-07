@@ -134,7 +134,11 @@ def _detect_dormant(instruction_path: Path | None) -> bool:
 # 在三处各写一遍：本常量、`skills/music_director/main.py:308` 的字面量 1000、
 # 以及规则文档 `00-系统/规则/music/Suno-UI-字符上限.md`（该文档 0 条 rule_refs
 # 指向、谁都没读过）。改一处漏两处的形状，先把代码这两处并了。
-_STYLE_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)\n```", re.DOTALL)
+#
+# 开围栏锚**行首**（2026-10-07）：原正则对全文 search，正文里的行内 ``` 也算开围栏。
+# 实测 `对我说好/final-Suno-prompt.md` §1 一句「不要带上 ``` 本身」被当成起点，
+# 一路量到 §2 代码块开头 = 1491，真实 Style 579 —— 终稿硬闸门误判失败。
+_STYLE_BLOCK_RE = re.compile(r"^```[^\n]*\n(.*?)\n```", re.DOTALL | re.MULTILINE)
 _SUNO_STYLE_HARD_LIMIT = 1000
 
 # 「算 Suno prompt 产物」的判据：文件名以此结尾。
@@ -146,6 +150,46 @@ _SUNO_PROMPT_SUFFIX = "Suno-prompt.md"
 
 def is_suno_prompt_output(rel_path: str) -> bool:
     return Path(rel_path).name.endswith(_SUNO_PROMPT_SUFFIX)
+
+
+def _norm_rel(rel: str) -> str:
+    rel = rel.strip().replace("\\", "/")
+    return rel[2:] if rel.startswith("./") else rel
+
+
+def partition_declared_outputs(
+    output_files: dict[str, str], declared_rels: list[str], project: str,
+) -> tuple[dict[str, str], list[str]]:
+    """把 LLM 写出的 FILE 块分成「本轮声明过的」与「没声明的」。
+
+    返回 (可落盘 {已替换 project 的相对路径: 内容}, 被拒路径清单)。
+
+    2026-10-07 实测（项目 `对我说好`）：混音师、母带工程师各把第二份产物写成
+    `10-项目/music/对我好/…`（漏一个字），引擎原样落盘、报 success。下游总监
+    按「5 份 Suno 文档在不在」判模式，于是第 9 步静默退回首次模式、开始重写
+    第 1 步的 vision。LLM 拼错的路径就是一份**丢失的产物**，必须在落盘处拦住。
+
+    只认精确路径：调用方给的 declared_rels 必须已展开 `{project}` / `{role}`。
+    """
+    declared = {_norm_rel(r) for r in declared_rels}
+    ok: dict[str, str] = {}
+    rejected: list[str] = []
+    for rel, content in output_files.items():
+        resolved = _norm_rel(rel.replace("{project}", project))
+        if resolved in declared:
+            ok[resolved] = content
+        else:
+            rejected.append(resolved)
+    return ok, rejected
+
+
+def report_rejected_outputs(role_name: str, rejected: list[str], declared_rels: list[str]) -> None:
+    print(
+        f"[{role_name}] ❌ {len(rejected)} 个 FILE 块路径不在本轮声明的产物里，"
+        f"未落盘：{rejected}。声明的产物：{declared_rels}。"
+        f"本步判失败 —— 拼错的路径等于产物丢失，下游会按缺件处理。",
+        file=sys.stderr,
+    )
 
 
 def measure_style_chars(content: str) -> int | None:
@@ -633,13 +677,17 @@ def run_role(
         )
         return _fail(1, "no_file_blocks")
 
+    # 声明过的照常落盘（这轮 LLM 产出不丢），没声明的拒写，整步判失败
+    output_files, rejected = partition_declared_outputs(
+        output_files, output_rels, project,
+    )
+
     from .frontmatter_links import check_frontmatter, normalize_frontmatter_links
     from .obsidian_io import atomic_write_text
     written: list[str] = []
     fm_fixes: list[str] = []
     fm_problems: list[str] = []
-    for rel_path, content in output_files.items():
-        rel_resolved = rel_path.replace("{project}", project)
+    for rel_resolved, content in output_files.items():
         dest = resolve_path(rel_resolved, project)
         if dest.suffix.lower() == ".md":
             # 落盘前规范化 frontmatter 链接写法（治理三层里的"主循环层"）
@@ -657,6 +705,10 @@ def run_role(
     for problem in fm_problems:
         # 规范化修不了的结构性问题：只能告警，需人工或角色侧修
         print(f"[{role.name}] ⚠️ frontmatter: {problem}", file=sys.stderr)
+
+    if rejected:
+        report_rejected_outputs(role.name, rejected, output_rels)
+        return _fail(1, f"undeclared_output_paths: {rejected}")
 
     # capability 调用块（3c）：放在 FILE 产物落盘**之后** —— 角色交付物先安全，
     # 能力调用失败不该连累整轮。

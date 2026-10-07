@@ -225,12 +225,16 @@ def active_genres(
         if g:
             from_skill.add(g)
 
-    # ③ primitive 的 trigger.keywords 命中
+    # ③ primitive 的 trigger.keywords 命中。整词匹配：流派名互为前缀很常见
+    # （reggae ⊂ reggaeton、ska ⊂ skate），闸门判的是「是不是这个流派」，
+    # 子串命中就是判错流派。技能自己的 keyword 不受影响（见 _kw_hit）。
     df = _keyword_df(prims)
     from_kw = {
         p.stem[2:]
         for p in prims
-        if score_skill(p, task_text, upstream_text, None, keyword_df=df).matched
+        if score_skill(
+            p, task_text, upstream_text, None, keyword_df=df, whole_word=True,
+        ).matched
     }
 
     parts = []
@@ -770,7 +774,9 @@ def load_genre_primitive_block(
     hits: list = []
     if not explicit:
         df = _keyword_df(scoped)
-        hits = [m for m in (score_skill(p, task_text, upstream_text, None, keyword_df=df)
+        # whole_word：与流派闸门同口径（reggae 不得命中 reggaeton）
+        hits = [m for m in (score_skill(p, task_text, upstream_text, None,
+                                        keyword_df=df, whole_word=True)
                             for p in scoped) if m.matched]
         hits.sort(key=lambda m: (tuple(-v for v in m.rank_key), m.path.name))
 

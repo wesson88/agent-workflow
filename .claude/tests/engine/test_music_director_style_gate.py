@@ -43,6 +43,15 @@ def director(monkeypatch, tmp_path):
     return mod
 
 
+# _call_and_write 只落盘本轮声明过的路径；这组测试关心的是 Style 闸门，
+# 把三种产物都声明上，路径校验不参与
+_DECLARED = [
+    "10-项目/music/p/final-Suno-prompt.md",
+    "10-项目/music/p/Suno-prompt.md",
+    "10-项目/music/p/创作 vision.md",
+]
+
+
 def _canned(rel: str, style: str) -> str:
     return (
         f"<!-- FILE: {rel} -->\n"
@@ -58,7 +67,7 @@ class TestFinalStyleGate:
             director, "call_claude",
             lambda s, u, r: _canned("10-项目/music/{project}/final-Suno-prompt.md", style))
 
-        rc = director._call_and_write("sys", "usr", "任务", "p", audit_extras={})
+        rc = director._call_and_write("sys", "usr", "任务", "p", _DECLARED, audit_extras={})
 
         assert rc == 1
         audit = director._state["audit"][-1]
@@ -77,7 +86,7 @@ class TestFinalStyleGate:
             director, "call_claude",
             lambda s, u, r: _canned("10-项目/music/{project}/final-Suno-prompt.md", style))
 
-        assert director._call_and_write("s", "u", "t", "p", audit_extras={}) == 1
+        assert director._call_and_write("s", "u", "t", "p", _DECLARED, audit_extras={}) == 1
         assert any("final-Suno-prompt.md" in k
                    for k in director._state["written"]), "拦了但文件没落盘"
 
@@ -87,7 +96,7 @@ class TestFinalStyleGate:
             director, "call_claude",
             lambda s, u, r: _canned("10-项目/music/{project}/final-Suno-prompt.md", style))
 
-        assert director._call_and_write("s", "u", "t", "p", audit_extras={}) == 0
+        assert director._call_and_write("s", "u", "t", "p", _DECLARED, audit_extras={}) == 0
         assert director._state["audit"][-1]["final_style_oversized"] is False
 
     def test_中间产物超限不拦(self, director, monkeypatch):
@@ -98,7 +107,7 @@ class TestFinalStyleGate:
             director, "call_claude",
             lambda s, u, r: _canned("10-项目/music/{project}/Suno-prompt.md", style))
 
-        rc = director._call_and_write("s", "u", "t", "p", audit_extras={})
+        rc = director._call_and_write("s", "u", "t", "p", _DECLARED, audit_extras={})
         assert rc == 0
         audit = director._state["audit"][-1]
         assert audit["result"] == "success"
@@ -111,7 +120,7 @@ class TestFinalStyleGate:
             lambda s, u, r: ("<!-- FILE: 10-项目/music/{project}/final-Suno-prompt.md -->\n"
                              "x\n<!-- /FILE -->\n"))
 
-        rc = director._call_and_write("s", "u", "t", "p", audit_extras={})
+        rc = director._call_and_write("s", "u", "t", "p", _DECLARED, audit_extras={})
         assert rc == 0
         assert director._state["audit"][-1]["final_style_char_count"] is None
         assert "抽不出 Style 段" in capsys.readouterr().err
@@ -123,5 +132,5 @@ class TestFinalStyleGate:
             lambda s, u, r: ("<!-- FILE: 10-项目/music/{project}/创作 vision.md -->\n"
                              "# vision\n<!-- /FILE -->\n"))
 
-        assert director._call_and_write("s", "u", "t", "p", audit_extras={}) == 0
+        assert director._call_and_write("s", "u", "t", "p", _DECLARED, audit_extras={}) == 0
         assert "final_style_char_count" not in director._state["audit"][-1]

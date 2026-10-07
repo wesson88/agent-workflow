@@ -272,6 +272,7 @@ def make_role_node(
     skip_if: dict | None = None,
     contract_overrides: dict | None = None,
     domain: str | None = None,
+    role_occurrence: int | None = None,
 ):
     """工厂函数：返回一个 LangGraph node 函数。
     role_name 是 vault 角色 frontmatter 的 role 字段（中文名）。
@@ -290,6 +291,10 @@ def make_role_node(
     {"output_contract": {"artifacts_pattern": "module_manifest"}}），本工厂
     序列化为 JSON 塞进 subprocess env `AGENT_CONTRACT_OVERRIDES`，skill main.py
     通过 common.build_system_prompt 自动传给 load_role 走契约参数化路径。
+
+    role_occurrence：本角色在模板里出现多次时，本节点是第几次（见
+    build._role_occurrences），经 env `AGENT_ROLE_OCCURRENCE` 传给 main.py。
+    只走 subprocess env —— in_process 角色目前没有重复出现的。
     """
     skill_dir = role_to_skill_dir(role_name)
     def node(state: ProjectState) -> dict:
@@ -325,6 +330,10 @@ def make_role_node(
             project=state["project"],
             contract_overrides=contract_overrides,
             domain=domain,
+            extra_env=(
+                {"AGENT_ROLE_OCCURRENCE": str(role_occurrence)}
+                if role_occurrence else {}
+            ),
         )
         if sub_tasks_to_run:
             print(f"\n✂️  拆分为 {len(sub_tasks_to_run)} 个子任务执行")

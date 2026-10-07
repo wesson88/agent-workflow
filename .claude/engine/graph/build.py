@@ -107,7 +107,10 @@ def _adapter_domain(template_domain: str) -> str | None:
     return _ADAPTER_DOMAIN_ALIASES.get(d, d)
 
 
-def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool, domain: str | None = None):
+def _make_node_for_step(
+    step: WorkflowStep, halt_on_failure: bool, domain: str | None = None,
+    role_occurrence: int | None = None,
+):
     if step.type == "linear":
         return make_role_node(
             _normalize(step.role),
@@ -117,6 +120,7 @@ def _make_node_for_step(step: WorkflowStep, halt_on_failure: bool, domain: str |
             skip_if=step.skip_if,
             contract_overrides=step.contract_overrides,
             domain=domain,
+            role_occurrence=role_occurrence,
         )
     if step.type == "discussion":
         return make_discussion_node(step, halt_on_failure)
@@ -143,6 +147,7 @@ def build_graph(
     sliced = _slice_steps(template.steps, start_from, end_at)
     if not sliced:
         raise ValueError("链路裁剪后为空")
+    occurrences = _role_occurrences(template.steps)
 
     g = StateGraph(ProjectState)
 
@@ -161,6 +166,7 @@ def build_graph(
             _make_node_for_step(
                 step, template.halt_on_failure,
                 domain=_adapter_domain(template.domain),
+                role_occurrence=occurrences.get(id(step)),
             ),
         )
         node_keys.append(key)
@@ -180,6 +186,27 @@ def build_graph(
     g.add_edge(node_keys[-1], END)
 
     return g.compile()
+
+
+def _role_occurrences(steps) -> dict[int, int]:
+    """同一角色在**完整模板**里出现多次时，每个 step 是第几次（1 起）。
+
+    返回 {id(step): 第几次}；只出现一次的角色不在表里（不注入信号）。按完整
+    模板算而非裁剪后：`--start-from 编曲` 时末尾的音乐总监仍是第 2 次。
+    用 id 而不是 step 本身做键：两个同角色 step 字段完全相同，按值比较会撞。
+
+    消费方：music_director 靠它分首次 / 汇编，不再按文件存在性猜
+    （2026-10-07 `对我说好` 第 9 步缺件后静默退回首次模式）。
+    """
+    by_role: dict[str, list] = {}
+    for step in steps:
+        if step.type == "linear":
+            by_role.setdefault(_normalize(step.role), []).append(step)
+    return {
+        id(step): n
+        for group in by_role.values() if len(group) > 1
+        for n, step in enumerate(group, 1)
+    }
 
 
 def _halt_router(state: ProjectState) -> str:
