@@ -263,6 +263,19 @@ gemini-3.1-pro-preview:
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
     model: gemini-3.1-pro-preview
 
+# Gemini 4 代首发型号（2026-10，Stable API 非 preview；低幻觉/知识工作定位）。
+# 批判者试运行接入（vault 角色基因同批切换）；输入上下文 1M、输出上限 1M，
+# SentencePiece 分词沿 Gemini 惯例走 chars // 2.5 估算。
+gemini-4-argon:
+  mode: api_only
+  tokenizer: chars
+  context_window: 1000000
+  api:
+    kind: openai_compat
+    key_env: GEMINI_API_KEY_PAID
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    model: gemini-4-argon
+
 # ── Ollama（本地）─────────────────────────────────────────
 # 默认监听 http://localhost:11434/v1，OpenAI 兼容
 ollama-llama3:
