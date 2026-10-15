@@ -114,9 +114,8 @@ class TestPermanentFailures:
         assert "缺 main.py" in (result.error or "")
 
     def test_in_process_rejects_parameterized_calls(self):
-        """PoC 范围：module_id / round / contract_overrides 走 subprocess。"""
+        """round / contract_overrides 走 subprocess（module_id 2026-10-15 起放行）。"""
         for kwargs in (
-            {"module_id": "T01"},
             {"round": 2},
             {"contract_overrides": {"input_contract": {}}},
         ):
@@ -131,7 +130,7 @@ class TestPermanentFailures:
 
         calls: list[tuple] = []
 
-        def fake_run_role(role, task, project, *, domain=None):
+        def fake_run_role(role, task, project, *, domain=None, module_id=None):
             calls.append((role, task, project))
             return RoleResult(
                 status="success", returncode=0, role=role, elapsed_s=0.1,
@@ -158,7 +157,7 @@ class TestPermanentFailures:
         calls = []
         monkeypatch.setattr(
             "engine.role_runner.run_role",
-            lambda role, task, project, *, domain=None: (
+            lambda role, task, project, *, domain=None, module_id=None: (
                 calls.append(role),
                 RoleResult(status="success", returncode=0, role=role, elapsed_s=0.1),
             )[1],
@@ -168,8 +167,47 @@ class TestPermanentFailures:
         )
         assert result.ok and calls == ["作曲"]
 
+    def test_in_process_passes_module_id(self, monkeypatch):
+        """in_process + module_id → 透传给 run_role（{n} 绑定在 runner 内）。"""
+        from engine.role_invoke import RoleResult
+
+        seen: list = []
+
+        def fake_run_role(role, task, project, *, domain=None, module_id=None):
+            seen.append(module_id)
+            return RoleResult(status="success", returncode=0, role=role, elapsed_s=0.1)
+
+        monkeypatch.setattr("engine.role_runner.run_role", fake_run_role)
+        result = invoke_role(
+            RoleInvocation(role="prompt工程师", task="t", project="p", module_id="S01"),
+            mode="in_process",
+        )
+        assert result.ok and seen == ["S01"]
+
+    def test_auto_mode_module_id_routes_by_executor(self, monkeypatch):
+        """auto + 仅 module_id → 仍按基因 executor 路由（in_process 基因进 runner）。"""
+        from engine.role_invoke import RoleResult
+
+        class InProcRole:
+            executor = "in_process"
+
+        monkeypatch.setattr("engine.role_loader.load_role", lambda n: InProcRole())
+        seen: list = []
+        monkeypatch.setattr(
+            "engine.role_runner.run_role",
+            lambda role, task, project, *, domain=None, module_id=None: (
+                seen.append(module_id),
+                RoleResult(status="success", returncode=0, role=role, elapsed_s=0.1),
+            )[1],
+        )
+        result = invoke_role(
+            RoleInvocation(role="prompt工程师", task="t", project="p", module_id="S01"),
+            mode="auto",
+        )
+        assert result.ok and seen == ["S01"]
+
     def test_auto_mode_parameterized_forces_subprocess(self, fake_skill, monkeypatch):
-        """auto + 参数化调用 → 强制 subprocess（封闭规则）。"""
+        """auto + module_id 且基因 executor=subprocess → subprocess（后端工程师现状不变）。"""
         def boom(*a, **kw):
             raise AssertionError("参数化调用不应进 runner")
 

@@ -518,3 +518,131 @@ class TestAdapterDomainWiring:
         assert _adapter_domain("se") == "se"
         assert _adapter_domain("") is None
         assert _adapter_domain("  ") is None
+
+
+class TestModuleIdBinding:
+    """module_id → {n} 绑定封闭规则（2026-10-15 视频域 prompt工程师按镜调用）。"""
+
+    ENTRIES = ["a/{n}/{n}.image.md", "a/模式库.md"]
+
+    def test_with_module_id_outputs_only_parameterized(self):
+        from engine.role_runner import bind_module_id
+
+        assert bind_module_id(self.ENTRIES, "S01", keep_unparameterized=False) == [
+            "a/S01/S01.image.md",
+        ]
+
+    def test_with_module_id_inputs_keep_shared(self):
+        from engine.role_runner import bind_module_id
+
+        assert bind_module_id(self.ENTRIES, "S01", keep_unparameterized=True) == [
+            "a/S01/S01.image.md", "a/模式库.md",
+        ]
+
+    def test_without_module_id_drops_parameterized(self):
+        from engine.role_runner import bind_module_id
+
+        for keep in (True, False):
+            assert bind_module_id(self.ENTRIES, None, keep_unparameterized=keep) == [
+                "a/模式库.md",
+            ]
+
+    @pytest.mark.parametrize("bad", ["../S01", "S01/x", "S 01", ""])
+    def test_rejects_path_like_module_id(self, bad):
+        from engine.role_runner import bind_module_id
+
+        # 空串也拒：显式传空是调用方 bug，不静默当成未传
+        with pytest.raises(ValueError):
+            bind_module_id(self.ENTRIES, bad, keep_unparameterized=False)
+
+
+class TestRunRoleModuleId:
+    """真实 vault 基因 prompt工程师 v0.3.0：按镜调用只落本镜产物，越权写模式库被拒。"""
+
+    PROMPT_ROLE = "prompt工程师"
+
+    @pytest.fixture
+    def video_env(self, monkeypatch):
+        import engine.role_runner as rr
+
+        proj = VAULT_ROOT / "10-项目" / "video" / PROJECT
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "分镜表.md").write_text("# 分镜表\n| S01 | 近景 | 3s |", encoding="utf-8")
+        (proj / "视觉设定.md").write_text("# 视觉设定\n## 风格锚", encoding="utf-8")
+        (proj / "prompt-模式库.md").write_text("# 模式库\n负向基线：blurry", encoding="utf-8")
+
+        captured: dict = {"canned": ""}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", lambda rec: None)
+
+        def fake_call(system_prompt, user_prompt, role_name):
+            captured["user"] = user_prompt
+            return captured["canned"]
+
+        monkeypatch.setattr(rr, "call_claude", fake_call)
+        yield proj, captured
+        shutil.rmtree(proj, ignore_errors=True)
+
+    @staticmethod
+    def _file(rel: str, body: str) -> str:
+        return f"<!-- FILE: {rel} -->\n{body}\n<!-- /FILE -->\n"
+
+    def test_per_shot_call_writes_shot_dir(self, video_env):
+        from engine.role_runner import run_role
+
+        proj, captured = video_env
+        base = "10-项目/video/{project}"
+        captured["canned"] = (
+            self._file(f"{base}/prompt/S01/S01.image.md", "# S01 image")
+            + self._file(f"{base}/prompt/S01/S01.video.md", "# S01 video")
+            + self._file(f"{base}/prompt/候选模式/S01.候选模式.md", "无")
+        )
+        result = run_role(self.PROMPT_ROLE, "按镜产包", PROJECT, module_id="S01")
+        assert result.ok, result.error
+        assert (proj / "prompt" / "S01" / "S01.image.md").exists()
+        assert (proj / "prompt" / "S01" / "S01.video.md").exists()
+        user = captured["user"]
+        # 声明清单收窄：本镜三份，模式库不在产出清单、但作为输入进 context
+        assert f"10-项目/video/{PROJECT}/prompt/S01/S01.image.md" in user
+        assert f"10-项目/video/{PROJECT}/prompt-模式库.md" not in user.split("负向基线")[-1]
+        assert "负向基线：blurry" in user
+
+    def test_per_shot_call_cannot_write_pattern_library(self, video_env):
+        from engine.role_runner import run_role
+
+        proj, captured = video_env
+        base = "10-项目/video/{project}"
+        captured["canned"] = (
+            self._file(f"{base}/prompt/S01/S01.image.md", "# S01 image")
+            + self._file(f"{base}/prompt-模式库.md", "# 被逐镜覆盖")
+        )
+        result = run_role(self.PROMPT_ROLE, "按镜产包", PROJECT, module_id="S01")
+        assert not result.ok and "undeclared_output_paths" in (result.error or "")
+        assert "负向基线" in (proj / "prompt-模式库.md").read_text(encoding="utf-8")
+
+    def test_strategy_call_declares_only_shared_outputs(self, video_env):
+        from engine.role_runner import run_role
+
+        proj, captured = video_env
+        captured["canned"] = self._file(
+            "10-项目/video/{project}/prompt-模式库.md", "# 模式库 v2",
+        )
+        result = run_role(self.PROMPT_ROLE, "定一致性策略", PROJECT)
+        assert result.ok, result.error
+        assert result.outputs == (f"10-项目/video/{PROJECT}/prompt-模式库.md",)
+        assert "{n}" not in captured["user"]
+
+    def test_module_id_on_role_without_n_outputs_fails_fast(self, monkeypatch):
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", lambda rec: None)
+        monkeypatch.setattr(
+            rr, "call_claude",
+            lambda *a: (_ for _ in ()).throw(AssertionError("不应调用 LLM")),
+        )
+        result = run_role(ROLE, "t", PROJECT, module_id="S01")
+        assert result.status == "permanent_failed" and "{n}" in (result.error or "")

@@ -157,6 +157,36 @@ def _norm_rel(rel: str) -> str:
     return rel[2:] if rel.startswith("./") else rel
 
 
+_MODULE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def bind_module_id(
+    entries: list[str], module_id: str | None, *, keep_unparameterized: bool,
+) -> list[str]:
+    """`{n}` 条目按 module_id 绑定（封闭规则，非角色特例）。
+
+    - 含 `{n}`：有 module_id → `{n}` 原样替换为 module_id（全值，如 `S01`）；
+      无 module_id → 丢弃（单条目模板在非参数化调用里没有可落的实例）
+    - 不含 `{n}`：inputs 两种调用都保留（keep_unparameterized=True）；
+      outputs 仅非参数化调用保留——参数化调用只产本条目的东西，
+      共享产物（如 prompt-模式库）在引擎层就写不进去，不靠 prompt 自觉
+
+    2026-10-15 视频域 prompt工程师按镜调用引入。SE 工程师的 `T{n}` 模板配全值
+    module_id（`T01`）走 subprocess、不经此函数；若将来收编进 in_process，
+    模板需改写成 `{n}`，否则绑出 `TT01`。
+    """
+    if module_id is not None and not _MODULE_ID_RE.match(module_id):
+        raise ValueError(f"module_id 非法（只允许字母/数字/_/-）：{module_id!r}")
+    bound: list[str] = []
+    for entry in entries:
+        if "{n}" in entry:
+            if module_id:
+                bound.append(entry.replace("{n}", module_id))
+        elif keep_unparameterized or not module_id:
+            bound.append(entry)
+    return bound
+
+
 def partition_declared_outputs(
     output_files: dict[str, str], declared_rels: list[str], project: str,
 ) -> tuple[dict[str, str], list[str]]:
@@ -547,11 +577,14 @@ def run_role(
     project: str,
     *,
     domain: str | None = None,
+    module_id: str | None = None,
 ) -> RoleResult:
     """进程内执行一个声明驱动角色。invoke_role(mode="in_process") 的实现体。
 
     domain：workflow 声明的域（如 "music"）——非空时 ability_loader 自动注入
     `00-系统/规则/{domain}/{角色}-视角.md`（存在才注入，缺口 5 域 adapter）。
+    module_id：单条目聚焦调用（如视频域按镜 `S01`）——inputs/outputs 的 `{n}`
+    按 `bind_module_id` 封闭规则绑定。
     返回 RoleResult：outputs 直接携带（写盘的 vault 相对路径），
     returncode 沿用 main.py 约定（0 成功 / 1 可重试 / 2 永久）。
     """
@@ -587,12 +620,27 @@ def run_role(
     from .role_loader import load_role
     role = load_role(role_name)
 
+    try:
+        bound_inputs = bind_module_id(
+            list(role.inputs), module_id, keep_unparameterized=True,
+        )
+        bound_outputs = bind_module_id(
+            list(role.outputs), module_id, keep_unparameterized=False,
+        )
+    except ValueError as e:
+        return _fail(2, str(e))
+    if module_id and not bound_outputs:
+        # 参数化调用却无 {n} 产出模板 = 调用方或基因声明错，空跑 LLM 只会 no_file_blocks
+        return _fail(2, f"module_id={module_id} 但 outputs 无 {{n}} 模板")
+    if module_id:
+        print(f"[{role.name}] module_id={module_id}：产出收窄为 {bound_outputs}", flush=True)
+
     # {role} 消费端绑定自身角色名（与 artifact_check / music main.py 同一规则）；
     # `/` 结尾条目 = 素材目录扫描（见 _scan_material_dir 约定）
     input_paths: list[Path] = []
     material_entries: list[tuple[str, Path]] = []
     has_material_dir = False
-    for raw in role.inputs:
+    for raw in bound_inputs:
         entry = raw.replace("{role}", role.name)
         if entry.endswith("/"):
             has_material_dir = True
@@ -615,7 +663,7 @@ def run_role(
                 file=sys.stderr,
             )
             return _fail(2, "missing_input")
-    output_rels = [p.replace("{project}", project) for p in role.outputs]
+    output_rels = [p.replace("{project}", project) for p in bound_outputs]
     # 产出端 {role} 模板 = 扇出（制作人语义，按 downstream − dormant 展开）
     output_rels, fanout_dormant = _expand_fanout_outputs(
         role, output_rels, input_paths,

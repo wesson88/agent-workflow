@@ -149,19 +149,19 @@ def invoke_role(
 
     - mode="subprocess"：行为等价包装原 main.py 调用语义（默认）
     - mode="in_process"：engine.role_runner 声明驱动执行（架构演进第 3 步）。
-      module_id / round / contract_overrides 参数化调用不支持
-      （工程师/brainstorm 继续走 subprocess）
+      支持 module_id（`{n}` 绑定，见 role_runner.bind_module_id）；
+      round / contract_overrides 参数化调用不支持（工程师/brainstorm 继续走 subprocess）
     - mode="auto"：按角色基因 frontmatter `executor` 声明路由（批量收编的
-      生产切换通道）；参数化调用强制降回 subprocess（封闭规则，非角色特例）
+      生产切换通道）；round / contract_overrides 调用强制降回 subprocess
+      （封闭规则，非角色特例）；仅带 module_id 仍按 executor 路由
     消费/产出端 artifact_check（v0.3/v0.4）三种模式共用。
     """
     if mode not in ("subprocess", "in_process", "auto"):
         raise NotImplementedError(f"mode='{mode}' 未实现")
-    parameterized = bool(
-        inv.module_id or inv.round is not None or inv.contract_overrides
-    )
+    # module_id 不在此列：2026-10-15 起 in_process 支持（视频域按镜调用）
+    subprocess_only = bool(inv.round is not None or inv.contract_overrides)
     if mode == "auto":
-        if parameterized:
+        if subprocess_only:
             mode = "subprocess"
         else:
             try:
@@ -169,9 +169,9 @@ def invoke_role(
                 mode = load_role(inv.role).executor
             except Exception:
                 mode = "subprocess"
-    if mode == "in_process" and parameterized:
+    if mode == "in_process" and subprocess_only:
         raise NotImplementedError(
-            "in_process 模式暂不支持 module_id / round / contract_overrides"
+            "in_process 模式暂不支持 round / contract_overrides"
             "（参数化调用走 subprocess）"
         )
 
@@ -194,7 +194,10 @@ def invoke_role(
     if mode == "in_process":
         from .role_runner import run_role
         try:
-            result = run_role(inv.role, inv.task, inv.project, domain=inv.domain)
+            result = run_role(
+                inv.role, inv.task, inv.project,
+                domain=inv.domain, module_id=inv.module_id,
+            )
         except Exception as e:
             return RoleResult(
                 status="permanent_failed", returncode=-2, role=inv.role,
