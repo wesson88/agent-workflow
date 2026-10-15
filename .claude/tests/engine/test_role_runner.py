@@ -646,3 +646,72 @@ class TestRunRoleModuleId:
         )
         result = run_role(ROLE, "t", PROJECT, module_id="S01")
         assert result.status == "permanent_failed" and "{n}" in (result.error or "")
+
+
+class TestExternalAssets:
+    """external_inputs 清单化注入 / external_outputs 不进 FILE 清单（2026-10-15 视频域）。"""
+
+    @pytest.mark.parametrize("bad", ["/abs/x", "D:/x", "../x", "a/../b", ""])
+    def test_rejects_non_relative_entries(self, bad):
+        from engine.role_runner import validate_external_entry
+
+        with pytest.raises(ValueError):
+            validate_external_entry(bad)
+
+    def test_note_lists_files_without_content(self, tmp_path, monkeypatch):
+        import engine.config as cfg
+        from engine.role_runner import external_assets_note
+
+        monkeypatch.setattr(cfg, "ASSET_ROOT_TEMPLATE", str(tmp_path / "{domain}" / "{project}"))
+        sel = tmp_path / "video" / "p1" / "assets" / "selected"
+        sel.mkdir(parents=True)
+        (sel / "S01_key.png").write_bytes(b"\x89PNG" + b"0" * 4096)
+        note = external_assets_note("video", "p1", ["assets/selected/", "assets/voice/"], ["final/master.mp4"])
+        assert "`assets/selected/S01_key.png`（4 KB" in note
+        assert "`assets/voice/`（目录不存在或为空）" in note
+        assert "不要为这些路径写 FILE 块" in note and "`final/master.mp4`" in note
+        assert "PNG" not in note   # 只列清单不读内容
+
+    def test_note_without_asset_root_degrades(self, monkeypatch):
+        import engine.config as cfg
+        from engine.role_runner import external_assets_note
+
+        monkeypatch.setattr(cfg, "ASSET_ROOT_TEMPLATE", None)
+        note = external_assets_note("video", "p1", ["assets/selected/"], [])
+        assert "ASSET_ROOT 未配置" in note
+
+    def test_editor_gene_external_outputs_not_in_file_list(self, tmp_path, monkeypatch):
+        """真实基因 剪辑师：master.mp4 不再出现在必产 FILE 清单，selected/ 素材以清单注入。"""
+        import engine.config as cfg
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        monkeypatch.setattr(cfg, "ASSET_ROOT_TEMPLATE", str(tmp_path / "{domain}" / "{project}"))
+        sel = tmp_path / "video" / PROJECT / "assets" / "selected"
+        sel.mkdir(parents=True)
+        (sel / "S01_take.mp4").write_bytes(b"0" * 2048)
+        proj = VAULT_ROOT / "10-项目" / "video" / PROJECT
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "分镜表.md").write_text("# 分镜表\n| S01 |", encoding="utf-8")
+
+        captured: dict = {}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", lambda rec: None)
+
+        def fake_call(system_prompt, user_prompt, role_name):
+            captured["user"] = user_prompt
+            return ("<!-- FILE: 10-项目/video/{project}/剪辑时间线.md -->\n"
+                    "# 剪辑时间线\n<!-- /FILE -->\n")
+
+        monkeypatch.setattr(rr, "call_claude", fake_call)
+        try:
+            result = run_role("剪辑师", "组装成片", PROJECT)
+        finally:
+            shutil.rmtree(proj, ignore_errors=True)
+        assert result.ok, result.error
+        assert result.outputs == (f"10-项目/video/{PROJECT}/剪辑时间线.md",)
+        user = captured["user"]
+        assert "请产出以下 1 份 FILE 块" in user
+        assert "`assets/selected/S01_take.mp4`" in user
+        assert "<!-- FILE: final/master.mp4" not in user and "### 1. `final/master.mp4`" not in user

@@ -80,6 +80,11 @@ PROJECT_CODE_ROOT_TEMPLATE: str | None = (
     os.environ.get("PROJECT_CODE_ROOT") or None
 )
 
+# vault 外二进制资产根（视频域 assets/ final/ 等）：模板占位 {domain} / {project}，
+# 例 ASSET_ROOT=D:/workstation/{domain}/{project}。角色基因 external_inputs /
+# external_outputs 的条目相对它书写——基因里不再写死盘符（家里机/公司机/mac 各配各的）。
+ASSET_ROOT_TEMPLATE: str | None = os.environ.get("ASSET_ROOT") or None
+
 ANTHROPIC_API_KEY: str | None = os.environ.get("ANTHROPIC_API_KEY") or None
 
 OBSIDIAN_REST_API_URL: str = os.environ.get(
@@ -112,6 +117,18 @@ def reflection_dir() -> Path:
 
 def workflow_template_dir() -> Path:
     return VAULT_ROOT / "00-系统" / "工作流模板"
+
+
+def asset_root(domain: str, project: str | None = None) -> Path | None:
+    """vault 外资产根。未配 `ASSET_ROOT` → None（调用方降级：只提示不列清单）。
+
+    不 mkdir：目录由执行层产出时创建，引擎只读清单。
+    """
+    if not ASSET_ROOT_TEMPLATE:
+        return None
+    name = (project or PROJECT_NAME).strip() or "default"
+    expanded = ASSET_ROOT_TEMPLATE.replace("{domain}", domain).replace("{project}", name)
+    return Path(expanded).resolve()
 
 
 def project_code_root(project: str | None = None) -> Path:

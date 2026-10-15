@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from pathlib import Path
 
 from .config import PROJECT_ROOT, VAULT_ROOT, resolve_path
@@ -287,6 +288,69 @@ def _material_note(material_entries: list[tuple[str, Path]], project: str) -> st
         "用到的每份素材，使用以下相对链接（产物位于项目目录，素材目录是其子目录）：\n"
         + "\n".join(lines) + "\n\n"
     )
+
+
+_EXTERNAL_LIST_CAP = 200   # 单目录清单上限：清单化注入防的就是目录击穿 budget
+
+
+def validate_external_entry(entry: str) -> None:
+    """external_* 条目必须是相对资产根的路径：不许绝对路径/盘符/`..`。"""
+    norm = entry.replace("\\", "/")
+    if not norm or norm.startswith("/") or ":" in norm.split("/", 1)[0] \
+            or ".." in norm.split("/"):
+        raise ValueError(f"external 条目须相对 ASSET_ROOT，且不含 `..`：{entry!r}")
+
+
+def _describe_file(p: Path, root: Path) -> str:
+    st = p.stat()
+    mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+    return f"- `{p.relative_to(root).as_posix()}`（{st.st_size // 1024} KB，{mtime}）"
+
+
+def external_assets_note(
+    domain: str, project: str, inputs: list[str], outputs: list[str],
+) -> str:
+    """vault 外资产段：external_inputs 只列清单不读内容，external_outputs 只注明落点。
+
+    PRD §5.5"目录注入 = 清单化"的落地：素材是 png/mp4/wav，原素材目录扫描只读
+    *.md，等于什么都没注入。未配 ASSET_ROOT → 只给提示，不拦（infra 缺配置不该
+    让角色空跑失败，但要让人看见）。
+    """
+    if not inputs and not outputs:
+        return ""
+    from .config import asset_root
+    for entry in (*inputs, *outputs):
+        validate_external_entry(entry)
+    root = asset_root(domain, project)
+    if root is None:
+        print("⚠️ external_* 已声明但未配 ASSET_ROOT，跳过资产清单", file=sys.stderr)
+        return (
+            "## 执行层资产（vault 外）\n"
+            "（ASSET_ROOT 未配置，本轮无法列出资产清单；不要臆测文件是否存在。）\n\n"
+        )
+    lines = ["## 执行层资产（vault 外，只列清单不含内容）", f"资产根：`{root.as_posix()}`"]
+    if inputs:
+        lines.append("### 可用素材")
+        for entry in inputs:
+            target = root / entry
+            if entry.endswith("/"):
+                files = sorted(
+                    p for p in target.glob("*") if p.is_file() and not p.name.startswith(".")
+                ) if target.is_dir() else []
+                if not files:
+                    lines.append(f"- `{entry}`（目录不存在或为空）")
+                    continue
+                lines.extend(_describe_file(p, root) for p in files[:_EXTERNAL_LIST_CAP])
+                if len(files) > _EXTERNAL_LIST_CAP:
+                    lines.append(f"- …其余 {len(files) - _EXTERNAL_LIST_CAP} 个省略（`{entry}`）")
+            elif target.is_file():
+                lines.append(_describe_file(target, root))
+            else:
+                lines.append(f"- `{entry}`（不存在）")
+    if outputs:
+        lines.append("### 执行层产出落点（由执行层按你的产物生成——**不要为这些路径写 FILE 块**）")
+        lines.extend(f"- `{entry}`" for entry in outputs)
+    return "\n".join(lines) + "\n\n"
 
 
 def _artifact_guidance(output_rels: list[str], project: str) -> dict[str, str]:
@@ -627,6 +691,11 @@ def run_role(
         bound_outputs = bind_module_id(
             list(role.outputs), module_id, keep_unparameterized=False,
         )
+        external_note = external_assets_note(
+            role.domain, project,
+            bind_module_id(list(role.external_inputs), module_id, keep_unparameterized=True),
+            bind_module_id(list(role.external_outputs), module_id, keep_unparameterized=True),
+        )
     except ValueError as e:
         return _fail(2, str(e))
     if module_id and not bound_outputs:
@@ -708,7 +777,7 @@ def run_role(
     user_prompt = _build_user_prompt(
         role, project, task, context, output_rels, is_dormant,
         fanout_dormant=fanout_dormant,
-        material_note=_material_note(material_entries, project),
+        material_note=_material_note(material_entries, project) + external_note,
     )
 
     try:
