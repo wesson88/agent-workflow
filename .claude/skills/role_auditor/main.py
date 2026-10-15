@@ -73,6 +73,7 @@ LIST_FIELDS = {
     "aliases", "upstream", "downstream", "monitors",
     "inputs", "outputs", "tools", "skills",
     "external_inputs", "external_outputs",   # 可选字段，出现时同样必须是 list
+    "vision_inputs",
 }
 
 # frontmatter 禁止字段（来自规范 §2.4）

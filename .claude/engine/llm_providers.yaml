@@ -304,6 +304,7 @@ gemini-3.1-pro-preview:
     key_env: GEMINI_API_KEY_PAID
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
     model: gemini-3.1-pro-preview
+    vision: true            # 2026-10-16 多模态附件（engine.media）；OpenAI 兼容端点 image_url data URI
 
 # Gemini 4 代首发型号（2026-10，Stable API 非 preview；低幻觉/知识工作定位）。
 # 批判者试运行接入（vault 角色基因同批切换）；输入上下文 1M、输出上限 1M，

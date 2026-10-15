@@ -56,6 +56,7 @@ from common import (  # noqa: E402
 )
 
 from .ability_loader import assemble_user_context  # noqa: E402
+from .media import MediaUnavailable, build_attachments, collect_media  # noqa: E402
 
 # music 扇出 dormant 约定（原 music_mastering_engineer/main.py，收编为通用规则）
 #
@@ -351,6 +352,39 @@ def external_assets_note(
         lines.append("### 执行层产出落点（由执行层按你的产物生成——**不要为这些路径写 FILE 块**）")
         lines.extend(f"- `{entry}`" for entry in outputs)
     return "\n".join(lines) + "\n\n"
+
+
+_NO_VISION_NOTE = (
+    "## 视觉附件\n（{reason}，本轮没有图片附件——不得凭文字推断画面内容，"
+    "相关结论一律写「未看图，待复审」。）\n\n"
+)
+
+
+def prepare_vision_inputs(domain: str, project: str, entries: list[str]):
+    """vision_inputs → (图片附件, prompt 说明段)。
+
+    未声明 → ([], "")。已声明但未配 ASSET_ROOT 或素材为空 → 不发图，说明段写清
+    "本轮没有可看的图"，防止模型凭文字编审阅结论；ffmpeg 缺失 → MediaUnavailable 由调用方判永久失败。
+    """
+    if not entries:
+        return [], ""
+    from .config import asset_root
+    for entry in entries:
+        validate_external_entry(entry)
+    root = asset_root(domain, project)
+    if root is None:
+        print("⚠️ vision_inputs 已声明但未配 ASSET_ROOT，本轮不发图", file=sys.stderr)
+        return [], _NO_VISION_NOTE.format(reason="ASSET_ROOT 未配置")
+    files = collect_media(root, entries)
+    if not files:
+        return [], _NO_VISION_NOTE.format(reason="声明的素材目录为空")
+    attachments, dropped = build_attachments(root, files)
+    note = [f"## 视觉附件（{len(attachments)} 张，随本消息附上，按 [附件 i] 标签对应文件与时间点；视频为均匀抽帧，帧间时序问题看不全，存疑升人工）"]
+    note.extend(f"- [附件 {i}] {a.label}" for i, a in enumerate(attachments, 1))
+    if dropped:
+        note.append(f"- 超出单次上限未附：{dropped}（拆分调用或缩小范围）")
+    print(f"⚙️ 视觉附件 {len(attachments)} 张（{len(files)} 个文件）", flush=True)
+    return attachments, "\n".join(note) + "\n\n"
 
 
 def _artifact_guidance(output_rels: list[str], project: str) -> dict[str, str]:
@@ -696,7 +730,11 @@ def run_role(
             bind_module_id(list(role.external_inputs), module_id, keep_unparameterized=True),
             bind_module_id(list(role.external_outputs), module_id, keep_unparameterized=True),
         )
-    except ValueError as e:
+        attachments, vision_note = prepare_vision_inputs(
+            role.domain, project,
+            bind_module_id(list(role.vision_inputs), module_id, keep_unparameterized=True),
+        )
+    except (ValueError, MediaUnavailable) as e:
         return _fail(2, str(e))
     if module_id and not bound_outputs:
         # 参数化调用却无 {n} 产出模板 = 调用方或基因声明错，空跑 LLM 只会 no_file_blocks
@@ -777,11 +815,13 @@ def run_role(
     user_prompt = _build_user_prompt(
         role, project, task, context, output_rels, is_dormant,
         fanout_dormant=fanout_dormant,
-        material_note=_material_note(material_entries, project) + external_note,
+        material_note=_material_note(material_entries, project) + external_note + vision_note,
     )
 
     try:
-        raw_output = call_claude(system_prompt, user_prompt, role.name)
+        # 只有真有图才带 attachments——纯文本角色的调用签名保持原样
+        extra = {"attachments": attachments} if attachments else {}
+        raw_output = call_claude(system_prompt, user_prompt, role.name, **extra)
     except Exception as e:
         print(f"[{role.name}] LLM 调用失败：{e}", file=sys.stderr)
         return _fail(1, str(e))

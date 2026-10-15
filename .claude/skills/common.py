@@ -1060,7 +1060,10 @@ _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
-def call_llm_for_role(system_prompt: tuple[str, str] | str, user_prompt: str, role_name_or_alias: str) -> str:
+def call_llm_for_role(
+    system_prompt: tuple[str, str] | str, user_prompt: str, role_name_or_alias: str,
+    *, attachments: list | None = None,
+) -> str:
     """从角色 frontmatter 读取 model/max_tokens/budget_input_tokens 后调用 engine.llm.call_llm。
 
     单一职责：负责"角色配置读取 + 调用路由"，不重复实现 streaming 逻辑。
@@ -1093,6 +1096,7 @@ def call_llm_for_role(system_prompt: tuple[str, str] | str, user_prompt: str, ro
         model=model, max_tokens=max_tokens,
         input_budget=input_budget,
         role_name=display_name,
+        attachments=attachments,
     )
 
 

@@ -200,6 +200,7 @@ def call_llm(
     print_stream: bool = True,
     input_budget: int | None = None,
     role_name: str | None = None,
+    attachments: list | None = None,
 ) -> str:
     """统一 LLM 调用入口。
 
@@ -220,9 +221,18 @@ def call_llm(
             `budget_input_tokens` 字段）。传入时**覆盖**默认 ratio 计算：
               RAISE 阈值 = input_budget，WARN 阈值 = input_budget × 0.6。
             None（默认）走 _TOTAL_WARN_RATIO / _TOTAL_RAISE_RATIO 的窗口百分比逻辑。
+        attachments: 可选的图片附件（engine.media.ImageAttachment 列表，2026-10-16
+            视频域样片审阅引入）。只走 API 轨道，且 provider 须在 yaml 声明
+            `api.vision: true`；不满足即抛错——不静默丢图（"没看图的审阅"比失败更糟）。
+            图片 token 不进入口文本护栏估算（由 engine.media 的张数上限控量）。
     """
     cfg = get_provider(model)
     track = _resolve_track(cfg)
+    if attachments:
+        if track != "api":
+            raise ValueError(f"provider '{model}' 当前走 {track} 轨道，多模态附件只支持 API 轨道")
+        if not (cfg.get("api") or {}).get("vision"):
+            raise ValueError(f"provider '{model}' 未声明 api.vision: true，不能接收图片附件")
 
     # 规范化 system_prompt 为 (static, dynamic_own, dynamic_upstream) 三段
     if isinstance(system_prompt, tuple):
@@ -255,6 +265,7 @@ def call_llm(
                 api_cfg, static, dynamic_own, dynamic_upstream,
                 user_prompt, max_tokens, print_stream,
                 role_name=role_name, model_name=model, injection=injection,
+                attachments=attachments,
             )
         # openai_compat：拼接为单字符串
         flat = "\n\n".join(filter(None, [static, dynamic_combined])) if dynamic_combined else static
@@ -262,6 +273,7 @@ def call_llm(
             return _call_openai_compat(
                 api_cfg, flat, user_prompt, max_tokens, print_stream,
                 role_name=role_name, model_name=model, injection=injection,
+                attachments=attachments,
             )
         raise ValueError(f"未知 api kind：{kind}（provider={model}）")
 
@@ -402,6 +414,33 @@ def _audit_token_budget(
         )
 
 
+# ── 多模态 user content（2026-10-16）──────────────────────
+def _anthropic_user_content(user_prompt: str, attachments: list | None):
+    """无附件 → 原样字符串（老行为）；有附件 → 文本块 + 每张图前一行标签。"""
+    if not attachments:
+        return user_prompt
+    parts: list[dict] = [{"type": "text", "text": user_prompt}]
+    for i, att in enumerate(attachments, 1):
+        parts.append({"type": "text", "text": f"[附件 {i}] {att.label}"})
+        parts.append({"type": "image", "source": {
+            "type": "base64", "media_type": att.mime, "data": att.b64(),
+        }})
+    return parts
+
+
+def _openai_user_content(user_prompt: str, attachments: list | None):
+    """OpenAI 兼容 content parts（Gemini OpenAI 端点同口径：image_url 收 data URI）。"""
+    if not attachments:
+        return user_prompt
+    parts: list[dict] = [{"type": "text", "text": user_prompt}]
+    for i, att in enumerate(attachments, 1):
+        parts.append({"type": "text", "text": f"[附件 {i}] {att.label}"})
+        parts.append({"type": "image_url", "image_url": {
+            "url": f"data:{att.mime};base64,{att.b64()}",
+        }})
+    return parts
+
+
 # ── Anthropic SDK ────────────────────────────────────────
 def _call_anthropic_sdk(
     api_cfg: dict, system_static: str,
@@ -412,6 +451,7 @@ def _call_anthropic_sdk(
     role_name: str | None = None,
     model_name: str | None = None,
     injection: dict | None = None,
+    attachments: list | None = None,
 ) -> str:
     """调用 Anthropic SDK，B1（P10.5）3-block 分层缓存。
 
@@ -461,7 +501,7 @@ def _call_anthropic_sdk(
                 model=api_cfg["model"],
                 max_tokens=max_tokens,
                 system=system_block,
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=[{"role": "user", "content": _anthropic_user_content(user_prompt, attachments)}],
                 **stream_extra,
             ) as stream:
                 for text in stream.text_stream:
@@ -493,6 +533,7 @@ def _call_anthropic_sdk(
                 "cache_creation_input_tokens": cache_create,
                 "elapsed_s": round(elapsed, 3),
                 "attempt": attempt,
+                **({"images": len(attachments)} if attachments else {}),
                 **({"injection": injection} if injection else {}),
             })
             return "".join(chunks)
@@ -517,6 +558,7 @@ def _call_openai_compat(
     role_name: str | None = None,
     model_name: str | None = None,
     injection: dict | None = None,
+    attachments: list | None = None,
 ) -> str:
     """2026-07-18 评审修复：此前该路径是"二等公民"——无重试、无超时、
     不落 llm_call 审计事件（gemini/deepseek 角色的 token 消耗在 audit.jsonl
@@ -533,7 +575,7 @@ def _call_openai_compat(
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": _openai_user_content(user_prompt, attachments)},
     ]
 
     _RETRYABLE = (
@@ -598,6 +640,7 @@ def _call_openai_compat(
                 "elapsed_s": round(elapsed, 3),
                 "attempt": attempt,
                 "track": "openai_compat",
+                **({"images": len(attachments)} if attachments else {}),
                 **({"injection": injection} if injection else {}),
             })
             return "".join(chunks)

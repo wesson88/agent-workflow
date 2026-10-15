@@ -170,6 +170,9 @@ class Role:
     # 与 inputs/outputs 分开声明，正是为了不让引擎要求 LLM 往 .mp4 / 目录里写文本。
     external_inputs: tuple[str, ...] = ()
     external_outputs: tuple[str, ...] = ()
+    # 多模态输入（2026-10-16）：相对资产根的图/视频，作为图片附件随调用发送（视频均匀抽帧）。
+    # 只有声明了它的角色才吃图；provider 须声明 api.vision: true，否则调用期报错。
+    vision_inputs: tuple[str, ...] = ()
 
     # 执行路由声明（架构演进第 3 步批量收编）：subprocess（默认，走 main.py）
     # / in_process（走 engine.role_runner）。invoke_role(mode="auto") 按此路由；
@@ -602,6 +605,7 @@ def _build_role(
         optional_consumes=optional_consumes,
         external_inputs=_seq(fm.get("external_inputs")),
         external_outputs=_seq(fm.get("external_outputs")),
+        vision_inputs=_seq(fm.get("vision_inputs")),
         executor=executor,
     )
 
