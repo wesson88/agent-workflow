@@ -92,6 +92,8 @@ def make_human_gate_node(step: WorkflowStep, halt_on_failure: bool):
     manifest_template = step.manifest_path
     display_name = step.name or f"human_gate:{gate}"
 
+    if gate == "approve":
+        return _make_approve_node(step, halt_on_failure, display_name)
     if gate != "select_module":
         raise NotImplementedError(
             f"human_gate.gate='{gate}' 暂未实现（P8.3 仅支持 select_module）"
@@ -234,3 +236,39 @@ def _emit_pending_and_halt(
         f"resolve --id {g.id} --action approve --user-response <module_id>"
     )
     return {"halted": True, "skipped": [display_name]}
+
+
+def _make_approve_node(step: WorkflowStep, halt_on_failure: bool, display_name: str):
+    """gate=approve（2026-10-17 视频域 W2）：通用"批准才放行"闸，如资产确认闸。
+
+    批准结论跨运行持久（engine.approval）：批准过一次，后续重跑直接放行；
+    驳回 → 节点失败（用户改好上游产物后重跑会重新发起审批）。
+    refs 里的 `{project}` 占位由运行时替换，方便给出要看的文件。
+    """
+    from ..approval import ask_approval
+
+    gate_key = f"approve:{display_name}"
+    refs_tpl = [str(r) for r in (step.extras.get("refs") or [])]
+
+    def node(state: ProjectState) -> dict:
+        if state.get("halted"):
+            print(f"\n⏭️  跳过 {display_name}（上游 halt）")
+            return {"skipped": [display_name]}
+        project = state["project"]
+        decision = ask_approval(
+            project, gate_key, step.prompt or f"{display_name}：请确认后 approve",
+            node=display_name, refs=[r.replace("{project}", project) for r in refs_tpl],
+        )
+        if decision == "approved":
+            print(f"\n✅ {display_name} 已批准")
+            return {"succeeded": [display_name]}
+        if decision == "pending":
+            return {"halted": True, "skipped": [display_name]}
+        print(f"\n❌ {display_name} 被驳回")
+        patch = {"failed": [display_name]}
+        if halt_on_failure:
+            patch["halted"] = True
+        return patch
+
+    node.__name__ = "node_hg_approve"
+    return node

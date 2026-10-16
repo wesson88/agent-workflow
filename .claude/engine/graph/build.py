@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph, START, END
 from ..role_loader import load_role
 from ..workflow import WorkflowTemplate, WorkflowStep, role_to_skill_dir
 from .human_gate_node import make_human_gate_node
+from .generation_node import make_generation_loop_node, make_generation_node
 from .module_dev_loop_node import make_module_development_loop_node
 from .nodes import make_role_node, make_discussion_node, make_brainstorm_loop_node
 from .state import ProjectState
@@ -25,7 +26,14 @@ def _normalize(name_or_alias: str) -> str:
 def _step_node_key(step: WorkflowStep, idx: int) -> str:
     """生成 LangGraph 内部唯一节点名。"""
     if step.type == "linear":
-        return f"step_{idx:02d}_{role_to_skill_dir(_normalize(step.role))}"
+        role = _normalize(step.role)
+        try:
+            key = role_to_skill_dir(role)
+        except ValueError:   # in_process 角色无 skills/ 目录（与 make_role_node 同一兜底）
+            if load_role(role).executor != "in_process":
+                raise
+            key = load_role(role).name
+        return f"step_{idx:02d}_{key}"
     if step.type == "discussion":
         # 中文名转 ASCII 替代字符以避免 graph key 问题
         safe = (step.name or "discussion").replace(" ", "_").replace("/", "_")
@@ -38,9 +46,14 @@ def _step_node_key(step: WorkflowStep, idx: int) -> str:
         return f"step_{idx:02d}_hg_{safe}"
     if step.type == "module_development_loop":
         return f"step_{idx:02d}_modloop"
+    if step.type == "generation":
+        return f"step_{idx:02d}_gen_{step.extras.get('kind', 'task')}"
+    if step.type == "generation_loop":
+        return f"step_{idx:02d}_genloop"
     raise NotImplementedError(
         f"工作流步骤 type='{step.type}' 暂不支持。"
-        f"已支持：linear / discussion / brainstorm-loop / human_gate / module_development_loop。"
+        f"已支持：linear / discussion / brainstorm-loop / human_gate / module_development_loop / "
+        f"generation / generation_loop。"
     )
 
 
@@ -121,6 +134,7 @@ def _make_node_for_step(
             contract_overrides=step.contract_overrides,
             domain=domain,
             role_occurrence=role_occurrence,
+            review=step.review,
         )
     if step.type == "discussion":
         return make_discussion_node(step, halt_on_failure, domain=domain)
@@ -128,6 +142,10 @@ def _make_node_for_step(
         return make_brainstorm_loop_node(step, halt_on_failure)
     if step.type == "human_gate":
         return make_human_gate_node(step, halt_on_failure)
+    if step.type == "generation":
+        return make_generation_node(step, halt_on_failure, domain=domain)
+    if step.type == "generation_loop":
+        return make_generation_loop_node(step, halt_on_failure, domain=domain)
     if step.type == "module_development_loop":
         return make_module_development_loop_node(step, halt_on_failure)
     raise NotImplementedError(f"未知步骤类型：{step.type}")

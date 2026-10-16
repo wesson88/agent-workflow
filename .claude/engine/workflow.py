@@ -101,6 +101,11 @@ class WorkflowStep:
     # 与顶层 contract_overrides 分开命名以避免 TL step 的 output_contract 覆盖串味
     engineer_contract_overrides: dict | None = None
 
+    # 批判者逐段回路（2026-10-17 视频域 W2）：linear step 跑完后批判者打分出问题单，
+    # 低于阈值则角色带问题单重跑，≤max_rounds 轮，分数不升即回滚上一版。
+    # 结构：{"by": "批判者", "max_rounds": 2, "threshold": 80}
+    review: dict | None = None
+
     # 兜底未识别字段
     extras: dict = field(default_factory=dict, repr=False)
 
@@ -121,6 +126,9 @@ class WorkflowStep:
                 pre_flight = data.get("pre_flight") or None
                 auto_split = bool(data.get("auto_split", False))
                 skip_if = data.get("skip_if") or None
+                review = data.get("review") or None
+                if review is not None and not isinstance(review, dict):
+                    raise ValueError(f"linear step '{role}' 的 review 必须是 dict：{review!r}")
                 contract_overrides = data.get("contract_overrides") or None
                 if contract_overrides is not None and not isinstance(
                     contract_overrides, dict
@@ -137,6 +145,7 @@ class WorkflowStep:
                     auto_split=auto_split,
                     skip_if=skip_if,
                     contract_overrides=contract_overrides,
+                    review=review,
                 )
             if t == "discussion":
                 roles = tuple(str(r) for r in (data.get("roles") or data.get("participants") or ()))
@@ -189,6 +198,7 @@ class WorkflowStep:
                     manifest_path=str(manifest_path) if manifest_path else None,
                     name=str(data.get("name") or f"human_gate:{gate}"),
                     prompt=str(data["prompt"]) if data.get("prompt") else None,
+                    extras={"refs": list(data.get("refs") or [])},
                 )
             if t == "module_development_loop":
                 manifest_path = data.get("manifest_path")

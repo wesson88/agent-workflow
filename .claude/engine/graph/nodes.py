@@ -24,10 +24,13 @@ from .brainstorm import build_brainstorm_graph
 from .state import ProjectState
 
 
-def _evaluate_skip_if(skip_if: dict, project: str) -> tuple[bool, str]:
+def _evaluate_skip_if(skip_if: dict, project: str, role_name: str | None = None) -> tuple[bool, str]:
     """评估工作流步骤的 skip_if 条件。
 
     支持的条件类型：
+      outputs_exist: true
+        本角色声明的 outputs（不含 {n}/通配）全部已存在 → 跳过。工作流在人工闸 halt 后重跑时，
+        已完成的 LLM 节点零成本跳过（2026-10-17 视频域 W2）；删产物即强制重跑。
       frontmatter_eq:
         file: <vault 相对路径，可含 {project} 占位>
         key:  <frontmatter key>
@@ -36,6 +39,18 @@ def _evaluate_skip_if(skip_if: dict, project: str) -> tuple[bool, str]:
     返回 (should_skip, reason)。条件文件不存在或解析失败均返回 (False, ...)，
     保守不跳过——避免误杀。
     """
+    if skip_if.get("outputs_exist") is True:
+        if not role_name:
+            return False, "outputs_exist 需要角色名"
+        from .critic import role_output_paths
+        paths = role_output_paths(role_name, project)
+        if not paths:
+            return False, "角色无可判定的 outputs"
+        missing = [p.name for p in paths if not p.is_file()]
+        if missing:
+            return False, f"产物未齐：{missing}"
+        return True, f"产物已齐（{[p.name for p in paths]}）"
+
     cond = skip_if.get("frontmatter_eq")
     if not isinstance(cond, dict):
         return False, f"unknown skip_if shape: {skip_if!r}"
@@ -274,6 +289,7 @@ def make_role_node(
     contract_overrides: dict | None = None,
     domain: str | None = None,
     role_occurrence: int | None = None,
+    review: dict | None = None,
 ):
     """工厂函数：返回一个 LangGraph node 函数。
     role_name 是 vault 角色 frontmatter 的 role 字段（中文名）。
@@ -313,7 +329,7 @@ def make_role_node(
 
         # 工作流层条件跳过（skip_if）：节点执行前评估，命中即跳过 subprocess
         if skip_if:
-            should_skip, reason = _evaluate_skip_if(skip_if, state["project"])
+            should_skip, reason = _evaluate_skip_if(skip_if, state["project"], role_name)
             if should_skip:
                 print(f"\n⏭️  跳过 {role_name}（skip_if 命中：{reason}）")
                 return {"skipped": [role_name]}
@@ -360,6 +376,11 @@ def make_role_node(
             return patch
 
         print(f"\n✅ {role_name} 完成")
+
+        # ── 批判者逐段回路（review）──────────────────────────────────
+        if review:
+            from .critic import review_loop
+            review_loop(inv, review, domain)
 
         # ── 层三 post_compress ───────────────────────────────────────
         if post_compress:
