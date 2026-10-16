@@ -378,7 +378,7 @@ def _get_discussion_graph():
     return _DISCUSSION_GRAPH
 
 
-def make_discussion_node(step: WorkflowStep, halt_on_failure: bool):
+def make_discussion_node(step: WorkflowStep, halt_on_failure: bool, domain: str | None = None):
     """工厂函数：把 type=discussion 的 WorkflowStep 包装成主图 node。
     主图 node 入口接收 ProjectState（项目级 state），内部洐生 DiscussionState
     去 invoke 讨论 subgraph，跑完后回写主图 state。
@@ -405,6 +405,7 @@ def make_discussion_node(step: WorkflowStep, halt_on_failure: bool):
             "moderator": moderator,
             "max_rounds": max_rounds,
             "discussion_name": name,
+            "domain": domain,
             "messages": [],
             "current_round": 0,
             "next_speaker": None,

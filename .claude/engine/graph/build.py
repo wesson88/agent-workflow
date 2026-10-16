@@ -123,7 +123,7 @@ def _make_node_for_step(
             role_occurrence=role_occurrence,
         )
     if step.type == "discussion":
-        return make_discussion_node(step, halt_on_failure)
+        return make_discussion_node(step, halt_on_failure, domain=domain)
     if step.type == "brainstorm-loop":
         return make_brainstorm_loop_node(step, halt_on_failure)
     if step.type == "human_gate":

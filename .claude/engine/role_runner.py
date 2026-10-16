@@ -735,9 +735,15 @@ def run_role(
             bind_module_id(list(role.external_inputs), module_id, keep_unparameterized=True),
             bind_module_id(list(role.external_outputs), module_id, keep_unparameterized=True),
         )
+        from .ability_loader import load_domain_adapter_meta
+        vision_entries = list(role.vision_inputs) + [
+            str(e) for e in (load_domain_adapter_meta(role.name, domain).get("vision_inputs") or [])
+            if str(e) not in role.vision_inputs
+        ]
+        # 资产根按"调用域"定：通用角色基因 domain=通用，资产在调用方声明的域下
         attachments, vision_note = prepare_vision_inputs(
-            role.domain, project,
-            bind_module_id(list(role.vision_inputs), module_id, keep_unparameterized=True),
+            domain or role.domain, project,
+            bind_module_id(vision_entries, module_id, keep_unparameterized=True),
         )
     except (ValueError, MediaUnavailable) as e:
         return _fail(2, str(e))

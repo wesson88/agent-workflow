@@ -13,6 +13,12 @@ Phase 4b 限制：
 - 无用户介入
 
 Phase 4c 升级方向：LLM 主持人 + 共识检测 + 决议 YAML 自动生成。
+
+域适配（2026-10-16，视频域观众代表引入）：父图传入工作流 domain 时，每个发言者
+- system prompt 追加其域视角 adapter（`00-系统/规则/{domain}/{角色}-视角.md`，有则注入）
+- adapter frontmatter 声明 `context_docs` → 用它替代 SE 默认三件套作为项目文档
+- adapter frontmatter 声明 `vision_inputs` → 图/视频抽帧作为附件随该发言者的调用发送
+通用角色基因本身不动（[[通用角色扩展原则]] §2 开闭：域扩展只落 adapter）。
 """
 
 from __future__ import annotations
@@ -23,7 +29,8 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
-from ..config import project_dir
+from ..ability_loader import load_domain_adapter, load_domain_adapter_meta
+from ..config import VAULT_ROOT, project_dir
 from ..llm import call_llm
 from ..obsidian_io import write_note
 from ..role_loader import load_role
@@ -49,7 +56,10 @@ def _read_doc_capped(path) -> str | None:
     return text
 
 
-def _gather_project_context(project: str) -> str:
+_DEFAULT_CONTEXT_DOCS = ("PRD.md", "系统设计.md", "API契约.md")
+
+
+def _gather_project_context(project: str, context_docs: list[str] | None = None) -> str:
     """读取 vault 10-项目/{project}/ 下的核心产出，组装成 markdown。
 
     只读评审讨论真正需要的产物：PRD / 系统设计 / API契约。
@@ -59,13 +69,21 @@ def _gather_project_context(project: str) -> str:
     给 TL 看的任务切分指南，对架构师/前后端/批判者评审"架构是否合理"无价值，
     塞进 prompt 会把讨论带偏到"评审任务切分"且每轮多吃 ~2K tokens。
     """
-    pdir = project_dir(project)
     sections: list[str] = []
+    if context_docs:
+        # adapter 声明的 vault 路径（{project} 占位）——非 SE 域的项目目录不在 10-项目/{project}/
+        targets = [
+            (rel.replace("{project}", project), VAULT_ROOT / rel.replace("{project}", project))
+            for rel in context_docs
+        ]
+    else:
+        pdir = project_dir(project)
+        targets = [(fname, pdir / fname) for fname in _DEFAULT_CONTEXT_DOCS]
 
-    for fname in ("PRD.md", "系统设计.md", "API契约.md"):
-        content = _read_doc_capped(pdir / fname)
+    for label, path in targets:
+        content = _read_doc_capped(path)
         if content:
-            sections.append(f"### 📄 {fname}\n\n{content}")
+            sections.append(f"### 📄 {label}\n\n{content}")
 
     if not sections:
         return "（项目当前尚无核心产出文档；请基于议题与项目名讨论。）"
@@ -81,6 +99,7 @@ class DiscussionState(TypedDict, total=False):
     moderator: str | None                     # 主持人（None 时第一个参与者主持）
     max_rounds: int
     discussion_name: str                      # 用于脑暴笔记文件名
+    domain: str | None                        # 工作流域（adapter 目录名），None = 不做域适配
 
     # 累积
     messages: Annotated[list[dict], add]      # [{round, speaker, content, timestamp}]
@@ -103,9 +122,12 @@ def _node_init(state: DiscussionState) -> dict:
     return {"current_round": 0, "next_speaker": first, "finished": False}
 
 
-def _build_speaker_prompt(state: DiscussionState, speaker: str) -> tuple[str, str]:
-    """构造某角色当前轮的 (system_prompt, user_prompt)。"""
+def _build_speaker_prompt(state: DiscussionState, speaker: str) -> tuple[str, str, list]:
+    """构造某角色当前轮的 (system_prompt, user_prompt, 图片附件)。"""
     role = load_role(speaker)
+    domain = state.get("domain")
+    adapter_block, _ = load_domain_adapter(role.name, domain)
+    adapter_meta = load_domain_adapter_meta(role.name, domain)
 
     # system prompt：角色基因正文（不走 build_system_prompt 因为不需要 OUTPUT_FORMAT_SPEC）
     system_prompt = (
@@ -123,10 +145,14 @@ def _build_speaker_prompt(state: DiscussionState, speaker: str) -> tuple[str, st
         "3. **基于已提供的项目文档和讨论历史，给出具体、可操作的观点。** "
         "可以引用其他角色的具体说法，可以指出文档中的具体段落。\n"
         "4. **不要说『我需要查看 X 文件』或『请提供 Y 资料』** —— 该有的资料都已经在下面了。"
+        + adapter_block
     )
 
     # user prompt：议题 + 项目文档 + 历史
-    project_context = _gather_project_context(state["project"])
+    project_context = _gather_project_context(
+        state["project"], [str(d) for d in (adapter_meta.get("context_docs") or [])],
+    )
+    attachments, vision_note = _vision_for(domain, state["project"], adapter_meta)
 
     history_lines = []
     for m in state.get("messages", []):
@@ -142,11 +168,32 @@ def _build_speaker_prompt(state: DiscussionState, speaker: str) -> tuple[str, st
         f"以下是项目当前已经产出的核心文档。**这是你讨论的事实依据，"
         f"请直接基于这些内容给出具体观点，不要询问『是否能查看』。**\n\n"
         f"{project_context}\n\n"
+        f"{vision_note}"
         f"# 已有讨论历史\n{history_block}\n\n"
         f"---\n"
         f"现在轮到你（**{speaker}**）发言。请直接输出你的一段发言："
     )
-    return system_prompt, user_prompt
+    return system_prompt, user_prompt, attachments
+
+
+# 同一讨论内同一素材集只抽一次帧（发言者每轮都发言，素材不变；mtime 变了自动失效）
+_VISION_CACHE: dict[tuple, tuple[list, str]] = {}
+
+
+def _vision_for(domain: str | None, project: str, adapter_meta: dict) -> tuple[list, str]:
+    entries = [str(e) for e in (adapter_meta.get("vision_inputs") or [])]
+    if not entries or not domain:
+        return [], ""
+    from ..config import asset_root
+    root = asset_root(domain, project)
+    stamp = tuple(
+        (e, (root / e).stat().st_mtime if root and (root / e).exists() else None) for e in entries
+    )
+    key = (domain, project, stamp)
+    if key not in _VISION_CACHE:
+        from ..role_runner import prepare_vision_inputs
+        _VISION_CACHE[key] = prepare_vision_inputs(domain, project, entries)
+    return _VISION_CACHE[key]
 
 
 def _node_speak(state: DiscussionState) -> dict:
@@ -157,12 +204,14 @@ def _node_speak(state: DiscussionState) -> dict:
     print(f"\n【第 {next_round} 轮 · {speaker}】", flush=True)
 
     role = load_role(speaker)
-    system_prompt, user_prompt = _build_speaker_prompt(state, speaker)
+    system_prompt, user_prompt, attachments = _build_speaker_prompt(state, speaker)
+    extra = {"attachments": attachments} if attachments else {}
     text = call_llm(
         system_prompt, user_prompt,
         model=role.model,
         max_tokens=role.max_tokens,
         print_stream=True,
+        **extra,
     )
 
     msg = {

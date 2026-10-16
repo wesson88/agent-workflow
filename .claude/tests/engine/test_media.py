@@ -197,3 +197,74 @@ class TestRunRoleVision:
         assert result.ok, result.error
         assert captured["attachments"] is None
         assert "未看图，待复审" in captured["user"]
+
+
+def test_frames_scale_with_duration():
+    from engine.media import FRAMES_PER_VIDEO, frames_for
+
+    assert frames_for(5.0) == FRAMES_PER_VIDEO          # 短镜头保底
+    assert frames_for(180.0) == 36                       # 3 分钟成片每 5s 一帧
+
+
+class TestDiscussionDomainAdapter:
+    """讨论节点域适配（2026-10-16）：真实 用户体验者 基因 + 真实 video adapter（观众代表）。"""
+
+    @pytest.fixture
+    def video_proj(self, tmp_path, monkeypatch):
+        import engine.config as cfg
+        import engine.graph.discussion as disc
+
+        monkeypatch.setattr(cfg, "ASSET_ROOT_TEMPLATE", str(tmp_path / "{domain}" / "{project}"))
+        disc._VISION_CACHE.clear()
+        proj = VAULT_ROOT / "10-项目" / "video" / PROJECT
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "分镜表.md").write_text("# 分镜表\n| S01 | 钩子镜：剑光破雾 |", encoding="utf-8")
+        yield tmp_path / "video" / PROJECT
+        shutil.rmtree(proj, ignore_errors=True)
+
+    @staticmethod
+    def _state(domain):
+        return {
+            "project": PROJECT, "task": "端到端串看", "topic": "评审成片",
+            "participants": ("用户体验者",), "moderator": None, "max_rounds": 1,
+            "discussion_name": "t", "domain": domain, "messages": [],
+        }
+
+    @needs_ffmpeg
+    def test_video_domain_injects_adapter_docs_and_frames(self, video_proj):
+        from engine.graph.discussion import _build_speaker_prompt
+
+        _make_video(video_proj / "final" / "master.mp4", seconds=40)
+        system, user, atts = _build_speaker_prompt(self._state("video"), "用户体验者")
+        assert "域视角适配（video）" in system and "观众代表" in system
+        assert "剑光破雾" in user                         # adapter context_docs 生效
+        assert "PRD.md" not in user                       # 不再走 SE 默认三件套
+        assert len(atts) == 8 and atts[0].label.startswith("final/master.mp4 @0.1s")
+        assert "## 视觉附件（8 张" in user
+
+    def test_video_domain_without_master_says_not_seen(self, video_proj):
+        from engine.graph.discussion import _build_speaker_prompt
+
+        _, user, atts = _build_speaker_prompt(self._state("video"), "用户体验者")
+        assert atts == [] and "未看图，待复审" in user
+
+    def test_no_domain_keeps_old_behavior(self, video_proj):
+        from engine.graph.discussion import _build_speaker_prompt
+
+        system, user, atts = _build_speaker_prompt(self._state(None), "用户体验者")
+        assert "域视角适配" not in system and atts == []
+        assert "视觉附件" not in user
+
+    def test_speak_passes_attachments_only_when_present(self, video_proj, monkeypatch):
+        import engine.graph.discussion as disc
+        from engine.media import ImageAttachment
+
+        seen: list = []
+        monkeypatch.setattr(disc, "call_llm", lambda *a, **kw: (seen.append(kw.get("attachments")), "发言")[1])
+        att = ImageAttachment(label="final/master.mp4 @0.1s / 40.0s", data=b"\xff\xd8")
+        monkeypatch.setattr(disc, "_build_speaker_prompt", lambda st, sp: ("s", "u", [att]))
+        st = {**self._state("video"), "next_speaker": "用户体验者", "current_round": 0}
+        disc._node_speak(st)
+        monkeypatch.setattr(disc, "_build_speaker_prompt", lambda st, sp: ("s", "u", []))
+        disc._node_speak(st)
+        assert seen == [[att], None]

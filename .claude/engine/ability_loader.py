@@ -1020,6 +1020,28 @@ def load_domain_adapter(role_name: str, domain: str | None) -> tuple[str, str]:
     return block, f"注入 {domain}/{role_name}-视角.md（{len(body)} char）"
 
 
+def load_domain_adapter_meta(role_name: str, domain: str | None) -> dict:
+    """域视角 adapter 的 frontmatter（缺失/读失败 → {}）。
+
+    通用角色的域扩展只能落在 adapter（[[通用角色扩展原则]] §2 开闭），所以通用角色在某域
+    需要额外输入时由 adapter 声明，引擎读这里——2026-10-16 起认两个可选字段：
+    - `context_docs`：讨论场注入的项目文档（vault 路径，`{project}` 占位）；缺省走 SE 三件套
+    - `vision_inputs`：相对 ASSET_ROOT 的图/视频（与角色基因同名字段语义一致，取并集）
+    """
+    if not domain:
+        return {}
+    from engine import VAULT_ROOT
+    path = VAULT_ROOT / "00-系统" / "规则" / domain / f"{role_name}-视角.md"
+    if not path.is_file():
+        return {}
+    try:
+        from engine.obsidian_io import split_frontmatter
+        fm, _ = split_frontmatter(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return fm or {}
+
+
 # ── 统一装配入口（role_runner 及后续收编角色的单点）─────────────────
 def assemble_user_context(
     role,

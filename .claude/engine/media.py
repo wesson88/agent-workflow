@@ -5,7 +5,8 @@ media.py — 多模态输入素材准备（2026-10-16 视频域样片审阅引�
 在这里变成可直接塞进 LLM 请求的图片附件：
 
 - 图片：ffmpeg 缩放到长边 ≤ MAX_EDGE 后转 JPEG（统一格式与体积，png/webp 一样处理）
-- 视频：ffprobe 取时长，均匀抽 FRAMES_PER_VIDEO 帧（避开首尾 0.1s），每帧标时间码
+- 视频：ffprobe 取时长，均匀抽帧（避开首尾 0.1s），每帧标时间码；帧数 = max(FRAMES_PER_VIDEO,
+  ⌈时长 / SECONDS_PER_FRAME⌉)——5s 镜头 6 帧、3 分钟成片约 36 帧，长片不至于只剩 6 张
 - 上限：单次调用最多 MAX_IMAGES 张，超出截断并在标签里说明——多模态 token 远贵于文本，
   护栏放在素材侧比放在 llm 入口更可控
 
@@ -19,6 +20,7 @@ ffmpeg 缺失 → MediaUnavailable（调用方判永久失败，不静默把审�
 from __future__ import annotations
 
 import base64
+import math
 import os
 import shutil
 import subprocess
@@ -31,6 +33,7 @@ VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
 
 MAX_EDGE = int(os.environ.get("VISION_MAX_EDGE", "768"))
 FRAMES_PER_VIDEO = int(os.environ.get("VISION_FRAMES_PER_VIDEO", "6"))
+SECONDS_PER_FRAME = float(os.environ.get("VISION_SECONDS_PER_FRAME", "5"))
 MAX_IMAGES = int(os.environ.get("VISION_MAX_IMAGES", "48"))
 
 
@@ -98,6 +101,11 @@ def frame_times(duration_s: float, n: int) -> list[float]:
     return [round(lo + i * step, 3) for i in range(n)]
 
 
+def frames_for(duration_s: float) -> int:
+    """单条视频抽帧数：短镜头保底 FRAMES_PER_VIDEO，长片按 SECONDS_PER_FRAME 一帧。"""
+    return max(FRAMES_PER_VIDEO, math.ceil(duration_s / SECONDS_PER_FRAME))
+
+
 def collect_media(root: Path, entries: list[str]) -> list[Path]:
     """entries 相对 root；`/` 结尾 = 目录（非递归），否则单文件。不存在的跳过。"""
     files: list[Path] = []
@@ -130,7 +138,7 @@ def build_attachments(root: Path, files: list[Path]) -> tuple[list[ImageAttachme
             out.append(ImageAttachment(label=rel, data=_grab_frame(ff, src, None)))
             continue
         dur = _duration_s(fp, src)
-        for t in frame_times(dur, FRAMES_PER_VIDEO):
+        for t in frame_times(dur, frames_for(dur)):
             if len(out) >= MAX_IMAGES:
                 dropped.append(f"{rel} @{t:.1f}s 及之后")
                 break
