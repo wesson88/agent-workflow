@@ -214,7 +214,13 @@ def shadow_check_role(
                 )
                 continue
             rendered = spec.resolve(proj_roots)
-            if _abstract_module_id(rendered) not in declared_abstract:
+            # 声明目录（`/` 结尾）覆盖其下的产物路径：数量不定的产物（如视频域 审阅/{n}.审阅.md）
+            # 消费方只能按目录声明
+            rendered_abs = _abstract_module_id(rendered)
+            covered_by_dir = any(
+                d.endswith("/") and rendered_abs.startswith(d) for d in declared_abstract
+            )
+            if rendered_abs not in declared_abstract and not covered_by_dir:
                 warns.append(
                     f"{role_name}.{kind}: [[{aid}]] 渲染路径 '{rendered}' "
                     f"不在 {declared_field} 声明中（声明与注册表漂移）"

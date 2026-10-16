@@ -17,6 +17,7 @@ from pathlib import Path
 
 from ..config import PROJECT_ROOT, VAULT_ROOT
 from ..role_invoke import RoleInvocation, invoke_role
+from ..role_loader import load_role
 from ..workflow import role_to_skill_dir, WorkflowStep
 from .discussion import build_discussion_graph
 from .brainstorm import build_brainstorm_graph
@@ -296,7 +297,14 @@ def make_role_node(
     build._role_occurrences），经 env `AGENT_ROLE_OCCURRENCE` 传给 main.py。
     只走 subprocess env —— in_process 角色目前没有重复出现的。
     """
-    skill_dir = role_to_skill_dir(role_name)
+    try:
+        skill_dir = role_to_skill_dir(role_name)
+    except ValueError:
+        # in_process 角色（声明驱动，走 role_runner）不需要 skills/ 目录——视频域角色全是这种。
+        # 2026-10-17 前这里直接抛错，in_process-only 角色根本进不了工作流图
+        if load_role(role_name).executor != "in_process":
+            raise
+        skill_dir = role_name
     def node(state: ProjectState) -> dict:
         # 上游 halt 时跳过本 node
         if state.get("halted"):
