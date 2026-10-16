@@ -252,6 +252,11 @@ def _measure_suno_style_chars(output_files: dict[str, str]) -> int | None:
 _PLACEHOLDER_TASKS = {"", "处理数学分析"}  # 原 PM main.py：run_chain 历史默认 task 占位值
 
 
+def is_material_dir(entry: str) -> bool:
+    """目录条目是否为用户素材目录（路径含 `/inputs/` 段）。"""
+    return "/inputs/" in entry.replace("\\", "/")
+
+
 def _scan_material_dir(dir_path: Path) -> list[Path]:
     if not dir_path.exists():
         return []
@@ -743,17 +748,22 @@ def run_role(
         print(f"[{role.name}] module_id={module_id}：产出收窄为 {bound_outputs}", flush=True)
 
     # {role} 消费端绑定自身角色名（与 artifact_check / music main.py 同一规则）；
-    # `/` 结尾条目 = 素材目录扫描（见 _scan_material_dir 约定）
+    # `/` 结尾条目 = 目录扫描（见 _scan_material_dir 约定），按路径分两类（封闭规则）：
+    # - 含 `/inputs/` 段 = **素材目录**（用户原始资料）：综合提示 + 参考资料章节 + 空素材底线
+    # - 其余 = **产物目录**（同项目上游/同角色产物，如视频域 审阅/、候选模式/、music-theme/）：
+    #   只扫描进 context。2026-10-16 前两类不分，产物目录角色会被要求写 PM 式参考资料章节，
+    #   目录为空 + 占位 task 还会被判 missing_input（prompt工程师首次策略调用必中）
     input_paths: list[Path] = []
     material_entries: list[tuple[str, Path]] = []
     has_material_dir = False
     for raw in bound_inputs:
         entry = raw.replace("{role}", role.name)
         if entry.endswith("/"):
-            has_material_dir = True
             scanned = _scan_material_dir(resolve_path(entry, project))
             input_paths.extend(scanned)
-            material_entries.extend((entry, p) for p in scanned)
+            if is_material_dir(entry):
+                has_material_dir = True
+                material_entries.extend((entry, p) for p in scanned)
         else:
             input_paths.append(resolve_path(entry, project))
     if has_material_dir:

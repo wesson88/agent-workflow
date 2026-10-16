@@ -715,3 +715,41 @@ class TestExternalAssets:
         assert "请产出以下 1 份 FILE 块" in user
         assert "`assets/selected/S01_take.mp4`" in user
         assert "<!-- FILE: final/master.mp4" not in user and "### 1. `final/master.mp4`" not in user
+
+
+class TestArtifactDirVsMaterialDir:
+    """`/` 结尾目录分两类：`/inputs/` 素材目录才有 PM 综合提示与空素材底线（2026-10-16）。"""
+
+    def test_classification(self):
+        from engine.role_runner import is_material_dir
+
+        assert is_material_dir("10-项目/{project}/inputs/")
+        assert is_material_dir("10-项目/{project}/inputs/设计图/")
+        assert not is_material_dir("10-项目/video/{project}/prompt/候选模式/")
+        assert not is_material_dir("10-项目/video/{project}/审阅/")
+
+    def test_empty_artifact_dir_neither_fails_nor_gets_pm_note(self, monkeypatch):
+        """真实基因 prompt工程师 策略调用：候选模式/ 为空 + 占位 task 不判 missing_input，不注入参考资料章节。"""
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        proj = VAULT_ROOT / "10-项目" / "video" / PROJECT
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "分镜表.md").write_text("# 分镜表\n| S01 | G01 |", encoding="utf-8")
+        (proj / "视觉设定.md").write_text("# 视觉设定", encoding="utf-8")
+        captured: dict = {}
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", lambda rec: None)
+
+        def fake_call(system_prompt, user_prompt, role_name, **kw):
+            captured["user"] = user_prompt
+            return "<!-- FILE: 10-项目/video/{project}/prompt-模式库.md -->\n# 模式库\n<!-- /FILE -->\n"
+
+        monkeypatch.setattr(rr, "call_claude", fake_call)
+        try:
+            result = run_role("prompt工程师", "", PROJECT)
+        finally:
+            shutil.rmtree(proj, ignore_errors=True)
+        assert result.ok, result.error
+        assert "参考资料（Source Materials）" not in captured["user"]
