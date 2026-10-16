@@ -9,6 +9,20 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _fresh_caches():
+    """真实 vault 基因/注册表：前后都清缓存——全量跑时有别的用例把角色目录指到临时目录后
+    留下空索引（单独跑本文件通过、全量失败的来源）。"""
+    from engine.artifact_registry import _load_registry_cached
+    from engine.role_loader import invalidate_cache
+
+    invalidate_cache()
+    _load_registry_cached.cache_clear()
+    yield
+    invalidate_cache()
+    _load_registry_cached.cache_clear()
+
+
 class TestContractLayer:
     def test_in_process_role_without_skill_dir_builds_node(self):
         """视频角色无 .claude/skills/ 目录，make_role_node 不再抛错（原来建图即失败）。"""
