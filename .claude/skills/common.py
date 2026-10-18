@@ -166,7 +166,9 @@ OUTPUT_FORMAT_SPEC = """
 - 你**不可调用任何工具**（不要使用 Read/Write/Edit/Bash/MCP 等）
 - 你**不可询问写入权限** —— 上层 main.py 会负责落盘
 - 路径规则（**严格遵守**）：
-  - vault 笔记：以 `10-项目/{project}/...`、`00-系统/...`、`20-知识/...`、`99-临时/...` 之一开头
+  - vault 笔记：以 `10-项目/...`、`00-系统/...`、`20-知识/...`、`99-临时/...` 之一开头。
+    **项目根以 user prompt 的必产文件清单为准、逐字照抄**——项目根可能带域段
+    （如 `10-项目/music/{project}/`、`10-项目/video/{project}/`），不要自己按 `10-项目/{project}/` 拼路径
   - 代码与测试：必须以 `src/...` 或 `tests/...` 开头（**不要**裸 `main.py` 或 `app/main.py`）
   - 项目专属的 README / requirements / 静态资源：放到 `10-项目/{project}/` 下（如
     `10-项目/{project}/README.md`、`10-项目/{project}/requirements.txt`、
