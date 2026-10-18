@@ -854,6 +854,29 @@ def run_role(
     output_files, rejected = partition_declared_outputs(
         output_files, output_rels, project,
     )
+    if rejected:
+        # 一次纠错重试（2026-10-18 视频域首跑：样片审阅把 10-项目/video/{p}/ 写成 10-项目/{p}/，
+        # 整个生成循环因一次笔误失败）。拦截规则不变——写错路径仍不落盘；只是把错的路径与
+        # 正确清单回给模型再要一次，仍错则按原规则判失败。对所有角色/所有笔误形态同一处理。
+        missing = [r for r in output_rels if _norm_rel(r) not in output_files]
+        print(f"[{role.name}] ⚠️ FILE 块路径不在声明清单：{rejected}，纠错重试 1 次", file=sys.stderr)
+        fix_prompt = (
+            f"{user_prompt}\n\n---\n**路径纠错**：你上一次输出的 FILE 路径 {rejected} 不在本轮声明的产物清单里，"
+            f"已被拒绝写入。本轮必须产出的路径（逐字照抄，不要增删任何路径段）：\n"
+            + "\n".join(f"- `{r}`" for r in missing)
+            + "\n请按以上路径重新输出这些 FILE 块（内容可沿用上一次）。"
+        )
+        try:
+            raw_retry = call_claude(system_prompt, fix_prompt, role.name, **extra)
+        except Exception as e:
+            print(f"[{role.name}] 纠错重试调用失败：{e}", file=sys.stderr)
+            raw_retry = ""
+        retry_files, rejected = partition_declared_outputs(
+            parse_claude_output_to_files(raw_retry) if raw_retry else {}, output_rels, project,
+        )
+        output_files.update(retry_files)
+        if raw_retry:
+            raw_output = raw_retry
 
     from .frontmatter_links import check_frontmatter, normalize_frontmatter_links
     from .obsidian_io import atomic_write_text

@@ -753,3 +753,36 @@ class TestArtifactDirVsMaterialDir:
             shutil.rmtree(proj, ignore_errors=True)
         assert result.ok, result.error
         assert "参考资料（Source Materials）" not in captured["user"]
+
+
+class TestPathCorrectionRetry:
+    """FILE 路径笔误 → 一次纠错重试（2026-10-18 视频域真实首跑：样片审阅漏写 video/ 段）。"""
+
+    def test_wrong_path_then_corrected(self, monkeypatch):
+        import engine.role_runner as rr
+        from engine.role_runner import run_role
+
+        proj = VAULT_ROOT / "10-项目" / "video" / PROJECT
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "分镜表.md").write_text("# 分镜表", encoding="utf-8")
+        (proj / "视觉设定.md").write_text("# 视觉设定", encoding="utf-8")
+        monkeypatch.setattr(rr, "role_is_blocked", lambda name: False)
+        monkeypatch.setattr(rr, "set_role_status", lambda name, **kw: None)
+        monkeypatch.setattr(rr, "append_audit", lambda rec: None)
+        prompts: list[str] = []
+
+        def fake_call(system_prompt, user_prompt, role_name, **kw):
+            prompts.append(user_prompt)
+            root = f"10-项目/{PROJECT}" if len(prompts) == 1 else f"10-项目/video/{PROJECT}"
+            return f"<!-- FILE: {root}/审阅/资产审阅.md -->\n# 资产审阅\n<!-- /FILE -->\n"
+
+        monkeypatch.setattr(rr, "call_claude", fake_call)
+        try:
+            result = run_role("样片审阅", "资产审阅", PROJECT)
+            assert result.ok, result.error
+            assert len(prompts) == 2 and "路径纠错" in prompts[1]
+            assert (proj / "审阅" / "资产审阅.md").is_file()
+            assert not (VAULT_ROOT / "10-项目" / PROJECT / "审阅" / "资产审阅.md").exists()
+        finally:
+            shutil.rmtree(proj, ignore_errors=True)
+            shutil.rmtree(VAULT_ROOT / "10-项目" / PROJECT, ignore_errors=True)
