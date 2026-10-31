@@ -118,10 +118,11 @@ _PREFLIGHT_SYSTEM = """你是任务复杂度评估专家。
 
 
 def _call_haiku(system: str, user: str) -> str:
-    """调用 haiku 模型（轻量、低成本）。走 engine.llm 统一路由。"""
+    """调用可配置工具模型。走 engine.llm 统一路由。"""
+    from ..config import UTILITY_MODEL
     from ..llm import call_llm
 
-    return call_llm(system, user, model="claude-haiku-4-5", max_tokens=4096, print_stream=False)
+    return call_llm(system, user, model=UTILITY_MODEL, max_tokens=4096, print_stream=False)
 
 
 def _run_post_compress(
@@ -173,7 +174,7 @@ def _run_pre_flight(
     instruction_file: str,
     split_limit_lines: int = 400,
     *,
-    model_key: str = "claude-haiku-4-5",
+    model_key: str | None = None,
     split_limit_tokens: int | None = None,
 ) -> list[dict] | None:
     """层四 Pre-flight：用 haiku 评估任务复杂度，返回 sub_tasks 列表或 None（不需拆分）。
@@ -185,8 +186,10 @@ def _run_pre_flight(
     返回 None  → 单次调用即可
     返回 list  → 需要拆分，每个元素是 {focus, outputs}
     """
-    from ..config import VAULT_ROOT
+    from ..config import UTILITY_MODEL, VAULT_ROOT
     from ..token_counter import count_tokens, estimate_tokens
+
+    model_key = model_key or UTILITY_MODEL
 
     resolved = instruction_file.replace("{project}", project)
     full_path = VAULT_ROOT / resolved
@@ -296,7 +299,7 @@ def make_role_node(
     halt_on_failure 由工作流模板决定，闭包单获。
 
     post_compress（层三）: {
-        "model": "claude-haiku-4-5",   # 固定，仅 haiku
+        "model": "codex-cli",  # 示例；实际由 UTILITY_MODEL 决定
         "target_chars": 8000,
         "outputs": ["10-项目/{project}/指令/给后端.md"]
     }

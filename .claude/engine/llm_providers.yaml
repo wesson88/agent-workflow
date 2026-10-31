@@ -25,13 +25,40 @@
 #     path:                          CLI 可执行文件名（PATH 中查找）
 #     model:                         传给 CLI 的 --model 参数值
 #     effort:                        可选；传给 CLI 的 --effort 参数值
-#     output_format:                 stream-json / plain
+#     output_format:                 stream-json / codex-json / plain
 #     extra_args:                    其他必传 flag
 #     use_system_prompt_flag:        true → 用 --system-prompt 替换默认；
 #                                    false → 把 system prompt inline 进 user input
 #                                    （inline 易被识别为 prompt injection，避免）
 
-# ── Claude（默认）─────────────────────────────────────────
+# Codex CLI subscription track. Context window 200k is a conservative initial
+# audit value pending model-specific measurement; no API key is required.
+# Read-only sandbox plus disabled tools preserve the engine's FILE-only output path.
+codex-cli:
+  mode: cli_only
+  tokenizer: o200k_base
+  context_window: 200000
+  cli:
+    path: codex.cmd
+    output_format: codex-json
+    extra_args:
+      - -a
+      - never
+      - exec
+      - --json
+      - --ephemeral
+      - --skip-git-repo-check
+      - --disable
+      - shell_tool
+      - --disable
+      - apps
+      - -c
+      - 'web_search="disabled"'
+      - --sandbox
+      - read-only
+    use_system_prompt_flag: false
+
+# ── Claude（历史兼容）─────────────────────────────────────
 # Fable 5 / Sonnet 5 说明（2026-07 查证）：
 #   - 两者 context window 均为 1M（默认即最大），max output 128K。
 #   - 均使用 Opus 4.7 引入的新 tokenizer（同文本比旧 tokenizer 多 ~30% token）；

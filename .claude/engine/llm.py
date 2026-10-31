@@ -16,9 +16,12 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import tomllib
 import threading
 import time
 from datetime import datetime, timezone
@@ -800,6 +803,29 @@ def _iter_lines_with_heartbeat(
         yield raw
 
 
+def _codex_disabled_mcp_args() -> list[str]:
+    """Disable user MCP servers for engine calls, which only consume FILE text."""
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    config_path = codex_home / "config.toml"
+    if not config_path.exists():
+        return []
+    try:
+        with config_path.open("rb") as config_file:
+            config = tomllib.load(config_file)
+        servers = config.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            raise ValueError("mcp_servers must be a table")
+    except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+        raise RuntimeError(f"Cannot verify Codex MCP configuration: {config_path}") from exc
+    args: list[str] = []
+    for name in servers:
+        # Codex's Windows subprocess argv parser treats quote marks as literal key chars.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise RuntimeError(f"Unsupported Codex MCP server name: {name!r}")
+        args.extend(["-c", f"mcp_servers.{name}.enabled=false"])
+    return args
+
+
 def _call_cli(
     cli_cfg: dict, system_prompt: str, user_prompt: str,
     print_stream: bool,
@@ -811,6 +837,7 @@ def _call_cli(
     """通用 CLI 调用，输出格式由 cli_cfg.output_format 决定。
 
     - stream-json：逐行 JSON 事件（Claude Code CLI 格式）
+    - codex-json：Codex exec --json 事件
     - plain：纯文本输出（Gemini CLI / Ollama CLI 等）
     - use_system_prompt_flag=True：用 --system-prompt 替换默认（推荐）
       False：把 system 内联到 user prompt 前部（兼容无此 flag 的 CLI）
@@ -830,6 +857,8 @@ def _call_cli(
     cli = shutil.which(cli_cfg["path"]) or cli_cfg["path"]
     extra_args = _filter_extra_args(list(cli_cfg.get("extra_args") or []))
     cmd = [cli] + extra_args
+    if cli_cfg.get("output_format") == "codex-json":
+        cmd.extend(_codex_disabled_mcp_args())
 
     if cli_cfg.get("model"):
         cmd.extend(["--model", cli_cfg["model"]])
@@ -854,6 +883,7 @@ def _call_cli(
     t0 = time.monotonic()
     proc = subprocess.Popen(
         cmd,
+        cwd=tempfile.gettempdir() if cli_cfg.get("output_format") == "codex-json" else None,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,   # 彻底丢弃 stderr，防 buffer 撑满
@@ -901,6 +931,8 @@ def _call_cli(
 
     if output_format == "stream-json":
         chunks, usage = _read_stream_json(lines, print_stream)
+    elif output_format == "codex-json":
+        chunks, usage = _read_codex_json(lines, print_stream)
     elif output_format == "plain":
         for raw in lines:
             line = raw.decode("utf-8", errors="replace")
@@ -986,6 +1018,51 @@ def _read_stream_json(lines, print_stream: bool) -> tuple[list[str], dict]:
             chunks.append(text)
             if print_stream:
                 print(text, end="", flush=True)
+    return chunks, usage
+
+
+def _read_codex_json(lines, print_stream: bool) -> tuple[list[str], dict]:
+    """Read codex exec --json; reject any tool action in the generation-only track."""
+    chunks: list[str] = []
+    usage: dict = {}
+    completed = False
+    forbidden = {"command_execution", "file_change", "mcp_tool_call", "web_search", "dynamic_tool_call"}
+    for raw in lines:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        item = event.get("item") or {}
+        if kind and kind.startswith("item.") and isinstance(item, dict):
+            item_kind = item.get("type")
+            if item_kind in forbidden:
+                raise RuntimeError(f"Codex generation-only track emitted tool action: {item_kind}")
+            if kind == "item.completed" and item_kind == "agent_message":
+                value = item.get("text") or ""
+                if value:
+                    chunks.append(value)
+                    if print_stream:
+                        print(value, end="", flush=True)
+        elif kind == "turn.completed":
+            completed = True
+            raw_usage = event.get("usage") or {}
+            usage = {
+                "input_tokens": raw_usage.get("input_tokens", -1),
+                "output_tokens": raw_usage.get("output_tokens", -1),
+                "cache_read_input_tokens": raw_usage.get("cached_input_tokens", 0),
+            }
+        elif kind == "turn.failed":
+            raise RuntimeError(f"Codex turn failed: {event.get('error')}")
+    if not completed:
+        raise RuntimeError("Codex JSON stream ended without turn.completed")
+    if not chunks:
+        raise RuntimeError("Codex turn completed without agent_message")
     return chunks, usage
 
 
