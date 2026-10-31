@@ -87,7 +87,9 @@ ASSET_ROOT_TEMPLATE: str | None = os.environ.get("ASSET_ROOT") or None
 
 ANTHROPIC_API_KEY: str | None = os.environ.get("ANTHROPIC_API_KEY") or None
 # 初值，无跨模型质量数据；首轮 post_compress / pre_flight 实测后校准。
-UTILITY_MODEL: str = os.environ.get("UTILITY_MODEL", "codex-cli").strip() or "codex-cli"
+UTILITY_MODEL: str = os.environ.get("UTILITY_MODEL", "codex-luna").strip() or "codex-luna"
+# 角色基因缺失 model 或旧 skill 找不到角色时的兼容缺省值；集中配置便于迁移。
+ROLE_FALLBACK_MODEL: str = os.environ.get("ROLE_FALLBACK_MODEL", "codex-sol").strip() or "codex-sol"
 
 OBSIDIAN_REST_API_URL: str = os.environ.get(
     "OBSIDIAN_REST_API_URL", "http://127.0.0.1:27123"

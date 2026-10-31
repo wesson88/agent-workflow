@@ -432,3 +432,18 @@ def test_budget_monitor_warns_above_threshold(fake_vault, capsys):
     captured = capsys.readouterr()
     assert "input 估算" in captured.err
     assert "30000" in captured.err
+
+
+def test_budget_monitor_uses_current_scribe_model(fake_vault, monkeypatch):
+    from types import SimpleNamespace
+    from engine.graph.brainstorm import _monitor_next_round_budget
+    import engine.role_loader as role_loader
+
+    seen_models = []
+    monkeypatch.setattr(role_loader, "load_role", lambda _name: SimpleNamespace(model="codex-terra"))
+    monkeypatch.setattr(
+        "engine.token_counter.count_tokens",
+        lambda _text, model_key: seen_models.append(model_key) or 1,
+    )
+    _monitor_next_round_budget(project="testproj", next_round=2, warn_threshold=30000)
+    assert seen_models == ["codex-terra"]

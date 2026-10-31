@@ -28,7 +28,7 @@ from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, START, END
 
-from ..config import project_dir
+from ..config import project_dir, ROLE_FALLBACK_MODEL
 from ..human_gate import has_pending, list_gates
 
 
@@ -307,7 +307,13 @@ def _monitor_next_round_budget(
     try:
         from ..token_counter import count_tokens
         from ..llm import _append_token_audit  # 复用 audit 写入
-    except ImportError as e:
+        from ..role_loader import load_role, RoleNotFound
+        try:
+            model_key = load_role("创意记录员").model
+        except RoleNotFound:
+            # 单元测试/未安装角色基因的环境仍可运行预算预警。
+            model_key = ROLE_FALLBACK_MODEL
+    except Exception as e:
         print(f"[brainstorm] ⚠️ 预算监控降级（{e}）", file=sys.stderr)
         return
 
@@ -326,8 +332,8 @@ def _monitor_next_round_budget(
         if f.is_file():
             try:
                 txt = f.read_text(encoding="utf-8")
-                # 用 cl100k_base 估算（与 scribe 角色 model claude-opus-4-7 对应）
-                total += count_tokens(txt, "claude-opus-4-7")
+                # 使用当前创意记录员模型对应的 tokenizer 估算。
+                total += count_tokens(txt, model_key)
             except (OSError, Exception):
                 continue
 
@@ -346,7 +352,7 @@ def _monitor_next_round_budget(
                     "next_round": next_round,
                     "estimated_input_tokens": total,
                     "threshold": warn_threshold,
-                    "model": "claude-opus-4-7",
+                    "model": model_key,
                 },
             )
         except Exception:

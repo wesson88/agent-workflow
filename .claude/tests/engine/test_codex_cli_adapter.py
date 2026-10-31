@@ -1,6 +1,7 @@
 import json
 import pytest
 
+from engine import llm
 from engine.llm import _codex_disabled_mcp_args, _read_codex_json, get_provider, is_provider_available
 
 
@@ -53,3 +54,33 @@ def test_codex_rejects_mcp_names_that_need_quoting(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     with pytest.raises(RuntimeError, match="Unsupported Codex MCP server name"):
         _codex_disabled_mcp_args()
+
+
+def test_codex_model_and_reasoning_effort_use_cli_config_override():
+    args = llm._cli_model_args({
+        "model": "gpt-6-luna", "effort": "medium", "output_format": "codex-json"
+    })
+    assert args == ["--model", "gpt-6-luna", "-c", 'model_reasoning_effort="medium"']
+
+
+def test_other_cli_keeps_existing_effort_flag():
+    assert llm._cli_model_args({"model": "claude-sonnet-5", "effort": "high", "output_format": "stream-json"}) == [
+        "--model", "claude-sonnet-5", "--effort", "high"
+    ]
+
+
+@pytest.mark.parametrize("key,model", [
+    ("codex-luna", "gpt-6-luna"),
+    ("codex-terra", "gpt-6.1-terra"),
+    ("codex-sol", "gpt-6.1-sol"),
+    ("codex-sol-high", "gpt-6.1-sol"),
+    ("codex-astra", "gpt-6-astra"),
+])
+def test_codex_role_provider_aliases_are_registered(key, model):
+    provider = get_provider(key)
+    assert provider["mode"] == "cli_only"
+    assert provider["cli"]["model"] == model
+    assert provider["cli"]["output_format"] == "codex-json"
+    # Every alias must preserve the read-only, tool-disabled Codex invocation.
+    assert provider["cli"]["extra_args"] == get_provider("codex-cli")["cli"]["extra_args"]
+    assert provider["cli"]["use_system_prompt_flag"] is False

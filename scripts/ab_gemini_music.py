@@ -1,8 +1,8 @@
 """
 ab_gemini_music.py — Gemini flash vs pro 在 music 域作词/作曲上的 A/B 对比
 
-目的：决定 music 域作词、作曲角色基因 model 字段换 gemini 时选哪档。
-       gemini-2.5-flash (FREE key) vs gemini-2.5-pro (PAID key)
+目的：比较当前 provider 配置中的 Gemini Flash 与 Pro 对作词、作曲的影响。
+       provider key 取 .env 的 GEMINI_AB_FLASH_PROVIDER / GEMINI_AB_PRO_PROVIDER。
        人工对比 4 份输出后定。
 
 测试项目：成为父亲那年（vault：10-项目/music/成为父亲那年/）
@@ -49,12 +49,31 @@ LYRIC_INSTR = PROJECT_ROOT / "指令" / "给作词.md"
 COMPOSE_INSTR = PROJECT_ROOT / "指令" / "给作曲.md"
 EXISTING_LYRIC = PROJECT_ROOT / "词作.md"
 
-MODELS = {
-    "flash": {"name": "gemini-2.5-flash", "key_env": "GEMINI_API_KEY_FREE"},
-    "pro":   {"name": "gemini-2.5-pro",   "key_env": "GEMINI_API_KEY_PAID"},
-}
+MODELS: dict[str, dict] = {}
 
-BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+def load_ab_models() -> dict[str, dict]:
+    """Resolve A/B provider keys through the shared engine registry."""
+    sys.path.insert(0, str(REPO / ".claude"))
+    from engine.llm import get_provider
+
+    result = {}
+    for variant, env_name in (
+        ("flash", "GEMINI_AB_FLASH_PROVIDER"),
+        ("pro", "GEMINI_AB_PRO_PROVIDER"),
+    ):
+        provider_key = os.environ.get(env_name, "").strip()
+        if not provider_key:
+            raise ValueError(f".env 缺 {env_name}；填写 llm_providers.yaml 中的 Gemini provider key")
+        api = get_provider(provider_key).get("api") or {}
+        if api.get("kind") != "openai_compat" or not api.get("model", "").startswith("gemini-"):
+            raise ValueError(f"{env_name} 必须指向 Gemini OpenAI 兼容 API provider: {provider_key}")
+        result[variant] = {
+            "name": api["model"],
+            "key_env": api["key_env"],
+            "base_url": api["base_url"],
+        }
+    return result
 
 
 def read(p: Path) -> str:
@@ -100,7 +119,7 @@ def call(model_cfg: dict, system: str, user: str, max_tokens: int) -> dict:
     """调用 Gemini，返回 {text, prompt_tokens, completion_tokens, total_tokens, latency_ms}。"""
     from openai import OpenAI
     key = os.environ[model_cfg["key_env"]]
-    client = OpenAI(api_key=key, base_url=BASE_URL)
+    client = OpenAI(api_key=key, base_url=model_cfg["base_url"])
     t0 = time.perf_counter()
     resp = client.chat.completions.create(
         model=model_cfg["name"],
@@ -197,9 +216,15 @@ def write_report(results: list[dict]) -> Path:
 
 def main() -> int:
     load_dotenv(REPO / ".env")
-    for k in ("GEMINI_API_KEY_FREE", "GEMINI_API_KEY_PAID"):
-        if not os.environ.get(k):
-            print(f"[error] .env 缺 {k}", file=sys.stderr)
+    try:
+        MODELS.update(load_ab_models())
+    except (KeyError, ValueError) as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+    for model_cfg in MODELS.values():
+        key_env = model_cfg["key_env"]
+        if not os.environ.get(key_env):
+            print(f"[error] .env 缺 {key_env}", file=sys.stderr)
             return 1
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

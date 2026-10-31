@@ -4,8 +4,8 @@ graph/nodes.py — LangGraph node 工厂
 Phase 4a：单角色 node = subprocess 包装 `.claude/skills/<role>/main.py`
 Phase 4b：新增 make_discussion_node = 多角色讨论 subgraph 包装
 Phase 5 新增：
-  - post_compress：角色执行完成后，用 haiku 压缩指定输出文件（层三）
-  - pre_flight：执行前用 haiku 评估任务复杂度，决定是否拆分为 sub_tasks（层四）
+  - post_compress：角色执行完成后，用可配置工具模型压缩指定输出文件（层三）
+  - pre_flight：执行前用可配置工具模型评估任务复杂度，决定是否拆分为 sub_tasks（层四）
 每个 node 接收 ProjectState，返回 patch dict（LangGraph 自动 merge）。
 """
 
@@ -117,7 +117,7 @@ _PREFLIGHT_SYSTEM = """你是任务复杂度评估专家。
 """
 
 
-def _call_haiku(system: str, user: str) -> str:
+def _call_utility_model(system: str, user: str) -> str:
     """调用可配置工具模型。走 engine.llm 统一路由。"""
     from ..config import UTILITY_MODEL
     from ..llm import call_llm
@@ -130,7 +130,7 @@ def _run_post_compress(
     outputs: list[str],
     target_chars: int = 8000,
 ) -> None:
-    """层三：对指定输出文件调用 haiku 压缩，生成 <name>-压缩.md 副本。
+    """层三：对指定输出文件调用工具模型压缩，生成 <name>-压缩.md 副本。
     原文件保留供人工审阅，压缩版供下游角色读取。
     """
     from ..config import VAULT_ROOT
@@ -159,9 +159,9 @@ def _run_post_compress(
                 continue
             print(f"[post_compress] 🗜️ 压缩 {full_path.name} ({original_len}chars → 目标≤{target_chars}chars)...")
             try:
-                compressed = _call_haiku(system, original)
+                compressed = _call_utility_model(system, original)
             except Exception as e:
-                print(f"[post_compress] ❌ haiku 调用失败：{e}", file=sys.stderr)
+                print(f"[post_compress] ❌ 工具模型调用失败：{e}", file=sys.stderr)
                 continue
             compressed_path = full_path.with_name(full_path.stem + "-压缩" + full_path.suffix)
             compressed_path.write_text(compressed, encoding="utf-8")
@@ -177,7 +177,7 @@ def _run_pre_flight(
     model_key: str | None = None,
     split_limit_tokens: int | None = None,
 ) -> list[dict] | None:
-    """层四 Pre-flight：用 haiku 评估任务复杂度，返回 sub_tasks 列表或 None（不需拆分）。
+    """层四 Pre-flight：用工具模型评估任务复杂度，返回 sub_tasks 列表或 None（不需拆分）。
 
     split_limit_tokens 优先于 split_limit_lines：
       - 传入 split_limit_tokens → 用 token_counter 精确估算是否需要拆分
@@ -211,7 +211,7 @@ def _run_pre_flight(
         print(f"[pre_flight] 🔍 评估任务复杂度（{full_path.name}, {len(content)} chars）...")
 
     try:
-        raw = _call_haiku(_PREFLIGHT_SYSTEM, f"项目：{project}\n任务：{task}\n\n{content}")
+        raw = _call_utility_model(_PREFLIGHT_SYSTEM, f"项目：{project}\n任务：{task}\n\n{content}")
         start = raw.find("{")
         end = raw.rfind("}") + 1
         result = json.loads(raw[start:end])
@@ -229,7 +229,7 @@ def _run_pre_flight(
 
     # 程序判断：token 感知优先，行数兜底
     if split_limit_tokens is not None:
-        # 用 haiku 预估的行数换算 token（1 行 ≈ 15 tokens，保守估算）
+        # 用工具模型预估的行数换算 token（1 行 ≈ 15 tokens，保守估算）
         est_output_tokens = total * 15
         needs_split = est_output_tokens > split_limit_tokens or any(
             f.get("est_lines", 0) * 15 > split_limit_tokens * 0.6 for f in files
@@ -299,7 +299,7 @@ def make_role_node(
     halt_on_failure 由工作流模板决定，闭包单获。
 
     post_compress（层三）: {
-        "model": "codex-cli",  # 示例；实际由 UTILITY_MODEL 决定
+        "model": "<UTILITY_MODEL>",  # 示例；实际由 UTILITY_MODEL 决定
         "target_chars": 8000,
         "outputs": ["10-项目/{project}/指令/给后端.md"]
     }

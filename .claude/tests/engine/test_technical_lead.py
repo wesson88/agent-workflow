@@ -426,6 +426,7 @@ class TestSplitOversizedDetail:
         self._index(proj_dir)
 
         def fake_llm(sp, prompt, model=None, max_tokens=None, **kwargs):
+            assert model == "codex-luna"
             return (
                 "<!-- FILE: 10-项目/sp/指令/给后端-T01a.md -->\n"
                 "---\ntask_id: T01a\nestimate_hours: 2\n---\n# 子任务 A\n内容\n<!-- /FILE -->\n"
@@ -1113,3 +1114,20 @@ class TestPlanPromptNoIndexMdBody:
         assert idx.exists()
         # 标题被原样保留，但因为是模板渲染，markdown 表格里 ASCII 引号也无害
         assert '处理"边界"场景' in idx.read_text(encoding="utf-8")
+
+
+def test_technical_lead_missing_role_falls_back_to_codex(monkeypatch):
+    def missing_role(_name):
+        raise tl_mod.RoleNotFound("missing")
+
+    monkeypatch.setattr(tl_mod, "load_role", missing_role)
+    assert tl_mod._resolve_role_model() == "codex-sol"
+
+
+def test_technical_lead_missing_role_uses_configurable_fallback(monkeypatch):
+    def missing_role(_name):
+        raise tl_mod.RoleNotFound("missing")
+
+    monkeypatch.setattr(tl_mod, "load_role", missing_role)
+    monkeypatch.setattr(tl_mod, "ROLE_FALLBACK_MODEL", "codex-terra")
+    assert tl_mod._resolve_role_model() == "codex-terra"

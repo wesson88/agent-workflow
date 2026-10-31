@@ -24,7 +24,7 @@
 #   cli:
 #     path:                          CLI 可执行文件名（PATH 中查找）
 #     model:                         传给 CLI 的 --model 参数值
-#     effort:                        可选；传给 CLI 的 --effort 参数值
+#     effort:                        可选；Codex 用 -c model_reasoning_effort，其他 CLI 用 --effort
 #     output_format:                 stream-json / codex-json / plain
 #     extra_args:                    其他必传 flag
 #     use_system_prompt_flag:        true → 用 --system-prompt 替换默认；
@@ -38,7 +38,7 @@ codex-cli:
   mode: cli_only
   tokenizer: o200k_base
   context_window: 200000
-  cli:
+  cli: &codex_base_cli
     path: codex.cmd
     output_format: codex-json
     extra_args:
@@ -57,6 +57,54 @@ codex-cli:
       - --sandbox
       - read-only
     use_system_prompt_flag: false
+
+# Per-role Codex models. Each alias inherits the same read-only tool restrictions.
+# Context audit values: Sol 500k from OpenAI model docs; others initially 200k
+# as a conservative guardrail, pending project telemetry. These are not quotas.
+codex-luna:
+  mode: cli_only
+  tokenizer: o200k_base
+  context_window: 200000
+  cli:
+    <<: *codex_base_cli
+    model: gpt-6-luna
+    effort: medium
+
+codex-terra:
+  mode: cli_only
+  tokenizer: o200k_base
+  context_window: 200000
+  cli:
+    <<: *codex_base_cli
+    model: gpt-6.1-terra
+    effort: medium
+
+codex-sol:
+  mode: cli_only
+  tokenizer: o200k_base
+  context_window: 500000
+  cli:
+    <<: *codex_base_cli
+    model: gpt-6.1-sol
+    effort: medium
+
+codex-sol-high:
+  mode: cli_only
+  tokenizer: o200k_base
+  context_window: 500000
+  cli:
+    <<: *codex_base_cli
+    model: gpt-6.1-sol
+    effort: high
+
+codex-astra:
+  mode: cli_only
+  tokenizer: o200k_base
+  context_window: 200000
+  cli:
+    <<: *codex_base_cli
+    model: gpt-6-astra
+    effort: medium
 
 # ── Claude（历史兼容）─────────────────────────────────────
 # Fable 5 / Sonnet 5 说明（2026-07 查证）：

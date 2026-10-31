@@ -826,6 +826,19 @@ def _codex_disabled_mcp_args() -> list[str]:
     return args
 
 
+def _cli_model_args(cli_cfg: dict) -> list[str]:
+    """Build model flags for the configured CLI dialect."""
+    args: list[str] = []
+    if cli_cfg.get("model"):
+        args.extend(["--model", cli_cfg["model"]])
+    if cli_cfg.get("effort"):
+        if cli_cfg.get("output_format") == "codex-json":
+            args.extend(["-c", f'model_reasoning_effort="{cli_cfg["effort"]}"'])
+        else:
+            args.extend(["--effort", cli_cfg["effort"]])
+    return args
+
+
 def _call_cli(
     cli_cfg: dict, system_prompt: str, user_prompt: str,
     print_stream: bool,
@@ -860,10 +873,7 @@ def _call_cli(
     if cli_cfg.get("output_format") == "codex-json":
         cmd.extend(_codex_disabled_mcp_args())
 
-    if cli_cfg.get("model"):
-        cmd.extend(["--model", cli_cfg["model"]])
-    if cli_cfg.get("effort"):
-        cmd.extend(["--effort", cli_cfg["effort"]])
+    cmd.extend(_cli_model_args(cli_cfg))
 
     use_flag = bool(cli_cfg.get("use_system_prompt_flag", False))
     if use_flag and len(system_prompt) <= _CMD_ARG_LIMIT:

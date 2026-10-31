@@ -21,8 +21,7 @@ Gemini 精度说明：
 用法：
     from engine.token_counter import count_tokens, estimate_tokens
 
-    n = count_tokens("你好 world", "claude-sonnet-4-6")  # tiktoken 精确
-    n = count_tokens("你好 world", "gemini-2.5-pro")     # chars 估算
+    n = count_tokens("你好 world", role.model)  # 按角色 provider 的 tokenizer 计数
     n = estimate_tokens("你好 world")                     # 通用快速估算
 """
 
@@ -88,7 +87,7 @@ def count_tokens(text: str, model_key: str) -> int:
 
     Args:
         text:      要计数的文本
-        model_key: providers YAML 中的 key（如 'claude-sonnet-4-6'）
+        model_key: providers YAML 中的 key（通常取 role.model）
 
     Returns:
         估算的 token 数（int）
