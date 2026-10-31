@@ -299,7 +299,7 @@ def make_role_node(
     halt_on_failure 由工作流模板决定，闭包单获。
 
     post_compress（层三）: {
-        "model": "codex-cli",  # 示例；实际由 UTILITY_MODEL 决定
+        "model": "codex-luna",  # 示例；实际由 UTILITY_MODEL 决定
         "target_chars": 8000,
         "outputs": ["10-项目/{project}/指令/给后端.md"]
     }

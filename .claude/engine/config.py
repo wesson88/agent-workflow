@@ -87,7 +87,7 @@ ASSET_ROOT_TEMPLATE: str | None = os.environ.get("ASSET_ROOT") or None
 
 ANTHROPIC_API_KEY: str | None = os.environ.get("ANTHROPIC_API_KEY") or None
 # 初值，无跨模型质量数据；首轮 post_compress / pre_flight 实测后校准。
-UTILITY_MODEL: str = os.environ.get("UTILITY_MODEL", "codex-cli").strip() or "codex-cli"
+UTILITY_MODEL: str = os.environ.get("UTILITY_MODEL", "codex-luna").strip() or "codex-luna"
 
 OBSIDIAN_REST_API_URL: str = os.environ.get(
     "OBSIDIAN_REST_API_URL", "http://127.0.0.1:27123"
