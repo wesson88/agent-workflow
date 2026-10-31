@@ -11,7 +11,7 @@ Phase 5 重构：本文件已按职责拆分为四个子模块：
 
 仍在本模块的核心功能：
   - parse_args / resolve_project（CLI）
-  - call_claude（Anthropic API 调用）
+  - call_claude（历史兼容别名；按角色 provider 调用）
   - check_size_limit / compress_to_limit / enforce_output_limits（层一体积控制）
 """
 
@@ -37,7 +37,7 @@ except (AttributeError, ValueError):
 # 让 main.py（通过 sys.path.insert 把 skills/ 目录加入路径后）能 import engine
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine import load_role, RoleNotFound  # noqa: E402
-from engine.config import PROJECT_ROOT  # noqa: E402
+from engine.config import PROJECT_ROOT, ROLE_FALLBACK_MODEL  # noqa: E402
 from engine.llm import call_llm as _llm_call_llm  # noqa: E402
 
 
@@ -1059,7 +1059,6 @@ from engine.audit import append_audit, utc_now  # noqa: E402, F401
 
 # ── LLM API 调用（按角色配置路由）──────────────────────────────────────────────
 _DEFAULT_MAX_TOKENS = 4096
-_DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
 def call_llm_for_role(
@@ -1084,7 +1083,7 @@ def call_llm_for_role(
         input_budget = role.budget_input_tokens
     except RoleNotFound:
         max_tokens = _DEFAULT_MAX_TOKENS
-        model = _DEFAULT_MODEL
+        model = ROLE_FALLBACK_MODEL
         display_name = role_name_or_alias
 
     budget_note = f", input_budget={input_budget}" if input_budget else ""
@@ -1143,12 +1142,13 @@ def compress_to_limit(
     *,
     max_retries: int = 2,
 ) -> str:
-    """调用 haiku 将 content 重写至 ≤ limit_chars；重试耗尽则硬截断。
+    """调用工具模型将 content 重写至 ≤ limit_chars；重试耗尽则硬截断。
 
     单一职责：仅做压缩/截断，不做判断（判断由调用方或 check_size_limit 负责）。
     返回合规的内容字符串（硬截断时附加警告注释）。
     """
     from engine.llm import call_llm
+    from engine.config import UTILITY_MODEL
 
     system = _ENFORCE_SYSTEM.format(limit_chars=limit_chars)
     current = content
@@ -1158,14 +1158,14 @@ def compress_to_limit(
             rewritten = call_llm(
                 system,
                 f"请将以下文档重写为 ≤ {limit_chars} 字符的版本：\n\n{current}",
-                model="claude-haiku-4-5",
+                model=UTILITY_MODEL,
                 max_tokens=4096,
                 print_stream=False,
                 role_name="(enforce-limit)",
             )
         except Exception as e:
             print(
-                f"[compress_to_limit] ❌ haiku 重写失败（尝试 {attempt}/{max_retries}）：{e}",
+                f"[compress_to_limit] ❌ 工具模型重写失败（尝试 {attempt}/{max_retries}）：{e}",
                 file=sys.stderr,
             )
             break
@@ -1203,7 +1203,7 @@ def enforce_output_limits(
     *,
     max_retries: int = 2,
 ) -> str:
-    """层一强制执行：若内容超出 limit_chars，调用 haiku 重写直到合规。
+    """层一强制执行：若内容超出 limit_chars，调用工具模型重写直到合规。
     § 15 层一增强：把"约束写在 prompt 里靠模型自觉"升级为"程序检测 + 强制压缩"。
 
     组合调用：check_size_limit（判断）+ compress_to_limit（重写/截断）。
@@ -1214,7 +1214,7 @@ def enforce_output_limits(
 
     print(
         f"[enforce_output_limits] ⚠️ {filename} 超限 "
-        f"({len(content)} > {limit_chars} chars)，触发 haiku 强制重写...",
+        f"({len(content)} > {limit_chars} chars)，触发工具模型强制重写...",
         file=sys.stderr,
     )
     return compress_to_limit(

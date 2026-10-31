@@ -42,9 +42,9 @@ class WorkflowStep:
     type=discussion-loop: 多角色循环对话（已被 type=discussion 取代）
 
     Phase 5 新增字段（层三/层四）：
-      post_compress: 角色完成后压缩指定输出文件（层三 haiku 钩子）
+      post_compress: 角色完成后压缩指定输出文件（层三工具模型钩子）
         格式: {target_chars: 8000, outputs: ["10-项目/{project}/指令/给后端.md"]}
-      pre_flight: 执行前用 haiku 评估复杂度，决定是否拆分（层四）
+      pre_flight: 执行前用工具模型评估复杂度，决定是否拆分（层四）
         格式: {instruction_file: "10-项目/{project}/指令/给后端.md", split_limit_lines: 400}
       auto_split: true 时自动触发 pre_flight（需同时提供 pre_flight 配置）
     """
@@ -66,7 +66,7 @@ class WorkflowStep:
     readiness_threshold: int = 85              # prd_readiness 触达即 ready
     context_warn_tokens: int = 30000           # 下轮 input 估算超此值打 WARN
 
-    # 层三：post_compress haiku 钩子
+    # 层三：post_compress 工具模型钩子
     post_compress: dict | None = None
 
     # 层四：pre_flight 复杂度评估 + 自动拆分

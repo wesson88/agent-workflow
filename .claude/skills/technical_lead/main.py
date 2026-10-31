@@ -39,6 +39,7 @@ from engine import (
     load_role, RoleNotFound,
 )
 from engine.llm import call_llm
+from engine.config import UTILITY_MODEL, ROLE_FALLBACK_MODEL
 from engine.wikilink import parse_wikilinks
 
 ROLE = "技术主管"
@@ -152,7 +153,7 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)
 # ── 二次拆分阈值 ────────────────────────────────────────────────────────────
 _DETAIL_SPLIT_CHARS = 8_000   # 单 detail 文件正文超此体积触发二次拆分
 _DETAIL_SPLIT_HOURS = 4       # estimate_hours 超此阈值触发二次拆分
-_SPLIT_MODEL = "claude-haiku-4-5"  # 二次拆分用轻量模型，节约成本
+_SPLIT_MODEL = UTILITY_MODEL  # 二次拆分走可配置轻量工具模型
 
 
 def _extract_json_block(text: str) -> str:
@@ -193,7 +194,7 @@ def _resolve_role_model() -> str:
     try:
         return load_role(ROLE).model
     except RoleNotFound:
-        return "claude-sonnet-4-6"
+        return ROLE_FALLBACK_MODEL
 
 
 def _split_oversized_detail(

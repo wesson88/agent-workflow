@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .config import VAULT_ROOT, role_genes_dir
+from .config import VAULT_ROOT, ROLE_FALLBACK_MODEL, role_genes_dir
 from .obsidian_io import read_note, split_frontmatter
 
 
@@ -582,7 +582,7 @@ def _build_role(
         domain=str(fm.get("domain", "")),
         skills=_seq(fm.get("skills")),
         style=str(fm.get("style", "")),
-        model=str(fm.get("model", "claude-sonnet-4-6")),
+        model=str(fm.get("model", ROLE_FALLBACK_MODEL)),
         max_tokens=int(fm.get("max_tokens", 4096)),
         tools=_seq(fm.get("tools")),
         version=str(fm.get("version", "0.0.0")),
