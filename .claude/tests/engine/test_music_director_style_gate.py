@@ -134,3 +134,98 @@ class TestFinalStyleGate:
 
         assert director._call_and_write("s", "u", "t", "p", _DECLARED, audit_extras={}) == 0
         assert "final_style_char_count" not in director._state["audit"][-1]
+
+
+class TestFinalLyricsFormatGate:
+    def test_汇编终稿格式错误判失败且文件留盘(self, director, monkeypatch):
+        monkeypatch.setattr(
+            director, "call_claude",
+            lambda s, u, r: _canned("10-项目/music/{project}/final-Suno-prompt.md", "pop"))
+        monkeypatch.setattr(
+            director, "_validate_final_lyrics",
+            lambda outputs, project: {"valid": False, "issues": [{"code": "empty_vocal_section"}]},
+            raising=False)
+
+        rc = director._call_and_write(
+            "s", "u", "t", "p", _DECLARED, audit_extras={"mode": "aggregation"})
+
+        assert rc == 1
+        assert any("final-Suno-prompt.md" in k for k in director._state["written"])
+        audit = director._state["audit"][-1]
+        assert audit["result"] == "failed"
+        assert audit["error"] == "lyrics_format_invalid"
+        assert audit["final_lyrics_format_issues"] == [{"code": "empty_vocal_section"}]
+        assert "success" not in director._state["status"]
+
+    def test_汇编终稿格式合格继续(self, director, monkeypatch):
+        monkeypatch.setattr(
+            director, "call_claude",
+            lambda s, u, r: _canned("10-项目/music/{project}/final-Suno-prompt.md", "pop"))
+        monkeypatch.setattr(
+            director, "_validate_final_lyrics",
+            lambda outputs, project: {"valid": True, "issues": []},
+            raising=False)
+
+        rc = director._call_and_write(
+            "s", "u", "t", "p", _DECLARED, audit_extras={"mode": "aggregation"})
+
+        assert rc == 0
+        assert director._state["audit"][-1]["final_lyrics_format_valid"] is True
+
+    def test_汇编缺终稿不能报告成功(self, director, monkeypatch):
+        monkeypatch.setattr(
+            director, "call_claude",
+            lambda s, u, r: ("<!-- FILE: 10-项目/music/{project}/反馈分诊.md -->\n"
+                             "# 反馈分诊\n<!-- /FILE -->\n"))
+        declared = _DECLARED + ["10-项目/music/p/反馈分诊.md"]
+
+        rc = director._call_and_write(
+            "s", "u", "t", "p", declared, audit_extras={"mode": "aggregation"})
+
+        assert rc == 1
+        audit = director._state["audit"][-1]
+        assert audit["error"] == "lyrics_format_invalid"
+        assert audit["final_lyrics_format_issues"] == [{"code": "missing_final_prompt"}]
+        assert "success" not in director._state["status"]
+
+    def test_非汇编模式不进入终稿格式闸门(self, director, monkeypatch):
+        monkeypatch.setattr(
+            director, "call_claude",
+            lambda s, u, r: _canned("10-项目/music/{project}/Suno-prompt.md", "pop"))
+        monkeypatch.setattr(
+            director, "_validate_final_lyrics",
+            lambda outputs, project: (_ for _ in ()).throw(AssertionError("unexpected gate")),
+            raising=False)
+
+        rc = director._call_and_write("s", "u", "t", "p", _DECLARED, audit_extras={})
+
+        assert rc == 0
+        assert "final_lyrics_format_valid" not in director._state["audit"][-1]
+
+
+class TestEffectiveMusicPolicy:
+    def test_project_policy_controls_style_gate_and_audit(self, director, monkeypatch):
+        snapshot = {"schema_version": "1.0.0", "values": {"style_hard_chars":
+                    {"value": 800, "basis": "test", "source": "tool_profile"}}}
+        monkeypatch.setattr(director, "call_claude", lambda s, u, r:
+                            _canned("10-项目/music/{project}/final-Suno-prompt.md", "x" * 801))
+        rc = director._call_and_write("s", "u", "t", "p", _DECLARED,
+                                      audit_extras={"effective_policy": snapshot})
+        assert rc == 1
+        audit = director._state["audit"][-1]
+        assert audit["error"] == "style_oversized"
+        assert audit["effective_policy"] == snapshot
+
+
+def test_旧版vault缺解析器时引擎兼容既有项目上限(monkeypatch, tmp_path):
+    from engine import music_policy_bridge as bridge
+    brief = tmp_path / "10-项目/music/p/inputs/创作简报.md"
+    brief.parent.mkdir(parents=True)
+    brief.write_text("## 9. 工具约束\n- 模型档位：v6-wild\n- 时长上限秒：300\n", encoding="utf-8")
+    monkeypatch.setattr(bridge, "VAULT_ROOT", tmp_path)
+    snapshot = bridge.resolve_project_music_policy("p")
+    assert snapshot["schema_version"] == "legacy-vault-compat"
+    assert snapshot["model"] == "v6-wild"
+    assert snapshot["values"]["max_duration_s"]["value"] == 300
+    assert snapshot["values"]["style_hard_chars"]["value"] == 1000
+    assert "兼容状态" in bridge.format_music_policy(snapshot)

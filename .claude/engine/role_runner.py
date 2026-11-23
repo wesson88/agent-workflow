@@ -57,6 +57,7 @@ from common import (  # noqa: E402
 
 from .ability_loader import assemble_user_context  # noqa: E402
 from .media import MediaUnavailable, build_attachments, collect_media  # noqa: E402
+from .music_policy_bridge import resolve_project_music_policy, format_music_policy
 
 # music 扇出 dormant 约定（原 music_mastering_engineer/main.py，收编为通用规则）
 #
@@ -128,20 +129,15 @@ def _detect_dormant(instruction_path: Path | None) -> bool:
 # Suno Style 段实测（原 music_composer/main.py post-write 兜底，随 CLI 壳瘦身
 # 收编为通用规则；凌晨四点 2026-07-25 实跑证实 runner 路径曾丢失该 audit 字段）。
 # Style 段约定 = Suno-prompt.md 首个 ``` 三反引号代码块。
-# 依据：Suno v4.5 Style 字段按 JavaScript String.length 计数（= Python len()），
-# 硬上限 1000；LLM 自估不可靠（W5 L2-B 实测自报 1090 实际 1507，偏差 +38%），
-# 必须工程层实测落 audit（[[Style字符数偏差-LLM自估vs工程层兜底]]）。
-#
-# `_SUNO_STYLE_HARD_LIMIT` 是这个 1000 的**唯一出处**（2026-09-03 收敛）。此前它
-# 在三处各写一遍：本常量、`skills/music_director/main.py:308` 的字面量 1000、
-# 以及规则文档 `00-系统/规则/music/Suno-UI-字符上限.md`（该文档 0 条 rule_refs
-# 指向、谁都没读过）。改一处漏两处的形状，先把代码这两处并了。
+# LLM 自估不可靠；必须实测落 audit。生效上限由项目音乐参数快照提供。
+# `_SUNO_STYLE_HARD_LIMIT` 仅为既有测试的兼容别名，不参与运行时判断。
 #
 # 开围栏锚**行首**（2026-10-07）：原正则对全文 search，正文里的行内 ``` 也算开围栏。
 # 实测 `对我说好/final-Suno-prompt.md` §1 一句「不要带上 ``` 本身」被当成起点，
 # 一路量到 §2 代码块开头 = 1491，真实 Style 579 —— 终稿硬闸门误判失败。
 _STYLE_BLOCK_RE = re.compile(r"^```[^\n]*\n(.*?)\n```", re.DOTALL | re.MULTILINE)
-_SUNO_STYLE_HARD_LIMIT = 1000
+# Compatibility alias for older tests; runtime gates resolve the project snapshot.
+_SUNO_STYLE_HARD_LIMIT = 1000  # 旧测试兼容别名；运行时读取项目快照
 
 # 「算 Suno prompt 产物」的判据：文件名以此结尾。
 # 覆盖 作曲 的 `Suno-prompt.md` 与 音乐总监 的 `final-Suno-prompt.md`；
@@ -828,6 +824,11 @@ def run_role(
     if domain:
         print(f"[{role.name}] 域 adapter：{ability_hints['domain_adapter']}")
 
+    music_policy_snapshot = None
+    if getattr(role, "domain", None) == "music" or any(Path(r).name == "Suno-prompt.md" for r in output_rels):
+        music_policy_snapshot = resolve_project_music_policy(project)
+        context += "\n\n" + format_music_policy(music_policy_snapshot)
+
     user_prompt = _build_user_prompt(
         role, project, task, context, output_rels, is_dormant,
         fanout_dormant=fanout_dormant,
@@ -921,12 +922,13 @@ def run_role(
                 file=sys.stderr,
             )
         style_char_count = _measure_suno_style_chars(output_files)
+        style_limit = music_policy_snapshot["values"]["style_hard_chars"]["value"]
         style_oversized = (
             style_char_count is not None
-            and style_char_count > _SUNO_STYLE_HARD_LIMIT
+            and style_char_count > style_limit
         )
         if style_char_count is not None:
-            marker = (f"⚠️ 超 {_SUNO_STYLE_HARD_LIMIT}" if style_oversized else "✅")
+            marker = (f"⚠️ 超 {style_limit}" if style_oversized else "✅")
             print(
                 f"[{role.name}] Suno Style 段字符数（Python len()）: "
                 f"{style_char_count} {marker}"
@@ -946,6 +948,7 @@ def run_role(
             "has_suno_prompt": has_suno_prompt,
             "style_char_count": style_char_count,
             "style_oversized": style_oversized,
+            "effective_policy": music_policy_snapshot,
         }
 
     set_role_status(role.name, status="success", reset_counters=True)
@@ -958,6 +961,7 @@ def run_role(
         "frontmatter_problems": fm_problems,
         # 空列表也写：审计里区分「没写 CALL 块」和「字段压根不存在的旧记录」
         "capability_calls": capability_calls,
+        **({"effective_policy": music_policy_snapshot} if music_policy_snapshot else {}),
         **suno_audit,
     })
     print(

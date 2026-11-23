@@ -30,6 +30,7 @@ CLI：
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -44,17 +45,15 @@ from common import (
 )
 from engine import (
     set_role_status, role_is_blocked,
-    resolve_path,
+    resolve_path, VAULT_ROOT,
 )
 from engine.role_loader import load_role
+from engine.music_policy_bridge import resolve_project_music_policy, format_music_policy
 
 ROLE = "音乐总监"
 
-# Style 段约定与 1000 硬上限统一从 role_runner 取（2026-09-03）。
-# 此前这里有一份 `_STYLE_BLOCK_RE` 副本 + 字面量 `1000`，与 role_runner 的
-# `_SUNO_STYLE_HARD_LIMIT` 各写各的；再加上规则文档
-# `00-系统/规则/music/Suno-UI-字符上限.md`（0 条 rule_refs 指向、谁都没读过），
-# 同一个数在三处存在。改一处漏两处的形状，先把代码这两处并了。
+# Style 测量函数由 role_runner 复用；上限由本次项目音乐参数快照提供。
+# 旧常量仅用于历史测试构造边界样本，不作为当前判据。
 from engine.role_runner import (  # noqa: E402
     _SUNO_STYLE_HARD_LIMIT, is_suno_prompt_output, measure_style_chars,
     partition_declared_outputs, report_rejected_outputs,
@@ -96,6 +95,29 @@ def _measure_style_chars(output_files: dict[str, str]) -> tuple[str | None, int 
             continue
         return rel_path, measure_style_chars(content)
     return None, None
+
+
+def _validate_final_lyrics(output_files: dict[str, str], project: str) -> dict:
+    """Use the vault's sole Lyrics contract parser for the written final prompt."""
+    for rel_path in output_files:
+        if Path(rel_path).name != _BLOCKING_ARTIFACT:
+            continue
+        script = (VAULT_ROOT / "00-系统" / "可执行技能" / "lyrics-audit"
+                  / "scripts" / "lyrics_audit.py")
+        if not script.is_file():
+            return {"valid": False, "issues": [{"code": "validator_missing"}]}
+        try:
+            spec = importlib.util.spec_from_file_location("music_lyrics_contract", script)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("cannot load Lyrics validator")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            target = resolve_path(rel_path, project)
+            return module.validate_prompt_lyrics(str(target))
+        except Exception as exc:
+            return {"valid": False, "issues": [{"code": "validator_error",
+                                                "detail": type(exc).__name__}]}
+    return {"valid": False, "issues": [{"code": "missing_final_prompt"}]}
 
 
 def _detect_aggregation_mode(project: str) -> tuple[bool, list[Path]]:
@@ -191,6 +213,8 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
     # 与已注入的参考资料不参与召回**。两条通道都扫这个，详见
     # ability_loader.assemble_user_context 同位注释的实测。
     project_text = context
+    policy_snapshot = resolve_project_music_policy(project)
+    context += "\n\n" + format_music_policy(policy_snapshot)
 
     rule_block, source_hint = load_rule_block(role_def.rule_refs)
     print(f"[{ROLE}] rule_refs 注入：{source_hint}")
@@ -229,7 +253,7 @@ def _run_first_pass(project: str, task: str, role_def) -> int:
 
     return _call_and_write(
         system_prompt, user_prompt, task, project, output_rels,
-        audit_extras={"mode": "first_pass"},
+        audit_extras={"mode": "first_pass", "effective_policy": policy_snapshot},
     )
 
 
@@ -252,6 +276,8 @@ def _run_aggregation(
     system_prompt = build_system_prompt(ROLE, project=project)
     context = read_input_files(aggregation_inputs)
     project_text = context   # 同 first_pass：两条通道都只扫项目侧
+    policy_snapshot = resolve_project_music_policy(project)
+    context += "\n\n" + format_music_policy(policy_snapshot)
 
     rule_block, source_hint = load_rule_block(role_def.rule_refs)
     print(f"[{ROLE}] rule_refs 注入（汇编模式）：{source_hint}")
@@ -294,11 +320,11 @@ def _run_aggregation(
         "   - 混音方向 → 改 Style（仅吸收非数字化方向词，如 mid-forward / round 等）\n"
         "   - 母带响度方向 → 改 Style（同上，仅方向词）\n"
         "3. **补丁声明「无需 patch」者直接跳过**\n"
-        "4. **Style 段硬上限 1000 char**（Suno v4.5 JS String.length = Python len()）：\n"
-        "   - 合入后用内部数一遍，超 1000 char 必须按优先级裁剪："
+        f"4. **Style 段硬上限 {policy_snapshot['values']['style_hard_chars']['value']} char**（按本次工具档案）：\n"
+        f"   - 合入后用内部数一遍，超 {policy_snapshot['values']['style_hard_chars']['value']} char 必须按优先级裁剪："
         "Vocal + No-list 不可删 / Production 段最先砍 / Fusion 第 1 句可短化\n"
-        "   - **目标 ≤ 950 char**（留 50 余量给 user 微调）\n"
-        "5. **Lyrics 段不受 1000 char 限制**，但应保持 Suno v4.5 inline tag 语法规范\n\n"
+        f"   - **目标 ≤ {policy_snapshot['values']['style_target_chars']['value']} char**（保留配置中的人工微调余量）\n"
+        "5. **Lyrics 段不受 1000 char 限制**；按 [[Suno-汇编次序#4.1 Lyrics 结构契约 v1.1.0（新终稿与新试验稿）]] 写结构标签、独立指令与完整唱词\n\n"
         "**输出结构**：\n"
         "- `final-Suno-prompt.md` 含 §1 使用指引 + §2 Style 段（``` 包裹）+ §3 Lyrics 段（``` 包裹）"
         "+ §4 汇编决策追溯（每条补丁吸收/跳过的理由）+ §5 字符数自计明细"
@@ -311,6 +337,7 @@ def _run_aggregation(
         audit_extras={
             "mode": "aggregation",
             "has_feedback": has_feedback,
+            "effective_policy": policy_snapshot,
         },
     )
 
@@ -380,16 +407,19 @@ def _call_and_write(
         return 1
 
     extra_audit: dict = dict(audit_extras)
+    policy_snapshot = audit_extras.get("effective_policy") or resolve_project_music_policy(project)
+    style_limit = policy_snapshot["values"]["style_hard_chars"]["value"]
+    extra_audit["effective_policy"] = policy_snapshot
     # 2026-09-03 去掉 `measure_style` 开关，改按**本轮实际写了什么**判定。
     # 原先只有 aggregation 调用点传 True；量不量取决于调用点记不记得传，
     # 与产物本身无关 —— 与 `commit_and_push(paths=None)` 同一类形状。
     style_path, style_chars = _measure_style_chars(output_files)
     if style_path is not None:
         style_oversized = (
-            style_chars is not None and style_chars > _SUNO_STYLE_HARD_LIMIT
+            style_chars is not None and style_chars > style_limit
         )
         if style_chars is not None:
-            marker = (f"⚠️ 超 {_SUNO_STYLE_HARD_LIMIT}"
+            marker = (f"⚠️ 超 {style_limit}"
                       if style_oversized else "✅")
             print(f"[{ROLE}] final Style 段字符数（Python len()）: "
                   f"{style_chars} {marker}")
@@ -418,7 +448,7 @@ def _call_and_write(
             # 删掉它等于把 LLM 这一轮的产出丢了。落盘 + 失败 = 证据留下、闸门关上。
             print(
                 f"[{ROLE}] ❌ {style_path} 的 Style 段 {style_chars} char "
-                f"超硬上限 {_SUNO_STYLE_HARD_LIMIT}。这是 user 直接复制进 Suno "
+                f"超硬上限 {style_limit}。这是 user 直接复制进 Suno "
                 f"的终稿，超限即被 Suno 截断。文件已落盘供排查，但本步判失败。"
                 f"按 [[Suno-汇编次序]] 的优先级裁剪后重跑。",
                 file=sys.stderr,
@@ -434,6 +464,33 @@ def _call_and_write(
                 "outputs": written, **extra_audit,
             })
             return 1
+
+
+    if audit_extras.get("mode") == "aggregation":
+        lyrics_validation = _validate_final_lyrics(output_files, project)
+        if lyrics_validation is not None:
+            lyrics_valid = lyrics_validation.get("valid") is True
+            extra_audit.update({
+                "final_lyrics_format_valid": lyrics_valid,
+                "final_lyrics_format_issues": lyrics_validation.get("issues", []),
+            })
+            if not lyrics_valid:
+                print(
+                    f"[{ROLE}] ❌ 终稿 Lyrics 格式校验失败；文件已留盘供排查。"
+                    f"问题：{extra_audit['final_lyrics_format_issues']}",
+                    file=sys.stderr,
+                )
+                set_role_status(
+                    ROLE, status="failed",
+                    increment_consecutive_failures=True, increment_error=True,
+                    enforce_transition=False,
+                )
+                append_audit({
+                    "timestamp": utc_now(), "role": ROLE, "project": project,
+                    "task": task, "result": "failed", "error": "lyrics_format_invalid",
+                    "outputs": written, **extra_audit,
+                })
+                return 1
 
     set_role_status(ROLE, status="success", reset_counters=True)
     set_role_status(ROLE, status="idle")
